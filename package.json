@@ -1,0 +1,21 @@
+{
+  "name": "ai-dispatcher",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone AI issue dispatcher — polls a GitHub repo and runs Codex / Claude Code on labelled issues.",
+  "type": "module",
+  "bin": {
+    "ai-dispatcher": "bin/ai-dispatcher.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node bin/ai-dispatcher.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

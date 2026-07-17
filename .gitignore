@@ -1,0 +1,10 @@
+# Dependencies
+node_modules/
+
+# Local secrets and runtime state — never commit
+.env
+state/
+*.log
+
+# Build output (the service runs TypeScript directly on Node 24)
+dist/
