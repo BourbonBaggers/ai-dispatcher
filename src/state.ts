@@ -305,6 +305,13 @@ export class StateStore {
     return { ...run };
   }
 
+  /** Retention: drop every run whose id is not in `keep`, so the file cannot grow forever. */
+  pruneRuns(keep: Set<string>): void {
+    const before = this.state.runs.length;
+    this.state.runs = this.state.runs.filter((r) => keep.has(r.id));
+    if (this.state.runs.length !== before) this.persist();
+  }
+
   // ── failure records ─────────────────────────────────────────────────────────
 
   issueFailures(): IssueFailureRecord[] {
