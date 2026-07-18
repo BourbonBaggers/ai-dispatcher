@@ -7,12 +7,14 @@
  * exits non-zero with usage text.
  */
 
-import { parseCliConfig, type DispatcherConfig } from "./config.ts";
+import { parseCliConfig, expandHome, type DispatcherConfig } from "./config.ts";
 import { StateStore, LockHeldError } from "./state.ts";
 import { createLogger, type Logger } from "./logger.ts";
 import { createNotifier } from "./notify.ts";
 import { GithubClient } from "./github.ts";
 import { reconcile, runScanOnce, type DispatcherDeps } from "./dispatcher.ts";
+import { TelemetryStore } from "./telemetry.ts";
+import { buildRoutingReport } from "./report.ts";
 
 /** Sleeps for `ms`, resolving early if the abort signal fires. */
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -64,7 +66,33 @@ export function buildDeps(config: DispatcherConfig, store: StateStore, logger: L
   };
 }
 
+/**
+ * Resolves the state directory for a `report` invocation the same way the loop does:
+ * `--state-dir`, then `DISPATCHER_STATE_DIR`, then `./state`. Kept deliberately small —
+ * `report` is read-only and never needs the full loop config (no --repo, no lock).
+ */
+function stateDirFor(argv: string[], env: NodeJS.ProcessEnv): string {
+  const flagIndex = argv.indexOf("--state-dir");
+  const fromFlag = flagIndex >= 0 ? argv[flagIndex + 1] : undefined;
+  return expandHome(fromFlag ?? env.DISPATCHER_STATE_DIR ?? "./state");
+}
+
+/** The `ai-dispatcher report` subcommand: read telemetry and print the routing report. */
+export function runReport(argv: string[], env: NodeJS.ProcessEnv, out: (s: string) => void): number {
+  const dir = stateDirFor(argv, env);
+  const store = TelemetryStore.open(dir);
+  const attempts = store.allAttempts();
+  const issues = store.aggregateAll();
+  out(buildRoutingReport(attempts, issues));
+  return 0;
+}
+
 export async function main(argv: string[]): Promise<number> {
+  // `report` is a read-only subcommand that bypasses the loop config entirely.
+  if (argv[0] === "report") {
+    return runReport(argv.slice(1), process.env, (s) => process.stdout.write(`${s}\n`));
+  }
+
   const parsed = parseCliConfig(argv, process.env);
   if (!parsed.ok) {
     process.stderr.write(`${parsed.message}\n`);

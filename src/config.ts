@@ -111,6 +111,7 @@ export const USAGE = `ai-dispatcher — poll a GitHub repo and run Codex / Claud
 
 Usage:
   ai-dispatcher --repo <owner/repository> [options]
+  ai-dispatcher report [--state-dir <path>]   Print the routing analytics report.
 
 Required:
   --repo <owner/repo>        Target GitHub repository (canonical owner/repository).
