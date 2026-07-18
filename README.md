@@ -50,15 +50,41 @@ label (a mismatched pair is rejected, not guessed):
 | Label | Meaning |
 | --- | --- |
 | `agent:claude` / `agent:codex` | which CLI to launch |
-| `model:claude-opus-4.8` / `model:gpt-5.5` | the exact `--model` string; must match the agent |
+| `model:*` | the exact `--model` string; must match the agent — the curated set below |
 | `effort:low\|medium\|high\|max` | per-agent reasoning effort (`max` caps Codex at `high`); default `effort:medium` |
 | `queue jump` / `technical debt` | move the issue between priority tiers |
 | `agent-working` | the dispatcher is actively on it (added on claim, cleared on non-resumable finish) |
 | `needs-input` / `blocked` | held for a human — skipped, not worked |
 
+The `model:*` allowlist is **data-driven**: it is derived from the curated registry in
+`src/models.ts`, not hand-maintained. The live lanes are `model:claude-haiku-4.5` (fast),
+`model:claude-sonnet-5` (general / large-context / planning), `model:gpt-5.5` (complex),
+and `model:claude-opus-4.8` (frontier reserve). A disabled or future-provider registry
+entry is documentation and is not dispatchable.
+
 Labels are never passed to a shell; they are only ever looked up in frozen maps
 (`src/labels.ts`), and the constant they resolve to is what reaches the CLI. An unknown
 label simply fails to resolve and the issue is skipped with a visible reason.
+
+## Capacity-aware routing & evidence (#319)
+
+The dispatcher obeys the `model:*` label on each issue, but that label is chosen by a
+deterministic, data-driven routing rubric that routes to the **minimum viable model**,
+prefers otherwise-idle (dormant) subscription capacity, protects the frontier reserve, and
+permits cost-driven retries/handoffs. The full decision table is in
+[`ROUTING.md`](ROUTING.md) — it is the policy an issue author applies when labelling work.
+
+Every terminal run records an **attempt** into `telemetry.json` (alongside dispatcher
+state); attempts fold into per-issue records. The model is honest about what it can't
+measure: token counts are `unavailable` (the launcher emits none), capacity is `unknown`
+unless a cooldown proves exhaustion, and an issue is *successful* only when merged **and**
+deployed **and** free of material human repair — never on a clean exit or a PR alone.
+
+```bash
+# Print the routing analytics report (completed features by model, success by task
+# category, first-attempt/retry rates, frontier utilization, recommendations).
+node bin/ai-dispatcher.mjs report --state-dir ~/dispatcher/state
+```
 
 ## Requirements
 

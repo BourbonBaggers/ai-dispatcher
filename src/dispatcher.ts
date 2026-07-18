@@ -29,6 +29,8 @@ import {
 import { launchRun } from "./runner.ts";
 import { join } from "node:path";
 import { NOTIFY_PRIORITY_DEFAULT, NOTIFY_PRIORITY_HIGH, type Notifier } from "./notify.ts";
+import { modelByCliModel } from "./models.ts";
+import { UNAVAILABLE_TOKENS, type AttemptRecord, type TelemetryStore } from "./telemetry.ts";
 import type { GithubClient } from "./github.ts";
 import type { DispatcherConfig } from "./config.ts";
 import type { Logger } from "./logger.ts";
@@ -47,6 +49,8 @@ export interface DispatcherDeps {
   github: GithubClient;
   logger: Logger;
   notifier: Notifier;
+  /** Optional evidence store; when present, every terminal run records an attempt (#319). */
+  telemetry?: TelemetryStore;
   /** Injectable clock for deterministic tests. */
   now?: () => number;
 }
@@ -246,6 +250,19 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
 
   if (run.status === "abandoned") return;
 
+  // Record the attempt-level evidence for this terminal run (#319). Best-effort: an
+  // evidence-store failure must never break the dispatch loop, exactly like notifications.
+  if (deps.telemetry) {
+    try {
+      deps.telemetry.recordAttempt(attemptRecordFromRun(run, now()));
+    } catch (err) {
+      logger.warn("telemetry record failed", {
+        runId: run.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   const accounting = recordTerminalRunOutcome(store.issueFailures(), run, now());
   store.setIssueFailures(accounting.records);
   if (accounting.notification) {
@@ -275,6 +292,45 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
       )
       .catch(() => undefined);
   }
+}
+
+/**
+ * Maps a terminal run to an attempt-level telemetry record (#319). Deliberately honest
+ * about what the dispatcher actually observes: token counts are `unavailable` (the
+ * launcher control protocol emits none), and fields the run record does not carry
+ * (issue-characteristic labels, routing confidence, manual override) are left empty rather
+ * than fabricated. A resume re-enters the same run id, so the resume count disambiguates
+ * each attempt.
+ */
+export function attemptRecordFromRun(run: RunRecord, nowMs: number): AttemptRecord {
+  const model = modelByCliModel(run.cliModel);
+  const activeDurationMs =
+    run.finishedAt !== null ? Math.max(0, run.finishedAt - run.startedAt) : null;
+  return {
+    issueNumber: run.issueNumber,
+    attemptId: `${run.id}#${run.resumeCount}`,
+    provider: model?.provider ?? run.agent,
+    modelRequested: run.cliModel,
+    modelUsed: null,
+    selectedModelLabel: run.modelLabel,
+    issueCharacteristicLabels: [],
+    routingRationaleLabels: [],
+    routingConfidence: null,
+    capacityStateAtAssignment: null,
+    startedAt: run.startedAt,
+    endedAt: run.finishedAt,
+    activeDurationMs,
+    tokens: UNAVAILABLE_TOKENS,
+    cliExitCode: run.exitCode,
+    retryReason: run.trigger === "resume" ? "resume" : null,
+    testsRun: false,
+    testsPassed: null,
+    prCreated: Boolean(run.prUrl),
+    humanInterventionRequired: false,
+    frontierModelUsed: model?.frontier ?? false,
+    manualOverride: false,
+    terminalStatus: run.status,
+  };
 }
 
 /** Builds the issue comment for a finished run. */

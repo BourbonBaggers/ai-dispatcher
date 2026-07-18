@@ -38,7 +38,12 @@ because the extraction PR targets the monorepo.
 bin/ai-dispatcher.mjs     executable shim → src/main.ts
 src/
   config.ts               CLI + env parsing, repo validation (no fallback)
-  labels.ts               the frozen agent/model/effort/priority allowlist contract
+  models.ts               the curated model/provider registry — one data source (#319)
+  labels.ts               the agent/model/effort/priority allowlist; model:* derived from models.ts
+  capacity.ts             honest capacity ladder + dormancy signal (pure, #319)
+  routing.ts              minimum-viable routing rubric + cost-driven escalation (pure, #319)
+  telemetry.ts            attempt/issue evidence records + atomic store + aggregation (#319)
+  report.ts               pure Markdown routing analytics (`ai-dispatcher report`, #319)
   github.ts               gh CLI wrapper (argv arrays, repo threaded through)
   selection.ts            pure issue eligibility + priority-tier ordering
   token-exhaustion.ts     provider-owned exhaustion detection + cooldown math (pure)
@@ -48,8 +53,9 @@ src/
   capture.ts              the uncommitted-work capture DECISION (mirrors the shell)
   sanitize.ts             redaction + stream-json rendering + control-line parsing
   notify.ts  logger.ts    ntfy push + JSON line logger (both best-effort/zero-dep)
-  dispatcher.ts           the scan/claim/launch/resume/reconcile loop
-  main.ts                 entrypoint: parse → validate → open state → reconcile → loop
+  dispatcher.ts           the scan/claim/launch/resume/reconcile loop; records attempt telemetry
+  main.ts                 entrypoint: parse → validate → open state → reconcile → loop; `report` subcommand
+ROUTING.md                the routing rubric decision table (the planning-repo policy deliverable)
 scripts/
   dispatch-agent.sh       the bundled per-run launcher (repo-parameterized, fails fast)
   lib/dispatch-capture.sh the uncommitted-work safety net (sourced by the launcher)
@@ -67,6 +73,26 @@ test/                     node:test suites, one per module
 - **Comments explain WHY.** The non-obvious safety invariants (terminal-classification
   precedence, resume budget resetting on progress, capture only on a clean exit, one alert
   per cooldown window) are load-bearing — document the reason when you touch them.
+
+## Capacity-aware routing (#319)
+
+The routing layer is data-driven and pure, and it does **not** override the dispatch path:
+the dispatcher still obeys the single `model:*` label on the issue. Routing is decision
+support for *choosing* that label (the planning-repo rubric) and for *planning a retry*.
+
+- **`models.ts` is the one source of model config.** `labels.ts` derives the `model:*`
+  allowlist from it. Add or change a model there, not in routing/label code. A disabled or
+  future-provider entry is documentation and is never dispatchable (`isDispatchable`).
+- **Honesty is load-bearing.** Capacity is `unknown` unless a cooldown proves `exhausted`
+  — never a fabricated remaining-quota number. Telemetry token counts are `unavailable`
+  (the launcher emits none), and success requires merged + deployed + no human repair — a
+  clean exit or PR is not success. Do not "improve" these into optimistic fabrications.
+- **Frontier is protected.** Routing withholds frontier models unless the characteristics
+  justify them; escalation reaches frontier only as the last rung and flags
+  `requiresHumanApproval`. Any change that raises frontier usage is a human decision.
+- **Manual overrides** (`route:human-override`) are recorded but excluded from the learning
+  dataset — keep that exclusion intact.
+- The rubric itself lives in [`ROUTING.md`](ROUTING.md); keep it in sync with the code.
 
 ## The safety invariants (do not regress)
 

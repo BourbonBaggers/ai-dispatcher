@@ -7,6 +7,7 @@ import {
   selectResumable,
   shouldReleaseClaim,
   buildIssueComment,
+  attemptRecordFromRun,
   runsToKeep,
   reconcile,
   MAX_AUTO_RESUMES,
@@ -52,6 +53,44 @@ function run(overrides: Partial<RunRecord>): RunRecord {
     ...overrides,
   };
 }
+
+// ── telemetry attempt mapping (#319) ────────────────────────────────────────────
+
+test("attemptRecordFromRun maps a terminal run honestly", () => {
+  const r = run({
+    id: "run-x",
+    status: "succeeded",
+    resumeCount: 0,
+    exitCode: 0,
+    prUrl: "https://x/pull/9",
+    startedAt: 1000,
+    finishedAt: 4000,
+  });
+  const rec = attemptRecordFromRun(r, 5000);
+  assert.equal(rec.issueNumber, 1);
+  assert.equal(rec.attemptId, "run-x#0");
+  assert.equal(rec.provider, "anthropic"); // derived from the registry, not hard-coded
+  assert.equal(rec.modelRequested, "claude-opus-4-8");
+  assert.equal(rec.selectedModelLabel, "model:claude-opus-4.8");
+  assert.equal(rec.activeDurationMs, 3000);
+  assert.equal(rec.prCreated, true);
+  assert.equal(rec.frontierModelUsed, true); // opus is frontier
+  assert.equal(rec.terminalStatus, "succeeded");
+  // Honest about what the launcher does not emit.
+  assert.equal(rec.tokens.source, "unavailable");
+  assert.equal(rec.tokens.inputTokens, null);
+  assert.equal(rec.manualOverride, false);
+});
+
+test("attemptRecordFromRun disambiguates resumes and marks the retry reason", () => {
+  const rec = attemptRecordFromRun(
+    run({ id: "run-y", trigger: "resume", resumeCount: 2, status: "interrupted", finishedAt: null }),
+    9000,
+  );
+  assert.equal(rec.attemptId, "run-y#2");
+  assert.equal(rec.retryReason, "resume");
+  assert.equal(rec.activeDurationMs, null); // no finishedAt → unknown duration
+});
 
 // ── resume selection ──────────────────────────────────────────────────────────
 

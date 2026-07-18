@@ -63,6 +63,8 @@ export function buildDeps(config: DispatcherConfig, store: StateStore, logger: L
     logger,
     github: new GithubClient(config.repo),
     notifier: createNotifier({ ntfyUrl: config.ntfyUrl, ntfyTopic: config.ntfyTopic }),
+    // Evidence store lives alongside dispatcher state; every terminal run records an attempt.
+    telemetry: TelemetryStore.open(config.stateDir),
   };
 }
 
