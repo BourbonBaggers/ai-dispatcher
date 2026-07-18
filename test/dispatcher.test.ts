@@ -68,7 +68,7 @@ test("attemptRecordFromRun maps a terminal run honestly", () => {
   });
   const rec = attemptRecordFromRun(r, 5000);
   assert.equal(rec.issueNumber, 1);
-  assert.equal(rec.attemptId, "run-x#0");
+  assert.equal(rec.attemptId, "run-x#0@4000"); // terminal timestamp keeps resumes distinct
   assert.equal(rec.provider, "anthropic"); // derived from the registry, not hard-coded
   assert.equal(rec.modelRequested, "claude-opus-4-8");
   assert.equal(rec.selectedModelLabel, "model:claude-opus-4.8");
@@ -87,7 +87,7 @@ test("attemptRecordFromRun disambiguates resumes and marks the retry reason", ()
     run({ id: "run-y", trigger: "resume", resumeCount: 2, status: "interrupted", finishedAt: null }),
     9000,
   );
-  assert.equal(rec.attemptId, "run-y#2");
+  assert.equal(rec.attemptId, "run-y#2@9000"); // no finishedAt → falls back to nowMs
   assert.equal(rec.retryReason, "resume");
   assert.equal(rec.activeDurationMs, null); // no finishedAt → unknown duration
 });

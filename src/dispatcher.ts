@@ -299,8 +299,9 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
  * about what the dispatcher actually observes: token counts are `unavailable` (the
  * launcher control protocol emits none), and fields the run record does not carry
  * (issue-characteristic labels, routing confidence, manual override) are left empty rather
- * than fabricated. A resume re-enters the same run id, so the resume count disambiguates
- * each attempt.
+ * than fabricated. A resume re-enters the same run id, so the attempt id is disambiguated
+ * by the terminal timestamp — `resumeCount` alone is not unique because a resume that made
+ * progress resets it to 0, which would collide with the first attempt.
  */
 export function attemptRecordFromRun(run: RunRecord, nowMs: number): AttemptRecord {
   const model = modelByCliModel(run.cliModel);
@@ -308,7 +309,7 @@ export function attemptRecordFromRun(run: RunRecord, nowMs: number): AttemptReco
     run.finishedAt !== null ? Math.max(0, run.finishedAt - run.startedAt) : null;
   return {
     issueNumber: run.issueNumber,
-    attemptId: `${run.id}#${run.resumeCount}`,
+    attemptId: `${run.id}#${run.resumeCount}@${run.finishedAt ?? nowMs}`,
     provider: model?.provider ?? run.agent,
     modelRequested: run.cliModel,
     modelUsed: null,
