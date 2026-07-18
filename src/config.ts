@@ -1,0 +1,228 @@
+/**
+ * Configuration and CLI parsing.
+ *
+ * Repository identity is explicit and validated before anything else runs. There is
+ * no hard-coded fallback repository anywhere in the service — a missing or malformed
+ * `--repo owner/repository` fails fast with a useful error (issue #320).
+ */
+
+import { parseArgs } from "node:util";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
+
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
+/** The canonical GitHub repository form: `owner/repository`. */
+export interface RepoSlug {
+  owner: string;
+  repo: string;
+  /** `owner/repository`, exactly as gh expects it. */
+  slug: string;
+}
+
+/**
+ * GitHub `owner/name` rules, applied conservatively:
+ *   - owner: 1–39 chars, alphanumeric or single hyphens, no leading/trailing hyphen
+ *   - repo:  1–100 chars, [A-Za-z0-9._-]
+ * A slug that does not match is rejected rather than guessed at.
+ */
+const OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
+const REPO_NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
+
+export type RepoParseResult =
+  | { ok: true; value: RepoSlug }
+  | { ok: false; reason: string };
+
+/** Parses and validates a `owner/repository` string. Never throws. */
+export function parseRepoSlug(raw: string | undefined | null): RepoParseResult {
+  if (raw === undefined || raw === null || raw.trim() === "") {
+    return { ok: false, reason: "a target repository is required (--repo owner/repository)" };
+  }
+  const value = raw.trim();
+  const parts = value.split("/");
+  if (parts.length !== 2) {
+    return {
+      ok: false,
+      reason: `"${value}" is not a canonical owner/repository (expected exactly one "/")`,
+    };
+  }
+  const [owner, repo] = parts as [string, string];
+  if (!OWNER_RE.test(owner)) {
+    return { ok: false, reason: `"${owner}" is not a valid GitHub owner name` };
+  }
+  if (!REPO_NAME_RE.test(repo)) {
+    return { ok: false, reason: `"${repo}" is not a valid GitHub repository name` };
+  }
+  // Reject the disallowed bare-dot repository names outright.
+  if (repo === "." || repo === "..") {
+    return { ok: false, reason: `"${repo}" is not a valid GitHub repository name` };
+  }
+  return { ok: true, value: { owner, repo, slug: `${owner}/${repo}` } };
+}
+
+/** Expands a leading `~` to the current user's home directory. */
+export function expandHome(p: string): string {
+  if (p === "~") return homedir();
+  if (p.startsWith("~/")) return resolve(homedir(), p.slice(2));
+  return p;
+}
+
+const LOG_LEVELS: readonly LogLevel[] = ["debug", "info", "warn", "error"];
+
+function isLogLevel(value: string): value is LogLevel {
+  return (LOG_LEVELS as readonly string[]).includes(value);
+}
+
+export interface DispatcherConfig {
+  repo: RepoSlug;
+  /** Pristine mirror clone kept on origin/main; per-run checkouts are cloned from it. */
+  repoDir: string;
+  /** Parent directory for per-run agent checkouts. */
+  worktreeDir: string;
+  /** Optional checkout whose .env seeds each run checkout; null to skip. */
+  envSourceDir: string | null;
+  pollIntervalSeconds: number;
+  maxRuntimeMinutes: number;
+  stateDir: string;
+  logLevel: LogLevel;
+  /** Optional repo-specific autoship command; null when disabled (the default). */
+  autoshipCmd: string | null;
+  ntfyUrl: string | null;
+  ntfyTopic: string | null;
+  /** Run a single scan and exit, rather than looping. */
+  once: boolean;
+  /**
+   * Validate configuration and readiness, log what WOULD be dispatched, but never
+   * launch an agent or mutate GitHub. Used for safe cutover validation.
+   */
+  dryRun: boolean;
+}
+
+export interface CliParseResult {
+  ok: boolean;
+  config?: DispatcherConfig;
+  /** Populated on failure, or when --help was requested. */
+  message?: string;
+  /** True when the caller asked for --help (message is the usage text). */
+  help?: boolean;
+}
+
+export const USAGE = `ai-dispatcher — poll a GitHub repo and run Codex / Claude Code on labelled issues.
+
+Usage:
+  ai-dispatcher --repo <owner/repository> [options]
+
+Required:
+  --repo <owner/repo>        Target GitHub repository (canonical owner/repository).
+                             May also be supplied via DISPATCHER_REPO; the flag wins.
+
+Options:
+  --once                     Run a single scan and exit (default: poll forever).
+  --dry-run                  Validate + report the next dispatch without launching or
+                             mutating anything. Safe for cutover validation.
+  --interval <seconds>       Poll interval (default: DISPATCHER_POLL_INTERVAL_SECONDS or 900).
+  --max-minutes <minutes>    Per-run wall-clock budget (default: DISPATCHER_MAX_RUNTIME_MINUTES or 90).
+  --state-dir <path>         Durable state directory (default: DISPATCHER_STATE_DIR or ./state).
+  --repo-dir <path>          Mirror checkout of the target repo (default: DISPATCHER_REPO_DIR).
+  --worktree-dir <path>      Parent dir for per-run checkouts (default: DISPATCHER_WORKTREE_DIR).
+  --log-level <level>        debug | info | warn | error (default: DISPATCHER_LOG_LEVEL or info).
+  --help                     Show this message.
+
+Example:
+  ai-dispatcher --repo BourbonBaggers/internal-tools
+`;
+
+type EnvLike = Record<string, string | undefined>;
+
+function positiveInt(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
+/**
+ * Resolves CLI args + environment into a validated config. Precedence is CLI flag,
+ * then environment, then a documented default. Repository identity is the one value
+ * with no default — it must be supplied and must be valid.
+ */
+export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: argv,
+      allowPositionals: false,
+      options: {
+        repo: { type: "string" },
+        once: { type: "boolean", default: false },
+        "dry-run": { type: "boolean", default: false },
+        interval: { type: "string" },
+        "max-minutes": { type: "string" },
+        "state-dir": { type: "string" },
+        "repo-dir": { type: "string" },
+        "worktree-dir": { type: "string" },
+        "log-level": { type: "string" },
+        help: { type: "boolean", default: false },
+      },
+    });
+  } catch (err) {
+    return { ok: false, message: `${(err as Error).message}\n\n${USAGE}` };
+  }
+
+  const values = parsed.values;
+  if (values.help) return { ok: true, help: true, message: USAGE };
+
+  const repoResult = parseRepoSlug((values.repo as string | undefined) ?? env.DISPATCHER_REPO);
+  if (!repoResult.ok) {
+    return { ok: false, message: `Invalid repository: ${repoResult.reason}\n\n${USAGE}` };
+  }
+
+  const repoDir = (values["repo-dir"] as string | undefined) ?? env.DISPATCHER_REPO_DIR;
+  const worktreeDir =
+    (values["worktree-dir"] as string | undefined) ?? env.DISPATCHER_WORKTREE_DIR;
+  if (!repoDir || repoDir.trim() === "") {
+    return { ok: false, message: `A mirror checkout is required (--repo-dir or DISPATCHER_REPO_DIR).\n\n${USAGE}` };
+  }
+  if (!worktreeDir || worktreeDir.trim() === "") {
+    return {
+      ok: false,
+      message: `A worktree directory is required (--worktree-dir or DISPATCHER_WORKTREE_DIR).\n\n${USAGE}`,
+    };
+  }
+
+  const logLevelRaw =
+    (values["log-level"] as string | undefined) ?? env.DISPATCHER_LOG_LEVEL ?? "info";
+  if (!isLogLevel(logLevelRaw)) {
+    return { ok: false, message: `Invalid --log-level "${logLevelRaw}" (debug|info|warn|error).\n\n${USAGE}` };
+  }
+
+  const envSource = env.DISPATCHER_ENV_SOURCE_DIR;
+  const autoship = env.DISPATCHER_AUTOSHIP_CMD;
+  const ntfyUrl = env.NTFY_URL;
+  const ntfyTopic = env.NTFY_TOPIC;
+
+  const config: DispatcherConfig = {
+    repo: repoResult.value,
+    repoDir: expandHome(repoDir),
+    worktreeDir: expandHome(worktreeDir),
+    envSourceDir: envSource && envSource.trim() !== "" ? expandHome(envSource) : null,
+    pollIntervalSeconds: positiveInt(
+      (values.interval as string | undefined) ?? env.DISPATCHER_POLL_INTERVAL_SECONDS,
+      900,
+    ),
+    maxRuntimeMinutes: positiveInt(
+      (values["max-minutes"] as string | undefined) ?? env.DISPATCHER_MAX_RUNTIME_MINUTES,
+      90,
+    ),
+    stateDir: expandHome(
+      (values["state-dir"] as string | undefined) ?? env.DISPATCHER_STATE_DIR ?? "./state",
+    ),
+    logLevel: logLevelRaw,
+    autoshipCmd: autoship && autoship.trim() !== "" ? autoship : null,
+    ntfyUrl: ntfyUrl && ntfyUrl.trim() !== "" ? ntfyUrl : null,
+    ntfyTopic: ntfyTopic && ntfyTopic.trim() !== "" ? ntfyTopic : null,
+    once: Boolean(values.once),
+    dryRun: Boolean(values["dry-run"]),
+  };
+
+  return { ok: true, config };
+}
