@@ -8,8 +8,12 @@
  * resolve and the issue is skipped with a visible reason.
  *
  * Ported verbatim from the embedded dispatcher's config.ts (#188/#234/#249/#281) so
- * the label-driven contract #319 will extend is preserved exactly.
+ * the label-driven contract #319 extends is preserved exactly. As of #319 the
+ * `model:*` allowlist is *derived* from the data-driven registry in `models.ts` rather
+ * than hand-maintained here, so model configuration lives in one place.
  */
+
+import { dispatchableModels } from "./models.ts";
 
 /** Agents we know how to launch. */
 export const AGENT_LABELS = {
@@ -19,17 +23,27 @@ export const AGENT_LABELS = {
 
 export type DispatcherAgent = (typeof AGENT_LABELS)[keyof typeof AGENT_LABELS];
 
+function isDispatcherAgent(cli: string): cli is DispatcherAgent {
+  return cli === "codex" || cli === "claude";
+}
+
 /**
- * model:* label → the exact string handed to the CLI's --model flag.
- * Each entry also records which agent it belongs to, so a Codex model on a Claude
- * issue (or vice versa) is rejected rather than silently mis-dispatched.
+ * model:* label → the exact string handed to the CLI's --model flag, derived from the
+ * curated registry. Each entry also records which agent it belongs to, so a Codex model
+ * on a Claude issue (or vice versa) is rejected rather than silently mis-dispatched.
+ *
+ * Only enabled models on a live dispatcher agent appear here (see `isDispatchable`): a
+ * disabled or future-provider entry in the registry is documentation, not a valid label,
+ * so labelling an issue with one fails to resolve rather than mis-dispatching.
  */
-export const MODEL_LABELS: Record<string, { agent: DispatcherAgent; cliModel: string }> = {
-  // gpt-5.5-mini is intentionally absent: a Codex CLI authenticated with a ChatGPT
-  // account returns a hard 400 for that model at call time.
-  "model:gpt-5.5": { agent: "codex", cliModel: "gpt-5.5" },
-  "model:claude-opus-4.8": { agent: "claude", cliModel: "claude-opus-4-8" },
-};
+export const MODEL_LABELS: Record<string, { agent: DispatcherAgent; cliModel: string }> =
+  Object.freeze(
+    Object.fromEntries(
+      dispatchableModels()
+        .filter((m) => isDispatcherAgent(m.cli))
+        .map((m) => [m.modelLabel, { agent: m.cli as DispatcherAgent, cliModel: m.cliModel }]),
+    ),
+  );
 
 /**
  * effort:* label -> exact per-agent CLI reasoning effort.
