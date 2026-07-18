@@ -137,9 +137,12 @@ approval.** This is the non-negotiable gate on the frontier reserve.
 
 The registry is provider-neutral. To add a CLI-backed lane (e.g. a Gemini free tier):
 
-1. Add a `ModelEntry` to `MODELS` in `src/models.ts` (see the disabled `model:gemini-2.5-pro`
-   entry as a template) with its provider, pinned `cliModel`, tier, task classes, context
-   characteristics, and `capacityPool`.
+1. Add a `ModelEntry` to the shared `MODELS` registry in
+   `../../packages/types/src/ai-dispatcher-models.ts` (see the disabled
+   `model:gemini-2.5-pro` entry as a template) with its provider, pinned `cliModel`, tier,
+   task classes, context characteristics, and `capacityPool`. `src/models.ts` re-exports
+   that shared registry so standalone routing and the production embedded dispatcher
+   cannot drift.
 2. Teach the runner to launch that CLI and add its `cli` value to `LIVE_DISPATCH_CLIS`.
 3. Set `enabled: true`. The label allowlist, routing, capacity, and reporting pick it up
    from the data with no further change.
