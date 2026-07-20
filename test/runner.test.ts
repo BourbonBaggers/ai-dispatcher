@@ -10,6 +10,7 @@ import {
   type RunSignals,
 } from "../src/runner.ts";
 import type { DispatcherConfig } from "../src/config.ts";
+import { resolveAuthorAuthConfig } from "../src/author-auth.ts";
 import type { TokenExhaustionSignal } from "../src/token-exhaustion.ts";
 import { existsSync } from "node:fs";
 
@@ -62,6 +63,7 @@ function config(overrides: Partial<DispatcherConfig> = {}): DispatcherConfig {
     stateDir: "/home/dev/state",
     logLevel: "info",
     autoshipCmd: null,
+    authorAuth: resolveAuthorAuthConfig("none", undefined),
     ntfyUrl: null,
     ntfyTopic: null,
     once: false,
@@ -134,7 +136,7 @@ test("exit code 124 and 137 both classify as timed_out and resumable", () => {
   for (const code of [124, 137]) {
     const outcome = classifyRunOutcome(signals({ sawResult: false, closeCode: code }));
     assert.equal(outcome.status, "timed_out", `code ${code}`);
-    assert.match(outcome.status === "timed_out" ? outcome.summary ?? "" : "", /resume/i);
+    assert.match(outcome.status === "timed_out" ? (outcome.summary ?? "") : "", /resume/i);
   }
 });
 
@@ -148,7 +150,9 @@ test("a killed run with no result line is interrupted, not failed", () => {
 });
 
 test("a clean exit with zero commits is a failure — the agent gave up", () => {
-  const outcome = classifyRunOutcome(signals({ resultExit: 0, resultCommits: 0, resultCi: "none" }));
+  const outcome = classifyRunOutcome(
+    signals({ resultExit: 0, resultCommits: 0, resultCi: "none" }),
+  );
   assert.equal(outcome.status, "failed");
   assert.equal(outcome.exitCode, 0);
 });
@@ -161,7 +165,7 @@ test("a clean exit with commits but red CI is a failure — CI is the deciding v
 test("a clean exit with commits and pending CI succeeds but is flagged unverified", () => {
   const outcome = classifyRunOutcome(signals({ resultCi: "pending" }));
   assert.equal(outcome.status, "succeeded");
-  assert.match(outcome.status === "succeeded" ? outcome.summary ?? "" : "", /unverified/i);
+  assert.match(outcome.status === "succeeded" ? (outcome.summary ?? "") : "", /unverified/i);
 });
 
 test("a plain non-zero exit with a result line is a failure carrying the exit code", () => {

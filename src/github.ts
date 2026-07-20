@@ -18,6 +18,7 @@ export interface GithubIssue {
   title: string;
   url: string;
   labels: string[];
+  authorLogin: string | null;
 }
 
 /** Issues are pulled newest-last so the scan can prefer the oldest actionable one. */
@@ -28,6 +29,7 @@ interface RawIssue {
   title: string;
   url: string;
   labels: Array<{ name: string }>;
+  author?: { login?: string | null } | null;
 }
 
 // ── Pure argv builders (exported for unit tests: assert repo propagation) ──────
@@ -43,7 +45,7 @@ export function listIssuesArgs(slug: string): string[] {
     "--limit",
     String(ISSUE_FETCH_LIMIT),
     "--json",
-    "number,title,url,labels",
+    "number,title,url,labels,author",
   ];
 }
 
@@ -75,7 +77,9 @@ export class GithubClient {
   }
 
   /** Open issues (pull requests are excluded by `gh issue list`), oldest first. */
-  async listOpenIssues(): Promise<{ ok: true; issues: GithubIssue[] } | { ok: false; error: string }> {
+  async listOpenIssues(): Promise<
+    { ok: true; issues: GithubIssue[] } | { ok: false; error: string }
+  > {
     const result = await this.exec("gh", listIssuesArgs(this.repo.slug));
     if (!result.ok) {
       return { ok: false, error: result.stderr.trim() || `gh exited ${result.code}` };
@@ -87,6 +91,7 @@ export class GithubClient {
         title: issue.title,
         url: issue.url,
         labels: (issue.labels ?? []).map((l) => l.name),
+        authorLogin: issue.author?.login ?? null,
       }));
       // Oldest first — the repo's queue rubric works the oldest actionable issue.
       issues.sort((a, b) => a.number - b.number);

@@ -20,6 +20,7 @@ import {
   type DispatcherAgent,
 } from "./labels.ts";
 import { selectEligibleIssue } from "./selection.ts";
+import { untrustedAuthorComment, UNTRUSTED_AUTHOR_LABEL } from "./author-auth.ts";
 import { isProviderSuppressed, formatResetTime } from "./token-exhaustion.ts";
 import {
   getBlockingIssueDeferrals,
@@ -31,7 +32,7 @@ import { join } from "node:path";
 import { NOTIFY_PRIORITY_DEFAULT, NOTIFY_PRIORITY_HIGH, type Notifier } from "./notify.ts";
 import { modelByCliModel } from "./models.ts";
 import { UNAVAILABLE_TOKENS, type AttemptRecord, type TelemetryStore } from "./telemetry.ts";
-import type { GithubClient } from "./github.ts";
+import type { GithubClient, GithubIssue } from "./github.ts";
 import type { DispatcherConfig } from "./config.ts";
 import type { Logger } from "./logger.ts";
 import type { StateStore, RunRecord } from "./state.ts";
@@ -60,6 +61,29 @@ export interface ScanResult {
   message: string;
 }
 
+async function markUntrustedAuthorIssuesOnce(
+  deps: DispatcherDeps,
+  issues: GithubIssue[],
+  candidates: { issueNumber: number; eligible: boolean; reason: string }[],
+): Promise<void> {
+  const byNumber = new Map(issues.map((issue) => [issue.number, issue]));
+  const blocked = candidates.filter(
+    (candidate) => !candidate.eligible && candidate.reason.startsWith("untrusted issue author "),
+  );
+
+  for (const candidate of blocked) {
+    const issue = byNumber.get(candidate.issueNumber);
+    if (!issue || issue.labels.includes(UNTRUSTED_AUTHOR_LABEL)) continue;
+
+    await deps.github.addLabel(issue.number, UNTRUSTED_AUTHOR_LABEL);
+    await deps.github.comment(issue.number, untrustedAuthorComment(issue.authorLogin));
+    deps.logger.warn("blocked issue from untrusted author", {
+      issue: issue.number,
+      author: issue.authorLogin ?? undefined,
+    });
+  }
+}
+
 /**
  * Chooses the resumable run to pick up this scan, or null. A run is eligible only when
  * its provider is not in a token cooldown and it is still under the auto-resume cap.
@@ -70,9 +94,7 @@ export function selectResumable(
   isSuppressed: (agent: DispatcherAgent) => boolean,
   maxResumes: number,
 ): RunRecord | null {
-  return (
-    resumables.find((run) => !isSuppressed(run.agent) && run.resumeCount < maxResumes) ?? null
-  );
+  return resumables.find((run) => !isSuppressed(run.agent) && run.resumeCount < maxResumes) ?? null;
 }
 
 /**
@@ -141,7 +163,12 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
     },
     claimedByIssue,
     deferredByIssue,
+    authorAuth: config.authorAuth,
   });
+
+  if (!config.dryRun) {
+    await markUntrustedAuthorIssuesOnce(deps, listing.issues, candidates);
+  }
 
   logger.debug("scan evaluated issues", {
     total: listing.issues.length,

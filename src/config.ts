@@ -9,6 +9,7 @@
 import { parseArgs } from "node:util";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import { resolveAuthorAuthConfig, type DispatcherAuthorAuthConfig } from "./author-auth.ts";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -29,9 +30,7 @@ export interface RepoSlug {
 const OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
 const REPO_NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
 
-export type RepoParseResult =
-  | { ok: true; value: RepoSlug }
-  | { ok: false; reason: string };
+export type RepoParseResult = { ok: true; value: RepoSlug } | { ok: false; reason: string };
 
 /** Parses and validates a `owner/repository` string. Never throws. */
 export function parseRepoSlug(raw: string | undefined | null): RepoParseResult {
@@ -87,6 +86,7 @@ export interface DispatcherConfig {
   logLevel: LogLevel;
   /** Optional repo-specific autoship command; null when disabled (the default). */
   autoshipCmd: string | null;
+  authorAuth: DispatcherAuthorAuthConfig;
   ntfyUrl: string | null;
   ntfyTopic: string | null;
   /** Run a single scan and exit, rather than looping. */
@@ -126,6 +126,10 @@ Options:
   --state-dir <path>         Durable state directory (default: DISPATCHER_STATE_DIR or ./state).
   --repo-dir <path>          Mirror checkout of the target repo (default: DISPATCHER_REPO_DIR).
   --worktree-dir <path>      Parent dir for per-run checkouts (default: DISPATCHER_WORKTREE_DIR).
+  --author-auth <mode>       Issue author authorization: author-allowlist | none
+                             (default: DISPATCHER_ISSUE_AUTHOR_AUTH_MODE or author-allowlist).
+  --trusted-authors <list>   Comma-separated trusted GitHub usernames for author-allowlist
+                             (default: DISPATCHER_TRUSTED_ISSUE_AUTHORS).
   --log-level <level>        debug | info | warn | error (default: DISPATCHER_LOG_LEVEL or info).
   --help                     Show this message.
 
@@ -161,6 +165,8 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
         "state-dir": { type: "string" },
         "repo-dir": { type: "string" },
         "worktree-dir": { type: "string" },
+        "author-auth": { type: "string" },
+        "trusted-authors": { type: "string" },
         "log-level": { type: "string" },
         help: { type: "boolean", default: false },
       },
@@ -178,10 +184,12 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
   }
 
   const repoDir = (values["repo-dir"] as string | undefined) ?? env.DISPATCHER_REPO_DIR;
-  const worktreeDir =
-    (values["worktree-dir"] as string | undefined) ?? env.DISPATCHER_WORKTREE_DIR;
+  const worktreeDir = (values["worktree-dir"] as string | undefined) ?? env.DISPATCHER_WORKTREE_DIR;
   if (!repoDir || repoDir.trim() === "") {
-    return { ok: false, message: `A mirror checkout is required (--repo-dir or DISPATCHER_REPO_DIR).\n\n${USAGE}` };
+    return {
+      ok: false,
+      message: `A mirror checkout is required (--repo-dir or DISPATCHER_REPO_DIR).\n\n${USAGE}`,
+    };
   }
   if (!worktreeDir || worktreeDir.trim() === "") {
     return {
@@ -193,11 +201,18 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
   const logLevelRaw =
     (values["log-level"] as string | undefined) ?? env.DISPATCHER_LOG_LEVEL ?? "info";
   if (!isLogLevel(logLevelRaw)) {
-    return { ok: false, message: `Invalid --log-level "${logLevelRaw}" (debug|info|warn|error).\n\n${USAGE}` };
+    return {
+      ok: false,
+      message: `Invalid --log-level "${logLevelRaw}" (debug|info|warn|error).\n\n${USAGE}`,
+    };
   }
 
   const envSource = env.DISPATCHER_ENV_SOURCE_DIR;
   const autoship = env.DISPATCHER_AUTOSHIP_CMD;
+  const authorAuth = resolveAuthorAuthConfig(
+    (values["author-auth"] as string | undefined) ?? env.DISPATCHER_ISSUE_AUTHOR_AUTH_MODE,
+    (values["trusted-authors"] as string | undefined) ?? env.DISPATCHER_TRUSTED_ISSUE_AUTHORS,
+  );
   const ntfyUrl = env.NTFY_URL;
   const ntfyTopic = env.NTFY_TOPIC;
 
@@ -219,6 +234,7 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
     ),
     logLevel: logLevelRaw,
     autoshipCmd: autoship && autoship.trim() !== "" ? autoship : null,
+    authorAuth,
     ntfyUrl: ntfyUrl && ntfyUrl.trim() !== "" ? ntfyUrl : null,
     ntfyTopic: ntfyTopic && ntfyTopic.trim() !== "" ? ntfyTopic : null,
     once: Boolean(values.once),

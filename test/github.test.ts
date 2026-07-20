@@ -59,8 +59,14 @@ test("listOpenIssues parses gh JSON and sorts oldest-first", async () => {
   const { fn } = fakeExec(() =>
     ok(
       JSON.stringify([
-        { number: 9, title: "b", url: "u9", labels: [{ name: "agent:claude" }] },
-        { number: 3, title: "a", url: "u3", labels: [] },
+        {
+          number: 9,
+          title: "b",
+          url: "u9",
+          labels: [{ name: "agent:claude" }],
+          author: { login: "BourbonBaggers" },
+        },
+        { number: 3, title: "a", url: "u3", labels: [], author: { login: "octocat" } },
       ]),
     ),
   );
@@ -74,6 +80,8 @@ test("listOpenIssues parses gh JSON and sorts oldest-first", async () => {
     );
     assert.deepEqual(result.issues[0]!.labels, []);
     assert.deepEqual(result.issues[1]!.labels, ["agent:claude"]);
+    assert.equal(result.issues[0]!.authorLogin, "octocat");
+    assert.equal(result.issues[1]!.authorLogin, "BourbonBaggers");
   }
 });
 

@@ -45,14 +45,14 @@ continues.
 An issue is eligible only with exactly one supported agent label and one supported model
 label (a mismatched pair is rejected, not guessed):
 
-| Label | Meaning |
-| --- | --- |
-| `agent:claude` / `agent:codex` | which CLI to launch |
-| `model:*` | the exact `--model` string; must match the agent — the curated set below |
-| `effort:low\|medium\|high\|max` | per-agent reasoning effort (`max` caps Codex at `high`); default `effort:medium` |
-| `queue jump` / `technical debt` | move the issue between priority tiers |
-| `agent-working` | the dispatcher is actively on it (added on claim, cleared on non-resumable finish) |
-| `needs-input` / `blocked` | held for a human — skipped, not worked |
+| Label                           | Meaning                                                                            |
+| ------------------------------- | ---------------------------------------------------------------------------------- |
+| `agent:claude` / `agent:codex`  | which CLI to launch                                                                |
+| `model:*`                       | the exact `--model` string; must match the agent — the curated set below           |
+| `effort:low\|medium\|high\|max` | per-agent reasoning effort (`max` caps Codex at `high`); default `effort:medium`   |
+| `queue jump` / `technical debt` | move the issue between priority tiers                                              |
+| `agent-working`                 | the dispatcher is actively on it (added on claim, cleared on non-resumable finish) |
+| `needs-input` / `blocked`       | held for a human — skipped, not worked                                             |
 
 The `model:*` allowlist is **data-driven**: it is derived from the curated registry in
 `src/models.ts`, not hand-maintained. The live lanes are `model:claude-haiku-4.5` (fast),
@@ -75,7 +75,7 @@ permits cost-driven retries/handoffs. The full decision table is in
 Every terminal run records an **attempt** into `telemetry.json` (alongside dispatcher
 state); attempts fold into per-issue records. The model is honest about what it can't
 measure: token counts are `unavailable` (the launcher emits none), capacity is `unknown`
-unless a cooldown proves exhaustion, and an issue is *successful* only when merged **and**
+unless a cooldown proves exhaustion, and an issue is _successful_ only when merged **and**
 deployed **and** free of material human repair — never on a clean exit or a PR alone.
 
 ```bash
@@ -102,17 +102,25 @@ Configuration is CLI-flag → environment → documented default. Repository ide
 one value with no default. Copy `.env.example` to `.env` (never commit it) for the
 environment form; every variable is documented there.
 
-| Flag | Env | Default | Meaning |
-| --- | --- | --- | --- |
-| `--repo <owner/repo>` | `DISPATCHER_REPO` | *(required)* | target repository; canonical `owner/repository`, validated, no fallback |
-| `--repo-dir <path>` | `DISPATCHER_REPO_DIR` | *(required)* | pristine mirror clone kept on `origin/main` |
-| `--worktree-dir <path>` | `DISPATCHER_WORKTREE_DIR` | *(required)* | parent dir for per-run checkouts |
-| — | `DISPATCHER_ENV_SOURCE_DIR` | *(optional)* | checkout whose `.env` seeds each run checkout |
-| `--interval <seconds>` | `DISPATCHER_POLL_INTERVAL_SECONDS` | `900` | poll interval |
-| `--max-minutes <min>` | `DISPATCHER_MAX_RUNTIME_MINUTES` | `90` | per-run wall-clock budget |
-| `--state-dir <path>` | `DISPATCHER_STATE_DIR` | `./state` | durable state directory |
-| `--log-level <level>` | `DISPATCHER_LOG_LEVEL` | `info` | `debug\|info\|warn\|error` |
-| — | `NTFY_URL` / `NTFY_TOPIC` | *(optional)* | ntfy push notifications; disabled if unset |
+| Flag                       | Env                                 | Default                    | Meaning                                                                                        |
+| -------------------------- | ----------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------- |
+| `--repo <owner/repo>`      | `DISPATCHER_REPO`                   | _(required)_               | target repository; canonical `owner/repository`, validated, no fallback                        |
+| `--repo-dir <path>`        | `DISPATCHER_REPO_DIR`               | _(required)_               | pristine mirror clone kept on `origin/main`                                                    |
+| `--worktree-dir <path>`    | `DISPATCHER_WORKTREE_DIR`           | _(required)_               | parent dir for per-run checkouts                                                               |
+| —                          | `DISPATCHER_ENV_SOURCE_DIR`         | _(optional)_               | checkout whose `.env` seeds each run checkout                                                  |
+| `--interval <seconds>`     | `DISPATCHER_POLL_INTERVAL_SECONDS`  | `900`                      | poll interval                                                                                  |
+| `--max-minutes <min>`      | `DISPATCHER_MAX_RUNTIME_MINUTES`    | `90`                       | per-run wall-clock budget                                                                      |
+| `--state-dir <path>`       | `DISPATCHER_STATE_DIR`              | `./state`                  | durable state directory                                                                        |
+| `--author-auth <mode>`     | `DISPATCHER_ISSUE_AUTHOR_AUTH_MODE` | `author-allowlist`         | `author-allowlist` requires the original issue author to be trusted; `none` allows all authors |
+| `--trusted-authors <list>` | `DISPATCHER_TRUSTED_ISSUE_AUTHORS`  | _(required for allowlist)_ | comma-separated GitHub usernames, matched case-insensitively                                   |
+| `--log-level <level>`      | `DISPATCHER_LOG_LEVEL`              | `info`                     | `debug\|info\|warn\|error`                                                                     |
+| —                          | `NTFY_URL` / `NTFY_TOPIC`           | _(optional)_               | ntfy push notifications; disabled if unset                                                     |
+
+`author-allowlist` fails closed when trusted authors are missing or malformed. Untrusted
+issues are left open, marked `needs-input`, and commented once. The check uses only the
+original GitHub issue author's login; labels, assignees, comments, issue edits, branch
+contents, commit authors, and model output cannot override it. This mitigates arbitrary
+public issue submission, not compromise of a trusted GitHub account.
 
 ## Running
 

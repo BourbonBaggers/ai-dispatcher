@@ -68,6 +68,8 @@ test("parseCliConfig resolves a full config with the flag winning over env", () 
     DISPATCHER_REPO_DIR: "/mirror",
     DISPATCHER_WORKTREE_DIR: "/worktrees",
     DISPATCHER_MAX_RUNTIME_MINUTES: "45",
+    DISPATCHER_ISSUE_AUTHOR_AUTH_MODE: "author-allowlist",
+    DISPATCHER_TRUSTED_ISSUE_AUTHORS: "BourbonBaggers",
   });
   assert.equal(result.ok, true);
   const c = result.config!;
@@ -76,6 +78,7 @@ test("parseCliConfig resolves a full config with the flag winning over env", () 
   assert.equal(c.pollIntervalSeconds, 120);
   assert.equal(c.maxRuntimeMinutes, 45);
   assert.equal(c.dryRun, false);
+  assert.equal(c.authorAuth.ok && c.authorAuth.mode, "author-allowlist");
 });
 
 test("parseCliConfig falls back to DISPATCHER_REPO when no flag is given", () => {
@@ -86,6 +89,42 @@ test("parseCliConfig falls back to DISPATCHER_REPO when no flag is given", () =>
   });
   assert.equal(result.ok, true);
   assert.equal(result.config!.repo.slug, "acme/widgets");
+});
+
+test("parseCliConfig preserves explicit unrestricted author mode", () => {
+  const result = parseCliConfig(["--repo", "acme/widgets", "--author-auth", "none"], {
+    DISPATCHER_REPO_DIR: "/mirror",
+    DISPATCHER_WORKTREE_DIR: "/worktrees",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.config!.authorAuth.ok && result.config!.authorAuth.mode, "none");
+});
+
+test("parseCliConfig fails closed inside author-allowlist mode", () => {
+  const missing = parseCliConfig(["--repo", "acme/widgets"], {
+    DISPATCHER_REPO_DIR: "/mirror",
+    DISPATCHER_WORKTREE_DIR: "/worktrees",
+  });
+  assert.equal(missing.ok, true);
+  assert.equal(missing.config!.authorAuth.ok, false);
+
+  const malformed = parseCliConfig(
+    [
+      "--repo",
+      "acme/widgets",
+      "--author-auth",
+      "author-allowlist",
+      "--trusted-authors",
+      "bad login",
+    ],
+    {
+      DISPATCHER_REPO_DIR: "/mirror",
+      DISPATCHER_WORKTREE_DIR: "/worktrees",
+    },
+  );
+  assert.equal(malformed.ok, true);
+  assert.equal(malformed.config!.authorAuth.ok, false);
 });
 
 test("parseCliConfig requires repo-dir and worktree-dir", () => {

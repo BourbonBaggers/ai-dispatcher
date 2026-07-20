@@ -23,6 +23,7 @@ import {
   type ResolvedAssignment,
 } from "./labels.ts";
 import type { GithubIssue } from "./github.ts";
+import { authorizeIssueAuthor, type DispatcherAuthorAuthConfig } from "./author-auth.ts";
 
 export interface DispatcherCandidate {
   issueNumber: number;
@@ -48,6 +49,7 @@ export interface SelectionContext {
   claimedByIssue: Map<number, string>;
   /** issueNumber → human reason a failure deferral is currently blocking it. */
   deferredByIssue: Map<number, string>;
+  authorAuth?: DispatcherAuthorAuthConfig;
 }
 
 /**
@@ -70,6 +72,19 @@ export function selectEligibleIssue(
     }
 
     const agent = assignment.value.agent;
+
+    const author = authorizeIssueAuthor(
+      issue.authorLogin,
+      context.authorAuth ?? {
+        ok: true,
+        mode: "none",
+        trustedAuthors: new Set(),
+      },
+    );
+    if (!author.ok) {
+      candidates.push(ineligible(issue, author.reason));
+      continue;
+    }
 
     if (context.providerSuppressed(agent)) {
       candidates.push(ineligible(issue, context.suppressedReason(agent)));
@@ -110,7 +125,13 @@ export function selectEligibleIssue(
       reason: `ready for ${agent} (${assignment.value.cliModel}, effort ${assignment.value.cliEffort})`,
     });
 
-    targets.push({ issue, assignment: assignment.value, staleWorkingLabel, priorityTier, issueIndex });
+    targets.push({
+      issue,
+      assignment: assignment.value,
+      staleWorkingLabel,
+      priorityTier,
+      issueIndex,
+    });
   }
 
   const target =
