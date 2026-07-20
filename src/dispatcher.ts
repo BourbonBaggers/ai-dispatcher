@@ -30,6 +30,7 @@ import {
 import { launchRun } from "./runner.ts";
 import { join } from "node:path";
 import { NOTIFY_PRIORITY_DEFAULT, NOTIFY_PRIORITY_HIGH, type Notifier } from "./notify.ts";
+import { autoshipRun, type ShipRunner } from "./autoship.ts";
 import { modelByCliModel } from "./models.ts";
 import { UNAVAILABLE_TOKENS, type AttemptRecord, type TelemetryStore } from "./telemetry.ts";
 import type { GithubClient, GithubIssue } from "./github.ts";
@@ -50,6 +51,11 @@ export interface DispatcherDeps {
   github: GithubClient;
   logger: Logger;
   notifier: Notifier;
+  /**
+   * Runs the repo-specific autoship command. Optional: when omitted, or when
+   * config.autoshipCmd is null, autoship is inert and every run stops at its PR.
+   */
+  ship?: ShipRunner;
   /** Optional evidence store; when present, every terminal run records an attempt (#319). */
   telemetry?: TelemetryStore;
   /** Injectable clock for deterministic tests. */
@@ -306,6 +312,31 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
   await github.comment(run.issueNumber, buildIssueComment(run, resumable, accounting.summary));
 
   logger.info("run finalized", { runId: run.id, issue: run.issueNumber, status: run.status });
+
+  // Autoship: for a green-CI PR success, merge + deploy behind the data-loss gate. Inert
+  // unless both a ship runner and config.autoshipCmd are present; self-guards otherwise.
+  if (deps.ship) {
+    try {
+      const outcome = await autoshipRun(
+        {
+          github,
+          ship: deps.ship,
+          notifier,
+          logger,
+          autoshipCmd: deps.config.autoshipCmd,
+          repoSlug: deps.config.repo.slug,
+        },
+        run,
+      );
+      logger.info("autoship outcome", { runId: run.id, issue: run.issueNumber, action: outcome.action });
+    } catch (err) {
+      // An autoship failure must never break the loop; it has its own ntfy path.
+      logger.error("autoship threw", {
+        runId: run.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 
   // Token exhaustion already sent its single notification through the cooldown path;
   // re-sending here would defeat the one-alert-per-window guarantee.

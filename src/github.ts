@@ -119,4 +119,23 @@ export class GithubClient {
     const result = await this.exec("gh", issueStateArgs(this.repo.slug, issue));
     return result.ok ? result.stdout.trim() || "UNKNOWN" : "UNKNOWN";
   }
+
+  /**
+   * The REAL CI verdict for a PR, read from  exit status — never the
+   * agent's self-report.  exits 0 when all required checks pass, 8 while
+   * any are still pending, and non-zero-non-8 when one has failed. Autoship gates on this
+   * fresh reading at ship time; a verdict observed minutes earlier is not trusted.
+   */
+  async prChecksState(pr: number): Promise<"pass" | "pending" | "fail"> {
+    const result = await this.exec("gh", ["pr", "checks", String(pr), "--repo", this.repo.slug]);
+    if (result.code === 0) return "pass";
+    if (result.code === 8) return "pending";
+    return "fail";
+  }
+
+  /** The PR's unified diff, or null if it could not be read (the gate then fails safe). */
+  async prDiff(pr: number): Promise<string | null> {
+    const result = await this.exec("gh", ["pr", "diff", String(pr), "--repo", this.repo.slug]);
+    return result.ok ? result.stdout : null;
+  }
 }
