@@ -136,6 +136,8 @@ node bin/ai-dispatcher.mjs --repo owner/repo --dry-run
 node bin/ai-dispatcher.mjs --repo owner/repo --interval 900
 ```
 
+The poll interval is configurable with `--interval` (in seconds) and defaults to 900 seconds if not specified.
+
 Installed as a bin (`npm link` or `npm i -g`), the same commands are `ai-dispatcher …`.
 
 ### As a service (systemd)
