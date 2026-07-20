@@ -150,10 +150,14 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=<operator>
 WorkingDirectory=/home/<operator>/ai-dispatcher
 EnvironmentFile=/home/<operator>/ai-dispatcher/.env
-ExecStart=/usr/bin/node bin/ai-dispatcher.mjs --repo owner/repo
+# REQUIRED. The dispatcher spawns gh, node/npm, codex, and claude by name. A systemd
+# service does NOT inherit your login PATH, so without this it cannot find them and every
+# scan dies with "gh exited 1". Point PATH at wherever those CLIs actually live -- gh is
+# often in ~/bin and the Node CLIs under an nvm bin. git is on the default PATH already.
+Environment=PATH=/home/<operator>/bin:/home/<operator>/.nvm/versions/node/<ver>/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/<operator>/.nvm/versions/node/<ver>/bin/node bin/ai-dispatcher.mjs --repo owner/repo --interval 900
 Restart=on-failure
 RestartSec=30
 # SIGTERM triggers a graceful shutdown: the in-flight run finishes its current agent,
@@ -165,6 +169,12 @@ WantedBy=multi-user.target
 ```
 
 Logs are one JSON object per line on stdout, ready for `journalctl`/`docker logs`.
+
+
+**Running more than one repo.** One process polls one --repo. To dispatch several repos,
+run one unit per repo, each with its OWN DISPATCHER_STATE_DIR, DISPATCHER_REPO_DIR, and
+DISPATCHER_WORKTREE_DIR (the state dir carries the single-instance lock, so shared dirs
+collide). Autoship, when enabled, is per-instance via DISPATCHER_AUTOSHIP_CMD.
 
 ## State model
 
