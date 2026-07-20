@@ -9,13 +9,11 @@ It is extracted from the AI Issue Dispatcher that lived inside the
 `BourbonBaggers/internal-tools` monorepo (issues #188/#232/#234/#245/#249/#281/#307). The
 behaviour is ported before it is extended; the one intentional change is that the target
 repository is now an explicit, required argument with **no hard-coded fallback** (issue
-#320). This package is self-contained and structured to be lifted into its own repository
-at `~/Developer/ai-dispatcher` verbatim.
+#320). This package is self-contained: nothing here imports from the monorepo.
 
-> **Its final home is its own repo.** It currently lives under
-> `services/ai-dispatcher/` in the monorepo only because the extraction PR targets that
-> repo and a single PR cannot contain a sibling git repository. Nothing here imports from
-> the monorepo.
+> **This repository is the dispatcher's only home.** The extraction is complete — the
+> embedded dispatcher has been removed from `internal-tools` along with its Postgres
+> tables. Do not copy this service back into that monorepo; see AGENTS.md.
 
 ## What it does
 
@@ -201,5 +199,7 @@ Removing the monorepo's embedded dispatcher is a **human-gated** follow-up, not 
 the extraction PR (it involves a destructive Postgres migration and would kill the running
 dispatcher mid-flight). The full procedure — proving the standalone service operational,
 then dropping the `Dispatcher*` tables and the API routes/cron — is in the target repo at
-[`docs/runbooks/ai-dispatcher-cutover.md`](../../docs/runbooks/ai-dispatcher-cutover.md).
-This is also the prerequisite for issue #319.
+[`docs/runbooks/ai-dispatcher-cutover.md`](https://github.com/BourbonBaggers/internal-tools/blob/main/docs/runbooks/ai-dispatcher-cutover.md).
+
+**This cutover is done.** It is retained as the historical record of how the split was
+performed.

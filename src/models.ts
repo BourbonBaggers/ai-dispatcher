@@ -3,9 +3,9 @@
  * standalone dispatcher.
  *
  * The standalone service must remain installable and typecheckable without the
- * `internal-tools` monorepo. The still-active embedded dispatcher consumes a mirrored
- * compatibility catalog under `packages/types`; regression tests compare the two live
- * label sets so migration-era drift fails CI instead of silently starving issues.
+ * `internal-tools` monorepo, so this catalog is self-contained and has no external
+ * imports. The embedded dispatcher that once mirrored it under `packages/types` has
+ * been removed; this file is now the single authority for the model catalog.
  */
 
 export const MODEL_TIERS = ["fast", "general", "complex", "frontier"] as const;

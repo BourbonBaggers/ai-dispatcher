@@ -7,9 +7,8 @@ the agents it launches). Read it before changing code here.
 
 A standalone, self-contained extraction of the AI Issue Dispatcher that used to live
 inside `BourbonBaggers/internal-tools` (issue #320). It polls a GitHub repo and runs Codex
-/ Claude Code on labelled issues, ending at a draft PR. Its final home is its own repo
-(`~/Developer/ai-dispatcher`); it currently sits under `services/ai-dispatcher/` only
-because the extraction PR targets the monorepo.
+/ Claude Code on labelled issues, ending at a draft PR. This repository is its only
+home: the embedded copy in `internal-tools` has been removed.
 
 ## Hard rules
 
