@@ -55,4 +55,4 @@ jobs:
         with:
           fetch-depth: 0
       - name: Scan for secrets
-        run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:latest detect --source=/repo --redact --verbose
+        run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:latest detect --source=/repo --config=/repo/.gitleaks.toml --redact --verbose

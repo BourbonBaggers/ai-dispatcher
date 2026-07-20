@@ -1,0 +1,17 @@
+# gitleaks configuration for ai-dispatcher.
+#
+# The service's whole job includes redacting credentials out of agent output, so its
+# redaction tests necessarily contain synthetic, token-shaped strings. Those fixtures
+# are the *expected input* to the scrubber — they are not credentials and never were.
+# Allowlist that one file rather than weakening the default rule set everywhere.
+
+title = "ai-dispatcher"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic token-shaped fixtures used to test the redaction helper"
+paths = [
+  '''test/sanitize\.test\.ts''',
+]
