@@ -29,7 +29,7 @@ jobs:
       - name: Shellcheck the bundled launch scripts
         run: |
           sudo apt-get update -qq && sudo apt-get install -y shellcheck
-          shellcheck --severity=error --shell=bash scripts/dispatch-agent.sh scripts/lib/dispatch-capture.sh
+          shellcheck --severity=error --shell=bash scripts/*.sh scripts/lib/*.sh
 
   # Guard the extraction. The dispatcher was split out of BourbonBaggers/internal-tools;
   # re-introducing a dependency on that monorepo would silently un-do the separation and

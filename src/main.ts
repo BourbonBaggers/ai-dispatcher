@@ -13,6 +13,7 @@ import { createLogger, type Logger } from "./logger.ts";
 import { createNotifier } from "./notify.ts";
 import { GithubClient } from "./github.ts";
 import { reconcile, runScanOnce, type DispatcherDeps } from "./dispatcher.ts";
+import { run } from "./exec.ts";
 import { TelemetryStore } from "./telemetry.ts";
 import { buildRoutingReport } from "./report.ts";
 
@@ -65,6 +66,14 @@ export function buildDeps(config: DispatcherConfig, store: StateStore, logger: L
     notifier: createNotifier({ ntfyUrl: config.ntfyUrl, ntfyTopic: config.ntfyTopic }),
     // Evidence store lives alongside dispatcher state; every terminal run records an attempt.
     telemetry: TelemetryStore.open(config.stateDir),
+    // Autoship runner: invokes the configured ship command with a bash login shell so it
+    // can source .env and reach nvm/gh, with a generous budget for deploy + health-check.
+    // Inert unless config.autoshipCmd is set (autoshipRun self-guards on that).
+    ship: (command, env) =>
+      run("bash", ["-lc", command], {
+        env,
+        timeoutMs: 20 * 60_000,
+      }),
   };
 }
 
