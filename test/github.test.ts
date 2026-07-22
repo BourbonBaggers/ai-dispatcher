@@ -6,6 +6,8 @@ import {
   removeLabelArgs,
   commentArgs,
   issueStateArgs,
+  prChecksArgs,
+  prMergeInfoArgs,
   GithubClient,
 } from "../src/github.ts";
 import type { ExecFn, ExecResult } from "../src/exec.ts";
@@ -20,6 +22,8 @@ test("every gh argv builder threads --repo <slug> through", () => {
     removeLabelArgs(SLUG, 5, "agent-working"),
     commentArgs(SLUG, 5),
     issueStateArgs(SLUG, 5),
+    prChecksArgs(SLUG, 7),
+    prMergeInfoArgs(SLUG, 7),
   ];
   for (const args of builders) {
     const idx = args.indexOf("--repo");
@@ -109,4 +113,34 @@ test("listOpenIssues reports an error on unparseable JSON", async () => {
   const client = new GithubClient(repo.ok ? repo.value : (undefined as never), fn);
   const result = await client.listOpenIssues();
   assert.equal(result.ok, false);
+});
+
+test("prMergeInfo parses structured PR mergeability fields", async () => {
+  const repo = parseRepoSlug(SLUG);
+  const { fn } = fakeExec(() =>
+    ok(
+      JSON.stringify({
+        baseRefName: "main",
+        headRefName: "issue-4-x",
+        isDraft: false,
+        mergeStateStatus: "DIRTY",
+        reviewDecision: null,
+      }),
+    ),
+  );
+  const client = new GithubClient(repo.ok ? repo.value : (undefined as never), fn);
+  assert.deepEqual(await client.prMergeInfo(4), {
+    baseRefName: "main",
+    headRefName: "issue-4-x",
+    isDraft: false,
+    mergeStateStatus: "DIRTY",
+    reviewDecision: null,
+  });
+});
+
+test("prMergeInfo fails closed on malformed JSON", async () => {
+  const repo = parseRepoSlug(SLUG);
+  const { fn } = fakeExec(() => ok("{}"));
+  const client = new GithubClient(repo.ok ? repo.value : (undefined as never), fn);
+  assert.equal(await client.prMergeInfo(4), null);
 });

@@ -101,6 +101,26 @@ test("parseCliConfig preserves explicit unrestricted author mode", () => {
   assert.equal(result.config!.authorAuth.ok && result.config!.authorAuth.mode, "none");
 });
 
+test("parseCliConfig resolves generated-conflict recovery settings from env", () => {
+  const result = parseCliConfig(["--repo", "acme/widgets"], {
+    DISPATCHER_REPO_DIR: "/mirror",
+    DISPATCHER_WORKTREE_DIR: "/worktrees",
+    DISPATCHER_GENERATED_CONFLICT_ALLOWLIST: "docs/memory.md,docs/researcher.md",
+    DISPATCHER_GENERATED_CONFLICT_REGEN_CMD: "npm run docs:generate",
+    DISPATCHER_GENERATED_CONFLICT_MAX_ATTEMPTS: "2",
+    DISPATCHER_GENERATED_CONFLICT_CI_WAIT_SECONDS: "120",
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.config!.generatedConflictAllowlist, [
+    "docs/memory.md",
+    "docs/researcher.md",
+  ]);
+  assert.equal(result.config!.generatedConflictRegenCmd, "npm run docs:generate");
+  assert.equal(result.config!.generatedConflictMaxAttempts, 2);
+  assert.equal(result.config!.generatedConflictCiWaitSeconds, 120);
+});
+
 test("parseCliConfig fails closed inside author-allowlist mode", () => {
   const missing = parseCliConfig(["--repo", "acme/widgets"], {
     DISPATCHER_REPO_DIR: "/mirror",
