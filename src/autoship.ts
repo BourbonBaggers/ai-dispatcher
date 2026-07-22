@@ -24,10 +24,16 @@
  */
 
 import { assessDataLossRisk, parseUnifiedDiff } from "./autoship-gate.ts";
+import {
+  repairGeneratedFileConflicts,
+  type GeneratedConflictRepairRequest,
+  type GeneratedConflictRepairResult,
+} from "./generated-conflict-repair.ts";
 import type { RunRecord } from "./state.ts";
 import type { ExecResult } from "./exec.ts";
 import { NOTIFY_PRIORITY_DEFAULT, NOTIFY_PRIORITY_HIGH, type Notifier } from "./notify.ts";
 import type { Logger } from "./logger.ts";
+import type { GithubPrMergeInfo } from "./github.ts";
 
 /** Label left on a PR that autoship refused to ship, so it is easy to find and requeue. */
 export const AUTOSHIP_HELD_LABEL = "autoship-held";
@@ -35,6 +41,8 @@ export const AUTOSHIP_HELD_LABEL = "autoship-held";
 /** The GitHub surface autoship needs. A subset of GithubClient, so tests inject a fake. */
 export interface AutoshipGithub {
   prChecksState(pr: number): Promise<"pass" | "pending" | "fail">;
+  waitForPrChecks(pr: number, timeoutSeconds: number): Promise<"pass" | "pending" | "fail">;
+  prMergeInfo(pr: number): Promise<GithubPrMergeInfo | null>;
   prDiff(pr: number): Promise<string | null>;
   comment(issue: number, body: string): Promise<boolean>;
   addLabel(issue: number, label: string): Promise<boolean>;
@@ -55,12 +63,21 @@ export interface AutoshipDeps {
   autoshipCmd: string | null;
   /** owner/repository, forwarded to the ship command. */
   repoSlug: string;
+  generatedConflictAllowlist: readonly string[];
+  generatedConflictRegenCmd: string | null;
+  generatedConflictMaxAttempts: number;
+  generatedConflictCiWaitSeconds: number;
+  repairGeneratedConflicts?: (
+    request: GeneratedConflictRepairRequest,
+  ) => Promise<GeneratedConflictRepairResult>;
 }
 
 export type AutoshipOutcome =
   | { action: "skipped"; reason: string }
   | { action: "ci_not_green"; state: "pending" | "fail" }
   | { action: "held"; reasons: string[] }
+  | { action: "merge_blocked"; reason: string }
+  | { action: "conflict_recovery_failed"; reason: string; conflictPaths: string[] }
   | { action: "shipped" }
   | { action: "ship_failed"; code: number | null; detail: string };
 
@@ -85,6 +102,21 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   if (ci !== "pass") {
     logger.info("autoship: CI not green, not shipping", { issue: run.issueNumber, pr, ci });
     return { action: "ci_not_green", state: ci };
+  }
+
+  const mergeInfo = await github.prMergeInfo(pr);
+  if (!mergeInfo) {
+    return await mergeBlocked(deps, run, pr, "PR mergeability could not be read");
+  }
+  if (mergeInfo.isDraft) {
+    return await mergeBlocked(deps, run, pr, "PR is still a draft");
+  }
+  if (mergeInfo.reviewDecision === "REVIEW_REQUIRED") {
+    return await mergeBlocked(deps, run, pr, "PR requires review approval");
+  }
+  if (mergeInfo.mergeStateStatus === "DIRTY") {
+    const recovered = await recoverGeneratedConflicts(deps, run, pr, mergeInfo);
+    if (recovered.action !== "recovered") return recovered.outcome;
   }
 
   // 3. Data-loss gate. Unreadable diff → hold (fail safe).
@@ -126,6 +158,135 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
     .send(`Autoship: shipped #${run.issueNumber}`, `PR #${pr} merged and deployed.`, NOTIFY_PRIORITY_DEFAULT)
     .catch(() => undefined);
   return { action: "shipped" };
+}
+
+async function recoverGeneratedConflicts(
+  deps: AutoshipDeps,
+  run: RunRecord,
+  pr: number,
+  mergeInfo: GithubPrMergeInfo,
+): Promise<
+  | { action: "recovered" }
+  | { action: "failed"; outcome: Extract<AutoshipOutcome, { action: "conflict_recovery_failed" | "ci_not_green" }> }
+> {
+  const { github, logger, notifier } = deps;
+  const repair = deps.repairGeneratedConflicts ?? ((request) => repairGeneratedFileConflicts(request));
+  logger.warn("autoship: PR has merge conflicts; evaluating generated-file recovery", {
+    issue: run.issueNumber,
+    pr,
+  });
+
+  const result = await repair({
+    repoSlug: deps.repoSlug,
+    pr,
+    baseRefName: mergeInfo.baseRefName,
+    headRefName: mergeInfo.headRefName,
+    allowlistedPaths: deps.generatedConflictAllowlist,
+    regenerationCommand: deps.generatedConflictRegenCmd,
+    maxAttempts: deps.generatedConflictMaxAttempts,
+  });
+
+  if (!result.ok) {
+    logger.warn("autoship: generated-file conflict recovery refused or failed", {
+      issue: run.issueNumber,
+      pr,
+      conflicts: result.conflictPaths,
+      reason: result.reason,
+    });
+    await github
+      .comment(
+        run.issueNumber,
+        [
+          "## Autoship held — merge conflicts need review",
+          "",
+          "CI is green, but the PR is not mergeable. Automatic generated-file conflict",
+          "recovery did not run to completion.",
+          "",
+          `Reason: ${result.reason}`,
+          "",
+          ...result.conflictPaths.map((path) => `- ${path}`),
+        ].join("\n"),
+      )
+      .catch(() => false);
+    await notifier
+      .send(
+        `Autoship HELD #${run.issueNumber}`,
+        `PR #${pr} has merge conflicts that were not auto-recovered: ${result.reason}`,
+        NOTIFY_PRIORITY_HIGH,
+      )
+      .catch(() => undefined);
+    return {
+      action: "failed",
+      outcome: {
+        action: "conflict_recovery_failed",
+        reason: result.reason,
+        conflictPaths: result.conflictPaths,
+      },
+    };
+  }
+
+  logger.info("autoship: recovered generated-file conflicts", {
+    issue: run.issueNumber,
+    pr,
+    discardedPaths: result.discardedPaths,
+    commit: result.commit,
+  });
+  await github
+    .comment(
+      run.issueNumber,
+      [
+        "## Autoship recovered generated-file conflicts",
+        "",
+        "The PR was rebuilt from the current base branch. Stale generated files were",
+        "discarded and regenerated before CI was rerun.",
+        "",
+        `Repair commit: \`${result.commit}\``,
+        "",
+        ...result.discardedPaths.map((path) => `- ${path}`),
+      ].join("\n"),
+    )
+    .catch(() => false);
+  await notifier
+    .send(
+      `Autoship: recovered #${run.issueNumber}`,
+      `PR #${pr} generated-file conflicts repaired; waiting for CI before merge.`,
+      NOTIFY_PRIORITY_DEFAULT,
+    )
+    .catch(() => undefined);
+
+  const ci = await github.waitForPrChecks(pr, deps.generatedConflictCiWaitSeconds);
+  if (ci !== "pass") {
+    logger.info("autoship: repaired PR CI not green, not shipping", { issue: run.issueNumber, pr, ci });
+    return { action: "failed", outcome: { action: "ci_not_green", state: ci } };
+  }
+
+  return { action: "recovered" };
+}
+
+async function mergeBlocked(
+  deps: AutoshipDeps,
+  run: RunRecord,
+  pr: number,
+  reason: string,
+): Promise<AutoshipOutcome> {
+  const { logger, notifier, github } = deps;
+  logger.warn("autoship: PR is not mergeable", { issue: run.issueNumber, pr, reason });
+  await github
+    .comment(
+      run.issueNumber,
+      [
+        "## Autoship held — PR is not mergeable",
+        "",
+        reason,
+        "",
+        "The dispatcher did not attempt generated-file conflict recovery.",
+      ].join("\n"),
+    )
+    .catch(() => false);
+  await notifier
+    .send(`Autoship HELD #${run.issueNumber}`, `PR #${pr} is not mergeable: ${reason}`, NOTIFY_PRIORITY_HIGH)
+    .catch(() => undefined);
+  return { action: "merge_blocked", reason };
 }
 
 /** Record a hold: label the PR, comment why, ntfy, and leave it open for a human. */

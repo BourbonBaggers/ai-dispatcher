@@ -325,6 +325,10 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
           logger,
           autoshipCmd: deps.config.autoshipCmd,
           repoSlug: deps.config.repo.slug,
+          generatedConflictAllowlist: deps.config.generatedConflictAllowlist,
+          generatedConflictRegenCmd: deps.config.generatedConflictRegenCmd,
+          generatedConflictMaxAttempts: deps.config.generatedConflictMaxAttempts,
+          generatedConflictCiWaitSeconds: deps.config.generatedConflictCiWaitSeconds,
         },
         run,
       );
