@@ -21,6 +21,14 @@ export interface GithubIssue {
   authorLogin: string | null;
 }
 
+export interface GithubPrMergeInfo {
+  baseRefName: string;
+  headRefName: string;
+  isDraft: boolean;
+  mergeStateStatus: string;
+  reviewDecision: string | null;
+}
+
 /** Issues are pulled newest-last so the scan can prefer the oldest actionable one. */
 const ISSUE_FETCH_LIMIT = 100;
 
@@ -63,6 +71,22 @@ export function commentArgs(slug: string, issue: number): string[] {
 
 export function issueStateArgs(slug: string, issue: number): string[] {
   return ["issue", "view", String(issue), "--repo", slug, "--json", "state", "--jq", ".state"];
+}
+
+export function prMergeInfoArgs(slug: string, pr: number): string[] {
+  return [
+    "pr",
+    "view",
+    String(pr),
+    "--repo",
+    slug,
+    "--json",
+    "baseRefName,headRefName,isDraft,mergeStateStatus,reviewDecision",
+  ];
+}
+
+export function prChecksArgs(slug: string, pr: number): string[] {
+  return ["pr", "checks", String(pr), "--repo", slug];
 }
 
 // ── Client ─────────────────────────────────────────────────────────────────────
@@ -127,10 +151,51 @@ export class GithubClient {
    * fresh reading at ship time; a verdict observed minutes earlier is not trusted.
    */
   async prChecksState(pr: number): Promise<"pass" | "pending" | "fail"> {
-    const result = await this.exec("gh", ["pr", "checks", String(pr), "--repo", this.repo.slug]);
+    const result = await this.exec("gh", prChecksArgs(this.repo.slug, pr));
     if (result.code === 0) return "pass";
     if (result.code === 8) return "pending";
     return "fail";
+  }
+
+  async waitForPrChecks(
+    pr: number,
+    timeoutSeconds: number,
+    pollSeconds = 20,
+  ): Promise<"pass" | "pending" | "fail"> {
+    const deadline = Date.now() + Math.max(1, timeoutSeconds) * 1000;
+    for (;;) {
+      const state = await this.prChecksState(pr);
+      if (state !== "pending") return state;
+      if (Date.now() >= deadline) return "pending";
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.max(1, pollSeconds) * 1000),
+      );
+    }
+  }
+
+  async prMergeInfo(pr: number): Promise<GithubPrMergeInfo | null> {
+    const result = await this.exec("gh", prMergeInfoArgs(this.repo.slug, pr));
+    if (!result.ok) return null;
+    try {
+      const raw = JSON.parse(result.stdout.trim()) as Partial<GithubPrMergeInfo>;
+      if (
+        typeof raw.baseRefName !== "string" ||
+        typeof raw.headRefName !== "string" ||
+        typeof raw.isDraft !== "boolean" ||
+        typeof raw.mergeStateStatus !== "string"
+      ) {
+        return null;
+      }
+      return {
+        baseRefName: raw.baseRefName,
+        headRefName: raw.headRefName,
+        isDraft: raw.isDraft,
+        mergeStateStatus: raw.mergeStateStatus,
+        reviewDecision: typeof raw.reviewDecision === "string" ? raw.reviewDecision : null,
+      };
+    } catch {
+      return null;
+    }
   }
 
   /** The PR's unified diff, or null if it could not be read (the gate then fails safe). */

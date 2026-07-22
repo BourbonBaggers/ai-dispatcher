@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { autoshipRun, AUTOSHIP_HELD_LABEL, type AutoshipDeps } from "../src/autoship.ts";
 import type { ExecResult } from "../src/exec.ts";
 import type { RunRecord } from "../src/state.ts";
+import type { GeneratedConflictRepairResult } from "../src/generated-conflict-repair.ts";
 
 const ok: ExecResult = { ok: true, stdout: "", stderr: "", code: 0 };
 
@@ -24,32 +25,69 @@ interface Harness {
   comments: string[];
   labels: string[];
   pushes: { title: string; priority: number }[];
+  repairs: number;
 }
 
 function harness(opts: {
   autoshipCmd?: string | null;
   ci?: "pass" | "pending" | "fail";
+  waitedCi?: "pass" | "pending" | "fail";
+  mergeStateStatus?: string;
+  isDraft?: boolean;
+  reviewDecision?: string | null;
   diff?: string | null;
   shipResult?: ExecResult;
+  repairResult?: GeneratedConflictRepairResult;
 }): Harness {
   const shipped: Harness["shipped"] = [];
   const comments: string[] = [];
   const labels: string[] = [];
   const pushes: Harness["pushes"] = [];
+  let repairs = 0;
   const deps: AutoshipDeps = {
     autoshipCmd: opts.autoshipCmd === undefined ? "ship.sh" : opts.autoshipCmd,
     repoSlug: "o/r",
+    generatedConflictAllowlist: ["docs/memory.md", "docs/researcher.md"],
+    generatedConflictRegenCmd: null,
+    generatedConflictMaxAttempts: 1,
+    generatedConflictCiWaitSeconds: 900,
     github: {
       prChecksState: async () => opts.ci ?? "pass",
+      waitForPrChecks: async () => opts.waitedCi ?? "pass",
+      prMergeInfo: async () => ({
+        baseRefName: "main",
+        headRefName: "issue-1-x",
+        isDraft: opts.isDraft ?? false,
+        mergeStateStatus: opts.mergeStateStatus ?? "CLEAN",
+        reviewDecision: opts.reviewDecision ?? null,
+      }),
       prDiff: async () => (opts.diff === undefined ? "" : opts.diff),
       comment: async (_i, b) => { comments.push(b); return true; },
       addLabel: async (_i, l) => { labels.push(l); return true; },
+    },
+    repairGeneratedConflicts: async () => {
+      repairs += 1;
+      return opts.repairResult ?? {
+        ok: true,
+        conflictPaths: ["docs/memory.md"],
+        discardedPaths: ["docs/memory.md"],
+        commit: "cafebabe",
+      };
     },
     ship: async (command, env) => { shipped.push({ command, env }); return opts.shipResult ?? ok; },
     notifier: { send: async (title, _b, priority = 3) => { pushes.push({ title, priority }); } },
     logger: { debug() {}, info() {}, warn() {}, error() {} },
   };
-  return { deps, shipped, comments, labels, pushes };
+  return {
+    deps,
+    shipped,
+    comments,
+    labels,
+    pushes,
+    get repairs() {
+      return repairs;
+    },
+  };
 }
 
 describe("autoshipRun — gating", () => {
@@ -121,6 +159,61 @@ describe("autoshipRun — data-loss gate", () => {
     const r = await autoshipRun(h.deps, succeededRun());
     assert.equal(r.action, "shipped");
     assert.equal(h.shipped.length, 1);
+  });
+});
+
+describe("autoshipRun — generated conflict recovery", () => {
+  it("does not repair draft PRs even when GitHub reports conflicts", async () => {
+    const h = harness({ mergeStateStatus: "DIRTY", isDraft: true });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.deepEqual(r, { action: "merge_blocked", reason: "PR is still a draft" });
+    assert.equal(h.repairs, 0);
+    assert.equal(h.shipped.length, 0);
+  });
+
+  it("does not repair PRs that still require review", async () => {
+    const h = harness({ mergeStateStatus: "DIRTY", reviewDecision: "REVIEW_REQUIRED" });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.deepEqual(r, { action: "merge_blocked", reason: "PR requires review approval" });
+    assert.equal(h.repairs, 0);
+    assert.equal(h.shipped.length, 0);
+  });
+
+  it("repairs generated-only conflicts, waits for CI, then ships", async () => {
+    const cleanDiff = [
+      "diff --git a/src/x.ts b/src/x.ts",
+      "+++ b/src/x.ts",
+      "+export const x = 1;",
+    ].join("\n");
+    const h = harness({ mergeStateStatus: "DIRTY", diff: cleanDiff });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.equal(r.action, "shipped");
+    assert.equal(h.repairs, 1);
+    assert.equal(h.shipped.length, 1);
+    assert.match(h.comments[0]!, /recovered generated-file conflicts/i);
+  });
+
+  it("does not ship when generated-conflict recovery refuses a mixed conflict", async () => {
+    const h = harness({
+      mergeStateStatus: "DIRTY",
+      repairResult: {
+        ok: false,
+        conflictPaths: ["docs/memory.md", "src/dispatcher.ts"],
+        decision: null,
+        reason: "one or more conflicts are not on the generated-file allowlist",
+      },
+    });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.equal(r.action, "conflict_recovery_failed");
+    assert.equal(h.shipped.length, 0);
+    assert.match(h.comments[0]!, /merge conflicts need review/i);
+  });
+
+  it("does not ship when repaired-branch CI is still pending", async () => {
+    const h = harness({ mergeStateStatus: "DIRTY", waitedCi: "pending" });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.deepEqual(r, { action: "ci_not_green", state: "pending" });
+    assert.equal(h.shipped.length, 0);
   });
 });
 
