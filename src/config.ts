@@ -10,6 +10,10 @@ import { parseArgs } from "node:util";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { resolveAuthorAuthConfig, type DispatcherAuthorAuthConfig } from "./author-auth.ts";
+import {
+  DEFAULT_MAX_GENERATED_CONFLICT_RECOVERIES,
+  parseGeneratedConflictAllowlist,
+} from "./generated-conflict-recovery.ts";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -86,6 +90,14 @@ export interface DispatcherConfig {
   logLevel: LogLevel;
   /** Optional repo-specific autoship command; null when disabled (the default). */
   autoshipCmd: string | null;
+  /** Exact generated paths the autoship merge-conflict repair may discard/regenerate. */
+  generatedConflictAllowlist: string[];
+  /** Optional repo-owned command that regenerates allowlisted generated files after repair. */
+  generatedConflictRegenCmd: string | null;
+  /** Maximum automatic repair attempts during one autoship pass. */
+  generatedConflictMaxAttempts: number;
+  /** How long autoship waits for CI after pushing a repaired branch. */
+  generatedConflictCiWaitSeconds: number;
   authorAuth: DispatcherAuthorAuthConfig;
   ntfyUrl: string | null;
   ntfyTopic: string | null;
@@ -209,6 +221,10 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
 
   const envSource = env.DISPATCHER_ENV_SOURCE_DIR;
   const autoship = env.DISPATCHER_AUTOSHIP_CMD;
+  const generatedConflictAllowlist = parseGeneratedConflictAllowlist(
+    env.DISPATCHER_GENERATED_CONFLICT_ALLOWLIST,
+  );
+  const generatedConflictRegen = env.DISPATCHER_GENERATED_CONFLICT_REGEN_CMD;
   const authorAuth = resolveAuthorAuthConfig(
     (values["author-auth"] as string | undefined) ?? env.DISPATCHER_ISSUE_AUTHOR_AUTH_MODE,
     (values["trusted-authors"] as string | undefined) ?? env.DISPATCHER_TRUSTED_ISSUE_AUTHORS,
@@ -234,6 +250,19 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
     ),
     logLevel: logLevelRaw,
     autoshipCmd: autoship && autoship.trim() !== "" ? autoship : null,
+    generatedConflictAllowlist,
+    generatedConflictRegenCmd:
+      generatedConflictRegen && generatedConflictRegen.trim() !== ""
+        ? generatedConflictRegen
+        : null,
+    generatedConflictMaxAttempts: positiveInt(
+      env.DISPATCHER_GENERATED_CONFLICT_MAX_ATTEMPTS,
+      DEFAULT_MAX_GENERATED_CONFLICT_RECOVERIES,
+    ),
+    generatedConflictCiWaitSeconds: positiveInt(
+      env.DISPATCHER_GENERATED_CONFLICT_CI_WAIT_SECONDS,
+      900,
+    ),
     authorAuth,
     ntfyUrl: ntfyUrl && ntfyUrl.trim() !== "" ? ntfyUrl : null,
     ntfyTopic: ntfyTopic && ntfyTopic.trim() !== "" ? ntfyTopic : null,

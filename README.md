@@ -176,6 +176,15 @@ run one unit per repo, each with its OWN DISPATCHER_STATE_DIR, DISPATCHER_REPO_D
 DISPATCHER_WORKTREE_DIR (the state dir carries the single-instance lock, so shared dirs
 collide). Autoship, when enabled, is per-instance via DISPATCHER_AUTOSHIP_CMD.
 
+Autoship can repair a green PR that is blocked only by generated-file merge conflicts.
+The recoverable paths are exact and explicit: `DISPATCHER_GENERATED_CONFLICT_ALLOWLIST`
+defaults to `docs/memory.md,docs/researcher.md`. Set
+`DISPATCHER_GENERATED_CONFLICT_REGEN_CMD` to the target repository's generation command
+when those files must be recreated by a hook or script. Recovery is bounded by
+`DISPATCHER_GENERATED_CONFLICT_MAX_ATTEMPTS` (default `1`) and waits up to
+`DISPATCHER_GENERATED_CONFLICT_CI_WAIT_SECONDS` (default `900`) for repaired-branch CI
+before autoship may merge.
+
 ## State model
 
 All durable state is one atomically-written JSON file plus a lock, under `--state-dir`:
