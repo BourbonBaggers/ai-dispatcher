@@ -19,7 +19,7 @@ Wire generated-file conflict recovery into the autoship path after CI is confirm
 and before the normal merge/deploy command. Record recovery decisions in logs,
 notifications, and PR comments, and refuse non-allowlisted conflicts without shipping.
 
-## Milestone 4: Full Validation and PR
+## [DONE] Milestone 4: Full Validation and PR
 
 Run the required test and typecheck suite, commit each completed milestone, push the
 issue branch, and open a draft PR containing `Closes #4`.

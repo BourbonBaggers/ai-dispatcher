@@ -33,6 +33,8 @@ function harness(opts: {
   ci?: "pass" | "pending" | "fail";
   waitedCi?: "pass" | "pending" | "fail";
   mergeStateStatus?: string;
+  isDraft?: boolean;
+  reviewDecision?: string | null;
   diff?: string | null;
   shipResult?: ExecResult;
   repairResult?: GeneratedConflictRepairResult;
@@ -55,9 +57,9 @@ function harness(opts: {
       prMergeInfo: async () => ({
         baseRefName: "main",
         headRefName: "issue-1-x",
-        isDraft: false,
+        isDraft: opts.isDraft ?? false,
         mergeStateStatus: opts.mergeStateStatus ?? "CLEAN",
-        reviewDecision: null,
+        reviewDecision: opts.reviewDecision ?? null,
       }),
       prDiff: async () => (opts.diff === undefined ? "" : opts.diff),
       comment: async (_i, b) => { comments.push(b); return true; },
@@ -161,6 +163,22 @@ describe("autoshipRun — data-loss gate", () => {
 });
 
 describe("autoshipRun — generated conflict recovery", () => {
+  it("does not repair draft PRs even when GitHub reports conflicts", async () => {
+    const h = harness({ mergeStateStatus: "DIRTY", isDraft: true });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.deepEqual(r, { action: "merge_blocked", reason: "PR is still a draft" });
+    assert.equal(h.repairs, 0);
+    assert.equal(h.shipped.length, 0);
+  });
+
+  it("does not repair PRs that still require review", async () => {
+    const h = harness({ mergeStateStatus: "DIRTY", reviewDecision: "REVIEW_REQUIRED" });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.deepEqual(r, { action: "merge_blocked", reason: "PR requires review approval" });
+    assert.equal(h.repairs, 0);
+    assert.equal(h.shipped.length, 0);
+  });
+
   it("repairs generated-only conflicts, waits for CI, then ships", async () => {
     const cleanDiff = [
       "diff --git a/src/x.ts b/src/x.ts",

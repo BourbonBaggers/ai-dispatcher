@@ -108,13 +108,15 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   if (!mergeInfo) {
     return await mergeBlocked(deps, run, pr, "PR mergeability could not be read");
   }
+  if (mergeInfo.isDraft) {
+    return await mergeBlocked(deps, run, pr, "PR is still a draft");
+  }
+  if (mergeInfo.reviewDecision === "REVIEW_REQUIRED") {
+    return await mergeBlocked(deps, run, pr, "PR requires review approval");
+  }
   if (mergeInfo.mergeStateStatus === "DIRTY") {
     const recovered = await recoverGeneratedConflicts(deps, run, pr, mergeInfo);
     if (recovered.action !== "recovered") return recovered.outcome;
-  } else if (mergeInfo.isDraft) {
-    return await mergeBlocked(deps, run, pr, "PR is still a draft");
-  } else if (mergeInfo.reviewDecision === "REVIEW_REQUIRED") {
-    return await mergeBlocked(deps, run, pr, "PR requires review approval");
   }
 
   // 3. Data-loss gate. Unreadable diff → hold (fail safe).
