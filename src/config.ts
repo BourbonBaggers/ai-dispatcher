@@ -98,6 +98,12 @@ export interface DispatcherConfig {
   generatedConflictMaxAttempts: number;
   /** How long autoship waits for CI after pushing a repaired branch. */
   generatedConflictCiWaitSeconds: number;
+  /**
+   * Maximum times autoship relaunches the agent to fix a red-CI PR before giving up and
+   * holding the issue for a human (autoship-held). Default 2: a fix attempt, then one
+   * retry if CI is still red, then escalate.
+   */
+  ciSelfHealMaxAttempts: number;
   authorAuth: DispatcherAuthorAuthConfig;
   ntfyUrl: string | null;
   ntfyTopic: string | null;
@@ -263,6 +269,7 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
       env.DISPATCHER_GENERATED_CONFLICT_CI_WAIT_SECONDS,
       900,
     ),
+    ciSelfHealMaxAttempts: positiveInt(env.DISPATCHER_CI_SELF_HEAL_MAX_ATTEMPTS, 2),
     authorAuth,
     ntfyUrl: ntfyUrl && ntfyUrl.trim() !== "" ? ntfyUrl : null,
     ntfyTopic: ntfyTopic && ntfyTopic.trim() !== "" ? ntfyTopic : null,

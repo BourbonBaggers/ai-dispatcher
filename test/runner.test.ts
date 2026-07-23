@@ -67,6 +67,7 @@ function config(overrides: Partial<DispatcherConfig> = {}): DispatcherConfig {
     generatedConflictRegenCmd: null,
     generatedConflictMaxAttempts: 1,
     generatedConflictCiWaitSeconds: 900,
+    ciSelfHealMaxAttempts: 2,
     authorAuth: resolveAuthorAuthConfig("none", undefined),
     ntfyUrl: null,
     ntfyTopic: null,

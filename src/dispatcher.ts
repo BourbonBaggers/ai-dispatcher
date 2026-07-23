@@ -272,6 +272,46 @@ export async function resumeRun(deps: DispatcherDeps, run: RunRecord): Promise<R
 }
 
 /**
+ * Self-heal: relaunches the agent on the same branch to fix a PR whose CI autoship just
+ * found red, then finalizes the new terminal run exactly like any other run. Reentry
+ * mirrors `resumeRun` (same checkout, same branch, trigger "resume" so dispatch-agent.sh
+ * feeds the resumed agent the actual failing checks) but tracks its own counter —
+ * `ciSelfHealAttempts` — so the cap is independent of the crash/timeout resume budget.
+ * `autoshipRun` is the sole place that decides whether another attempt is warranted; this
+ * function only ever executes an attempt it already approved.
+ *
+ * Recursing into `finalizeRun` lets the new terminal run go through the exact same
+ * comment/notify/autoship pipeline as any other run: if the fix worked, autoship ships
+ * it; if CI is still red, autoshipRun either allows another self-heal (attempt < cap) or
+ * stamps `autoship-held` (cap reached) — the recursion depth is bounded by
+ * `ciSelfHealMaxAttempts`.
+ */
+async function selfHealRun(deps: DispatcherDeps, run: RunRecord, attempt: number): Promise<void> {
+  const { config, store, github, logger, notifier } = deps;
+  const now = deps.now ?? (() => Date.now());
+
+  const reentered = store.updateRun(run.id, {
+    status: "claimed",
+    trigger: "resume",
+    ciSelfHealAttempts: attempt,
+    exitCode: null,
+    failureSummary: null,
+    finishedAt: null,
+  });
+
+  logger.info("self-heal: relaunching agent to fix red CI", {
+    runId: run.id,
+    issue: run.issueNumber,
+    attempt,
+  });
+
+  await github.addLabel(run.issueNumber, WORKING_LABEL);
+
+  const terminal = await launchRun(reentered, { config, store, logger, notifier, now });
+  await finalizeRun(deps, terminal);
+}
+
+/**
  * Once-only GitHub bookkeeping after a run reaches a terminal state: apply the failure
  * deferral policy, release the working label (unless the run is still resumable), comment
  * on the issue, and send the run notification (except for token exhaustion, which already
@@ -329,10 +369,14 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
           generatedConflictRegenCmd: deps.config.generatedConflictRegenCmd,
           generatedConflictMaxAttempts: deps.config.generatedConflictMaxAttempts,
           generatedConflictCiWaitSeconds: deps.config.generatedConflictCiWaitSeconds,
+          ciSelfHealMaxAttempts: deps.config.ciSelfHealMaxAttempts,
         },
         run,
       );
       logger.info("autoship outcome", { runId: run.id, issue: run.issueNumber, action: outcome.action });
+      if (outcome.action === "ci_self_heal") {
+        await selfHealRun(deps, run, outcome.attempt);
+      }
     } catch (err) {
       // An autoship failure must never break the loop; it has its own ntfy path.
       logger.error("autoship threw", {

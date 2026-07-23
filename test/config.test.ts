@@ -121,6 +121,27 @@ test("parseCliConfig resolves generated-conflict recovery settings from env", ()
   assert.equal(result.config!.generatedConflictCiWaitSeconds, 120);
 });
 
+test("parseCliConfig defaults ciSelfHealMaxAttempts to 2", () => {
+  const result = parseCliConfig(["--repo", "acme/widgets"], {
+    DISPATCHER_REPO_DIR: "/mirror",
+    DISPATCHER_WORKTREE_DIR: "/worktrees",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.config!.ciSelfHealMaxAttempts, 2);
+});
+
+test("parseCliConfig resolves ciSelfHealMaxAttempts from env", () => {
+  const result = parseCliConfig(["--repo", "acme/widgets"], {
+    DISPATCHER_REPO_DIR: "/mirror",
+    DISPATCHER_WORKTREE_DIR: "/worktrees",
+    DISPATCHER_CI_SELF_HEAL_MAX_ATTEMPTS: "3",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.config!.ciSelfHealMaxAttempts, 3);
+});
+
 test("parseCliConfig fails closed inside author-allowlist mode", () => {
   const missing = parseCliConfig(["--repo", "acme/widgets"], {
     DISPATCHER_REPO_DIR: "/mirror",

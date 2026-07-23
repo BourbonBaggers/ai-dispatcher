@@ -46,6 +46,7 @@ function run(overrides: Partial<RunRecord>): RunRecord {
     resumeCount: 0,
     lastProgressSeq: 0,
     outputSeq: 0,
+    ciSelfHealAttempts: 0,
     remotePid: null,
     createdAt: 1000,
     startedAt: 1000,
