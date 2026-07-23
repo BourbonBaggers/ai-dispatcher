@@ -312,6 +312,54 @@ async function selfHealRun(deps: DispatcherDeps, run: RunRecord, attempt: number
 }
 
 /**
+ * Escalation: the one-shot follow-up after selfHealRun's budget is exhausted and CI is
+ * still red. Relaunches on the same branch/checkout (a resume, exactly like selfHealRun)
+ * but overrides the run's agent/model/effort to `cliModel` — resolved via `modelByCliModel`
+ * so the launched CLI and its model label stay consistent with the registry entry (an
+ * escalation model is necessarily a `claude` model today, but this does not hard-code
+ * that). Falls back to "claude" only if the configured model is somehow not in the
+ * registry; `config.ts` already validates DISPATCHER_CI_ESCALATION_MODEL at startup, so
+ * that fallback is a belt-and-suspenders default, not the expected path. Uses "effort:max"
+ * or its per-agent equivalent — a last-resort attempt should not be effort-capped.
+ * `run.ciEscalated` is set before launching so autoshipRun never grants a second one.
+ */
+async function escalateRun(deps: DispatcherDeps, run: RunRecord, cliModel: string): Promise<void> {
+  const { config, store, github, logger, notifier } = deps;
+  const now = deps.now ?? (() => Date.now());
+
+  const modelEntry = modelByCliModel(cliModel);
+  const agent: DispatcherAgent = modelEntry?.cli === "codex" ? "codex" : "claude";
+  const modelLabel = modelEntry?.modelLabel ?? cliModel;
+  const cliEffort = agent === "claude" ? "xhigh" : "high";
+
+  const reentered = store.updateRun(run.id, {
+    status: "claimed",
+    trigger: "resume",
+    agent,
+    modelLabel,
+    cliModel,
+    effortLabel: "effort:max",
+    cliEffort,
+    ciEscalated: true,
+    exitCode: null,
+    failureSummary: null,
+    finishedAt: null,
+  });
+
+  logger.info("self-heal: escalating to a stronger model", {
+    runId: run.id,
+    issue: run.issueNumber,
+    agent,
+    cliModel,
+  });
+
+  await github.addLabel(run.issueNumber, WORKING_LABEL);
+
+  const terminal = await launchRun(reentered, { config, store, logger, notifier, now });
+  await finalizeRun(deps, terminal);
+}
+
+/**
  * Once-only GitHub bookkeeping after a run reaches a terminal state: apply the failure
  * deferral policy, release the working label (unless the run is still resumable), comment
  * on the issue, and send the run notification (except for token exhaustion, which already
@@ -371,12 +419,15 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
           generatedConflictMaxAttempts: deps.config.generatedConflictMaxAttempts,
           generatedConflictCiWaitSeconds: deps.config.generatedConflictCiWaitSeconds,
           ciSelfHealMaxAttempts: deps.config.ciSelfHealMaxAttempts,
+          ciEscalationModel: deps.config.ciEscalationModel,
         },
         run,
       );
       logger.info("autoship outcome", { runId: run.id, issue: run.issueNumber, action: outcome.action });
       if (outcome.action === "ci_self_heal") {
         await selfHealRun(deps, run, outcome.attempt);
+      } else if (outcome.action === "ci_escalate") {
+        await escalateRun(deps, run, outcome.model);
       }
     } catch (err) {
       // An autoship failure must never break the loop; it has its own ntfy path.

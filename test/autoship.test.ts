@@ -17,6 +17,7 @@ function succeededRun(over: Partial<RunRecord> = {}): RunRecord {
     issueTitle: "t",
     exitCode: 0,
     ciSelfHealAttempts: 0,
+    ciEscalated: false,
     ...over,
   } as unknown as RunRecord;
 }
@@ -41,6 +42,7 @@ function harness(opts: {
   shipResult?: ExecResult;
   repairResult?: GeneratedConflictRepairResult;
   ciSelfHealMaxAttempts?: number;
+  ciEscalationModel?: string;
 }): Harness {
   const shipped: Harness["shipped"] = [];
   const comments: string[] = [];
@@ -56,6 +58,7 @@ function harness(opts: {
     generatedConflictMaxAttempts: 1,
     generatedConflictCiWaitSeconds: 900,
     ciSelfHealMaxAttempts: opts.ciSelfHealMaxAttempts ?? 2,
+    ciEscalationModel: opts.ciEscalationModel ?? "claude-opus-4-8",
     github: {
       prChecksState: async () => opts.ci ?? "pass",
       waitForPrChecks: async () => opts.waitedCi ?? "pass",
@@ -127,9 +130,9 @@ describe("autoshipRun — gating", () => {
     assert.equal(h.shipped.length, 0);
   });
 
-  it("does not ship when CI has failed (self-heal budget already exhausted)", async () => {
+  it("does not ship when CI has failed (self-heal and escalation budgets already exhausted)", async () => {
     const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 2 });
-    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 2 }));
+    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 2, ciEscalated: true }));
     assert.equal(r.action, "ci_not_green");
     assert.equal(h.shipped.length, 0);
   });
@@ -153,18 +156,35 @@ describe("autoshipRun — CI self-heal", () => {
     assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL));
   });
 
-  it("holds with autoship-held once the self-heal budget is exhausted", async () => {
+  it("escalates to the configured model once the self-heal budget is exhausted, without holding", async () => {
+    const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 2, ciEscalationModel: "claude-opus-4-8" });
+    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 2, ciEscalated: false }));
+    assert.deepEqual(r, { action: "ci_escalate", model: "claude-opus-4-8" });
+    assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL), "must not hold before the escalation attempt runs");
+    assert.match(h.comments[0]!, /self-heal failed, escalating/i);
+    assert.match(h.comments[0]!, /claude-opus-4-8/);
+    assert.ok(h.pushes.some((p) => /escalating #1 to claude-opus-4-8/.test(p.title) && p.priority === 3));
+  });
+
+  it("holds with autoship-held once BOTH self-heal and the escalation attempt are exhausted", async () => {
     const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 2 });
-    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 2 }));
+    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 2, ciEscalated: true }));
     assert.deepEqual(r, { action: "ci_not_green", state: "fail" });
     assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
-    assert.match(h.comments[0]!, /still failing after self-heal/i);
+    assert.match(h.comments[0]!, /still failing after self-heal and escalation/i);
     assert.ok(h.pushes.some((p) => /HELD/.test(p.title) && p.priority === 4));
   });
 
-  it("holds immediately when the self-heal budget is configured to zero", async () => {
+  it("escalates (does not hold) immediately when the self-heal budget is configured to zero", async () => {
     const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 0 });
-    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 0 }));
+    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 0, ciEscalated: false }));
+    assert.equal(r.action, "ci_escalate");
+    assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL));
+  });
+
+  it("holds immediately when both budgets are zero/exhausted from the start", async () => {
+    const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 0 });
+    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 0, ciEscalated: true }));
     assert.equal(r.action, "ci_not_green");
     assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
   });
@@ -173,10 +193,18 @@ describe("autoshipRun — CI self-heal", () => {
     // Regression test: an earlier version of this code path had escaped template
     // literals (`\${pr}`) that printed the literal text "${pr}" instead of the number.
     const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 0 });
-    await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 0, issueNumber: 366 }));
+    await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 0, ciEscalated: true, issueNumber: 366 }));
     assert.match(h.comments[0]!, /PR #42/);
     assert.ok(!h.comments[0]!.includes("${pr}"));
     assert.ok(h.pushes.some((p) => p.title.includes("#366") && !p.title.includes("${")));
+  });
+
+  it("interpolates the escalation model name correctly in the escalation comment/notification", async () => {
+    const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 0, ciEscalationModel: "claude-opus-4-8" });
+    await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 0, ciEscalated: false, issueNumber: 366 }));
+    assert.match(h.comments[0]!, /claude-opus-4-8/);
+    assert.ok(!h.comments[0]!.includes("${deps.ciEscalationModel}"));
+    assert.ok(h.pushes.some((p) => p.title.includes("#366") && p.title.includes("claude-opus-4-8")));
   });
 
   it("treats a run that FAILED solely on red CI (exit 0) as a self-heal/ship candidate", async () => {

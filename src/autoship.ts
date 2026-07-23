@@ -83,6 +83,11 @@ export interface AutoshipDeps {
   generatedConflictCiWaitSeconds: number;
   /** Cap on self-heal relaunches for a red-CI PR before autoship-held is stamped. */
   ciSelfHealMaxAttempts: number;
+  /**
+   * CLI model for the ONE escalation attempt after ciSelfHealMaxAttempts is exhausted and
+   * CI is still red — a last, stronger-model try before giving up on human review.
+   */
+  ciEscalationModel: string;
   repairGeneratedConflicts?: (
     request: GeneratedConflictRepairRequest,
   ) => Promise<GeneratedConflictRepairResult>;
@@ -92,6 +97,7 @@ export type AutoshipOutcome =
   | { action: "skipped"; reason: string }
   | { action: "ci_not_green"; state: "pending" | "fail" }
   | { action: "ci_self_heal"; attempt: number; maxAttempts: number }
+  | { action: "ci_escalate"; model: string }
   | { action: "held"; reasons: string[] }
   | { action: "merge_blocked"; reason: string }
   | { action: "conflict_recovery_failed"; reason: string; conflictPaths: string[] }
@@ -148,18 +154,55 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
         return { action: "ci_self_heal", attempt, maxAttempts: deps.ciSelfHealMaxAttempts };
       }
 
-      // Self-heal is exhausted. Hold the issue so the dispatcher does not re-run the
-      // agent in an infinite poll loop — without a hold, the issue stays eligible because
-      // selection only looks at labels, not prior succeeded runs, so it picks this up every
-      // 15 minutes forever. A human must clear the failing checks and remove autoship-held.
+      const alreadyEscalated = run.ciEscalated ?? false;
+      if (!alreadyEscalated) {
+        // The default-model self-heal budget is exhausted and CI is still red. Before
+        // paging a human, spend exactly one attempt with a stronger model
+        // (ciEscalationModel, e.g. claude-opus-4-8) — some failures a fast/general model
+        // gets stuck on are within a frontier model's reach. This is a separate,
+        // one-shot budget from ciSelfHealMaxAttempts, tracked by run.ciEscalated.
+        logger.info("autoship: self-heal exhausted, escalating model", {
+          issue: run.issueNumber,
+          pr,
+          attemptsSoFar,
+          escalationModel: deps.ciEscalationModel,
+        });
+        await github
+          .comment(
+            run.issueNumber,
+            [
+              "## Autoship: self-heal failed, escalating",
+              "",
+              `Self-heal failed after ${attemptsSoFar} attempt(s). Escalating to ` +
+                `\`${deps.ciEscalationModel}\` for one last automated fix attempt before ` +
+                "holding for human review.",
+            ].join("\n"),
+          )
+          .catch(() => false);
+        await notifier
+          .send(
+            `Autoship: escalating #${run.issueNumber} to ${deps.ciEscalationModel}`,
+            `PR #${pr} CI still failing after ${attemptsSoFar} self-heal attempt(s) — escalating to ${deps.ciEscalationModel} for one last attempt.`,
+            NOTIFY_PRIORITY_DEFAULT,
+          )
+          .catch(() => undefined);
+        return { action: "ci_escalate", model: deps.ciEscalationModel };
+      }
+
+      // Self-heal AND the escalation attempt are both exhausted. Hold the issue so the
+      // dispatcher does not re-run the agent in an infinite poll loop — without a hold,
+      // the issue stays eligible because selection only looks at labels, not prior
+      // succeeded runs, so it picks this up every 15 minutes forever. A human must clear
+      // the failing checks and remove autoship-held.
       await github.addLabel(run.issueNumber, AUTOSHIP_HELD_LABEL).catch(() => false);
       await github
         .comment(
           run.issueNumber,
           [
-            "## Autoship held — CI is still failing after self-heal",
+            "## Autoship held — CI is still failing after self-heal and escalation",
             "",
-            `CI checks on PR #${pr} are failing after ${attemptsSoFar} automatic fix attempt(s). ` +
+            `CI checks on PR #${pr} are failing after ${attemptsSoFar} automatic fix attempt(s) ` +
+              `and an escalation attempt with \`${deps.ciEscalationModel}\`. ` +
               "The dispatcher will not re-run until the `autoship-held` label is removed.",
             "",
             "Fix the failing checks, then remove the `autoship-held` label to re-enable dispatch.",
@@ -169,7 +212,7 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
       await notifier
         .send(
           `Autoship HELD #${run.issueNumber}`,
-          `PR #${pr} CI is still failing after ${attemptsSoFar} self-heal attempt(s) — held for human review.`,
+          `PR #${pr} CI is still failing after ${attemptsSoFar} self-heal attempt(s) and escalation to ${deps.ciEscalationModel} — held for human review.`,
           NOTIFY_PRIORITY_HIGH,
         )
         .catch(() => undefined);

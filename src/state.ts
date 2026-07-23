@@ -59,6 +59,8 @@ export interface RunRecord {
    * self-heal attempts specifically, and is what caps them (DISPATCHER_CI_SELF_HEAL_MAX_ATTEMPTS).
    */
   ciSelfHealAttempts: number;
+  /** Whether the one-shot escalation attempt (a different, stronger model) has run. */
+  ciEscalated: boolean;
   remotePid: number | null;
   createdAt: number;
   startedAt: number;
@@ -275,6 +277,7 @@ export class StateStore {
       | "outputSeq"
       | "remotePid"
       | "ciSelfHealAttempts"
+      | "ciEscalated"
     >,
   ): RunRecord {
     if (this.activeRun()) throw new Error("a run is already active — the dispatcher is serial");
@@ -295,6 +298,7 @@ export class StateStore {
       lastProgressSeq: 0,
       outputSeq: 0,
       ciSelfHealAttempts: 0,
+      ciEscalated: false,
       remotePid: null,
       createdAt: now,
       startedAt: now,

@@ -14,6 +14,7 @@ import {
   DEFAULT_MAX_GENERATED_CONFLICT_RECOVERIES,
   parseGeneratedConflictAllowlist,
 } from "./generated-conflict-recovery.ts";
+import { modelByCliModel } from "./models.ts";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -72,6 +73,9 @@ export function expandHome(p: string): string {
 
 const LOG_LEVELS: readonly LogLevel[] = ["debug", "info", "warn", "error"];
 
+/** Last-resort model for the one escalation attempt after self-heal is exhausted. */
+export const DEFAULT_CI_ESCALATION_MODEL = "claude-opus-4-8";
+
 function isLogLevel(value: string): value is LogLevel {
   return (LOG_LEVELS as readonly string[]).includes(value);
 }
@@ -106,6 +110,12 @@ export interface DispatcherConfig {
    * retry if CI is still red, then escalate.
    */
   ciSelfHealMaxAttempts: number;
+  /**
+   * The model autoship escalates to for ONE last attempt after ciSelfHealMaxAttempts is
+   * exhausted and CI is still red, before giving up and holding for a human. A CLI model
+   * identifier (models.ts `cliModel`), not a model:* label.
+   */
+  ciEscalationModel: string;
   authorAuth: DispatcherAuthorAuthConfig;
   ntfyUrl: string | null;
   ntfyTopic: string | null;
@@ -232,6 +242,19 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
     };
   }
 
+  const ciEscalationModel =
+    env.DISPATCHER_CI_ESCALATION_MODEL && env.DISPATCHER_CI_ESCALATION_MODEL.trim() !== ""
+      ? env.DISPATCHER_CI_ESCALATION_MODEL.trim()
+      : DEFAULT_CI_ESCALATION_MODEL;
+  if (!modelByCliModel(ciEscalationModel)) {
+    return {
+      ok: false,
+      message:
+        `Invalid DISPATCHER_CI_ESCALATION_MODEL "${ciEscalationModel}" — not a known model ` +
+        `(see MODELS in models.ts).\n\n${USAGE}`,
+    };
+  }
+
   const envSource = env.DISPATCHER_ENV_SOURCE_DIR;
   const autoship = env.DISPATCHER_AUTOSHIP_CMD;
   const generatedConflictAllowlist = parseGeneratedConflictAllowlist(
@@ -285,6 +308,7 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
       900,
     ),
     ciSelfHealMaxAttempts: positiveInt(env.DISPATCHER_CI_SELF_HEAL_MAX_ATTEMPTS, 2),
+    ciEscalationModel,
     authorAuth,
     ntfyUrl: ntfyUrl && ntfyUrl.trim() !== "" ? ntfyUrl : null,
     ntfyTopic: ntfyTopic && ntfyTopic.trim() !== "" ? ntfyTopic : null,
