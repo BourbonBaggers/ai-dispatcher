@@ -452,6 +452,15 @@ async function mergeBlocked(
 ): Promise<AutoshipOutcome> {
   const { logger, notifier, github } = deps;
   logger.warn("autoship: PR is not mergeable", { issue: run.issueNumber, pr, reason });
+  // This used to say "Autoship HELD" in the comment/notification title without ever
+  // stamping autoship-held, so the issue stayed fully eligible and got re-claimed and
+  // re-dispatched on every single poll — a busy-loop that looked identical to the
+  // CI-red infinite-loop bug (#366) but was actually "no human has converted the PR out
+  // of draft (or approved it) yet," repeating every ~15 minutes for hours. A human
+  // action (mark ready for review / approve / investigate an unreadable PR) is required
+  // in all three mergeBlocked cases, and none of them resolve themselves on a retry, so
+  // this now holds exactly like the CI-exhausted and data-loss-gate paths do.
+  await github.addLabel(run.issueNumber, AUTOSHIP_HELD_LABEL).catch(() => false);
   await github
     .comment(
       run.issueNumber,
@@ -461,6 +470,10 @@ async function mergeBlocked(
         reason,
         "",
         "The dispatcher did not attempt generated-file conflict recovery.",
+        "",
+        "The dispatcher will not re-run until the `autoship-held` label is removed. If this " +
+          "is a draft PR waiting on review, mark it ready for review (and merge, or clear " +
+          "the label to let autoship re-check) once it should proceed.",
       ].join("\n"),
     )
     .catch(() => false);

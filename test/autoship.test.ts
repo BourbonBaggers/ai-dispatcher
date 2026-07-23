@@ -280,6 +280,34 @@ describe("autoshipRun — generated conflict recovery", () => {
     assert.equal(h.shipped.length, 0);
   });
 
+  it("holds (stamps autoship-held) on merge_blocked, so a draft PR does not get re-dispatched forever", async () => {
+    // Regression test for #366: mergeBlocked used to say "Autoship HELD" in its comment
+    // title without ever stamping the label, so the issue stayed fully eligible and got
+    // re-claimed and re-run on every single poll — dozens of times over many hours,
+    // every one a no-op, because nothing had changed and nothing was going to change
+    // until a human converted the PR out of draft.
+    const h = harness({ isDraft: true });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.deepEqual(r, { action: "merge_blocked", reason: "PR is still a draft" });
+    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
+    assert.match(h.comments[0]!, /autoship-held.*label is removed/is);
+  });
+
+  it("holds on merge_blocked when a PR requires review, not just when it's a draft", async () => {
+    const h = harness({ reviewDecision: "REVIEW_REQUIRED" });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.deepEqual(r, { action: "merge_blocked", reason: "PR requires review approval" });
+    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
+  });
+
+  it("holds on merge_blocked when PR mergeability could not be read at all", async () => {
+    const h = harness({});
+    h.deps.github.prMergeInfo = async () => null;
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.deepEqual(r, { action: "merge_blocked", reason: "PR mergeability could not be read" });
+    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
+  });
+
   it("repairs generated-only conflicts, waits for CI, then ships", async () => {
     const cleanDiff = [
       "diff --git a/src/x.ts b/src/x.ts",
