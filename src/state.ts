@@ -22,7 +22,13 @@ import {
   rmSync,
 } from "node:fs";
 import { join } from "node:path";
-import { ACTIVE_STATUSES, CLAIMING_STATUSES, PARKED_STATUSES, RESUMABLE_STATUSES } from "./labels.ts";
+import {
+  ACTIVE_STATUSES,
+  CLAIMING_STATUSES,
+  HELD_STATUSES,
+  PARKED_STATUSES,
+  RESUMABLE_STATUSES,
+} from "./labels.ts";
 import type { DispatcherAgent, DispatcherStatus } from "./labels.ts";
 import type { IssueFailureRecord } from "./failure-policy.ts";
 
@@ -248,6 +254,14 @@ export class StateStore {
   /** Runs parked on a PR whose CI has not resolved yet — recheck-only, never relaunched. */
   parkedRuns(): RunRecord[] {
     return this.runsByStatus(PARKED_STATUSES);
+  }
+
+  /**
+   * Held runs (a green PR autoship refused to ship). They keep their claim; the scan loop
+   * rechecks each one and resumes autoship the moment its `autoship-held` label is cleared.
+   */
+  heldRuns(): RunRecord[] {
+    return this.runsByStatus(HELD_STATUSES);
   }
 
   /** issueNumber → status, for every run that still holds a claim on its issue. */
