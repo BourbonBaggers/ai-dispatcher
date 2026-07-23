@@ -32,7 +32,7 @@ installation, discovery, and analysis without guesswork.
   command when it fires.
 - Preserve normal ShellCheck failures as required-check failures.
 
-## Milestone 4: Validation and PR
+## [DONE] Milestone 4: Validation and PR
 
 - Run `npm test`, `npm run typecheck`, and the new ShellCheck wrapper.
 - Commit each completed milestone with `milestone(N): ...`.
