@@ -257,6 +257,16 @@ The terminal statuses:
 `interrupted` / `timed_out` / `token_exhausted` are unchanged: crash/timeout recovery,
 resumed by relaunching the agent on the next scan.
 
+**The linked issue closes only on a verified `shipped`, never on merge.** PR bodies
+never carry a GitHub auto-close keyword (`Closes`/`Fixes`/`Resolves #n`) -- merging
+closes the issue instantly, before the deploy that follows the merge has even started,
+let alone passed its health check. `autoshipRun` calls `github.closeIssue` itself, once,
+only after the ship command's own exit code AND its parsed `::autoship::` status line
+(when present) agree the deploy is healthy -- not merely on reaching the success branch.
+This is what the #366 postmortem calls "merge is not shipped": an issue auto-closed on
+merge read as done while the deploy was still mid-build and prod was still on the
+previous release.
+
 Only `evaluateAutoship` (dispatcher.ts) ever writes `shipped` or `held`, and it is the
 only place `ci_pending`/`ci_failed` transition based on a fresh CI read — called both
 right after a fresh/resumed/self-healed/escalated run finishes and again on every parked

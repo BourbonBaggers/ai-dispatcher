@@ -83,6 +83,10 @@ export function prReadyArgs(slug: string, pr: number): string[] {
   return ["pr", "ready", String(pr), "--repo", slug];
 }
 
+export function closeIssueArgs(slug: string, issue: number): string[] {
+  return ["issue", "close", String(issue), "--repo", slug];
+}
+
 export function prMergeInfoArgs(slug: string, pr: number): string[] {
   return [
     "pr",
@@ -170,6 +174,16 @@ export class GithubClient {
   /** Promotes a draft PR to ready for review. */
   async markPrReady(pr: number): Promise<boolean> {
     return (await this.exec("gh", prReadyArgs(this.repo.slug, pr))).ok;
+  }
+
+  /**
+   * Closes the issue explicitly. This is the ONLY place an issue closes -- PR bodies
+   * never carry a GitHub auto-close keyword (Closes/Fixes/Resolves #n), specifically so
+   * merging a PR never closes its issue before the deploy that follows is verified.
+   * Call this only after the ship command has confirmed a healthy deploy.
+   */
+  async closeIssue(issue: number): Promise<boolean> {
+    return (await this.exec("gh", closeIssueArgs(this.repo.slug, issue))).ok;
   }
 
   /**

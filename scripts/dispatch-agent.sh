@@ -288,9 +288,14 @@ skip it:
 4. Write and run tests as the repo requires.
 
 When the implementation is complete:
-- Push the branch and open a PR **ready for review** whose body contains
-  "Closes #${ISSUE}". Use: gh pr create --base main --title "<title>" --body "<body>"
+- Push the branch and open a PR **ready for review** referencing "Issue: #${ISSUE}"
+  somewhere in the body. Use: gh pr create --base main --title "<title>" --body "<body>"
   (no --draft).
+- NEVER write "Closes #${ISSUE}", "Fixes #${ISSUE}", "Resolves #${ISSUE}", or any other
+  GitHub auto-close keyword anywhere in the PR title or body. GitHub closes the issue
+  the instant the PR merges -- before the deploy that follows even starts, let alone
+  passes its health check. Merge is not shipped. Whatever ships this PR closes the
+  issue itself, only after a verified deploy.
 - The ONLY exception: if the change deletes or truncates production data, removes or
   disables billing/payment infrastructure, or disables/weakens a security control, open
   it as a DRAFT instead (--draft) with a top-of-body line naming exactly which of those
@@ -520,7 +525,7 @@ elif [[ "$COMMITS_AHEAD" -gt 0 ]]; then
   # inspects the diff itself either way).
   PR_URL="$(gh pr create --repo "$REPO_SLUG" --base main --head "$BRANCH" \
     --title "issue #${ISSUE}: dispatcher run (${AGENT})" \
-    --body "Automated run by the AI Issue Dispatcher. Closes #${ISSUE}" \
+    --body "Automated run by the AI Issue Dispatcher. Issue: #${ISSUE}" \
     2>/dev/null || true)"
   [[ -n "$PR_URL" ]] && event "opened PR $PR_URL"
 else

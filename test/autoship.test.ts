@@ -31,6 +31,7 @@ interface Harness {
   repairs: number;
   errors: string[];
   promotions: number;
+  closedIssues: number[];
 }
 
 function harness(opts: {
@@ -51,12 +52,15 @@ function harness(opts: {
   issueLabels?: string[];
   /** Whether markPrReady (gh pr ready) succeeds -- default true. */
   markPrReadyOk?: boolean;
+  /** Whether closeIssue (gh issue close) succeeds -- default true. */
+  closeIssueOk?: boolean;
 }): Harness {
   const shipped: Harness["shipped"] = [];
   const comments: string[] = [];
   const labels: string[] = [];
   const pushes: Harness["pushes"] = [];
   const errors: string[] = [];
+  const closedIssues: number[] = [];
   let repairs = 0;
   let promotions = 0;
   const deps: AutoshipDeps = {
@@ -93,6 +97,11 @@ function harness(opts: {
         promotions += 1;
         return opts.markPrReadyOk ?? true;
       },
+      closeIssue: async (issue: number) => {
+        if (opts.closeIssueOk === false) return false;
+        closedIssues.push(issue);
+        return true;
+      },
     },
     repairGeneratedConflicts: async () => {
       repairs += 1;
@@ -119,6 +128,7 @@ function harness(opts: {
     labels,
     pushes,
     errors,
+    closedIssues,
     get repairs() {
       return repairs;
     },
@@ -457,6 +467,49 @@ describe("autoshipRun — shipping", () => {
     assert.equal(r.action, "ship_failed");
     assert.equal(r.state, "deployment_failed_rollback_succeeded");
     assert.ok(h.pushes.some((p) => /rolled back/i.test(p.title) && p.priority === 4));
+  });
+
+  it("closes the issue ONLY after a shipped, health-pass deploy -- never on merge alone (#366)", async () => {
+    // Regression test: PR bodies never carry a GitHub auto-close keyword (Closes/Fixes/
+    // Resolves #n) specifically so merging never closes the issue before the deploy that
+    // follows is verified. The dispatcher itself must close it explicitly, and only once
+    // the ship command confirms success.
+    const h = harness({ diff: "" });
+    const r = await autoshipRun(h.deps, succeededRun({ issueNumber: 366 } as Partial<RunRecord>));
+    assert.equal(r.action, "shipped");
+    assert.deepEqual(h.closedIssues, [366]);
+  });
+
+  it("does NOT close the issue when the ship command fails", async () => {
+    const h = harness({ diff: "", shipResult: { ok: false, stdout: "", stderr: "deploy blew up", code: 1 } });
+    const r = await autoshipRun(h.deps, succeededRun({ issueNumber: 366 } as Partial<RunRecord>));
+    assert.equal(r.action, "ship_failed");
+    assert.deepEqual(h.closedIssues, []);
+  });
+
+  it("does NOT close the issue when the ship command exits 0 but its own report says health is not pass", async () => {
+    // A script that reports honestly but, for whatever reason, exits 0 anyway -- the
+    // parsed health is what gates closing, not merely reaching the success branch.
+    const h = harness({
+      diff: "",
+      shipResult: {
+        ok: true,
+        stdout: "::autoship:: state=shipped health=unknown\n",
+        stderr: "",
+        code: 0,
+      },
+    });
+    const r = await autoshipRun(h.deps, succeededRun({ issueNumber: 366 } as Partial<RunRecord>));
+    assert.equal(r.action, "shipped");
+    assert.deepEqual(h.closedIssues, [], "shipped does not imply closed when health did not report pass");
+  });
+
+  it("logs loudly (does not silently drop it) when closing a shipped issue itself fails", async () => {
+    const h = harness({ diff: "", closeIssueOk: false });
+    const r = await autoshipRun(h.deps, succeededRun({ issueNumber: 366 } as Partial<RunRecord>));
+    assert.equal(r.action, "shipped");
+    assert.deepEqual(h.closedIssues, []);
+    assert.ok(h.errors.some((e) => /failed to close the issue/.test(e)));
   });
 
   it("does not throw if notifier rejects (best-effort)", async () => {
