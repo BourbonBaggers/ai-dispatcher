@@ -75,7 +75,7 @@ export const WORKING_LABEL = "agent-working";
  *
  * An issue held for a decision is NOT eligible work — hold it, notify once, move on.
  */
-export const HOLD_LABELS = ["needs-input", "blocked"] as const;
+export const HOLD_LABELS = ["needs-input", "blocked", "autoship-held"] as const;
 
 /** Statuses in which a run still owns its issue claim. */
 export const ACTIVE_STATUSES = ["claimed", "running"] as const;

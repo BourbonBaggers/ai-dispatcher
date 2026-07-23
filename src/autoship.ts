@@ -101,6 +101,32 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   const ci = await github.prChecksState(pr);
   if (ci !== "pass") {
     logger.info("autoship: CI not green, not shipping", { issue: run.issueNumber, pr, ci });
+    if (ci === "fail") {
+      // CI has definitively failed. Hold the issue so the dispatcher does not re-run the
+      // agent in an infinite poll loop — without a hold, the issue stays eligible because
+      // selection only looks at labels, not prior succeeded runs, so it picks this up every
+      // 15 minutes forever. A human must clear the failing checks and remove autoship-held.
+      await github.addLabel(run.issueNumber, AUTOSHIP_HELD_LABEL).catch(() => false);
+      await github
+        .comment(
+          run.issueNumber,
+          [
+            "## Autoship held — CI is failing",
+            "",
+            `CI checks on PR #\${pr} are failing. The dispatcher will not re-run until the \`autoship-held\` label is removed.`,
+            "",
+            "Fix the failing checks, then remove the \`autoship-held\` label to re-enable dispatch.",
+          ].join("\n"),
+        )
+        .catch(() => false);
+      await notifier
+        .send(
+          `Autoship HELD #\${run.issueNumber}`,
+          `PR #\${pr} CI is failing — held for human review.`,
+          NOTIFY_PRIORITY_HIGH,
+        )
+        .catch(() => undefined);
+    }
     return { action: "ci_not_green", state: ci };
   }
 
