@@ -16,7 +16,8 @@
 # Contract (env in): AUTOSHIP_PR_NUMBER, AUTOSHIP_REPO (required).
 # Optional: AUTOSHIP_PR_HEAD_SHA, AUTOSHIP_BASE_SHA,
 #           AUTOSHIP_DEPLOYMENT_CHECKOUT / DISPATCHER_SELFSHIP_CHECKOUT
-#           (default ~/ai-dispatcher-deploy),
+#           (default ~/ai-dispatcher — the checkout the systemd unit runs FROM, so a
+#           restart actually picks up the merged code; NOT a separate deploy checkout),
 #           DISPATCHER_SELFSHIP_UNIT     (default ai-dispatcher.service).
 #
 # Exit 0 = merged, smoke-passed, restart handed off. The detached phase reports the final
@@ -24,7 +25,12 @@
 
 set -euo pipefail
 
-CHECKOUT="${AUTOSHIP_DEPLOYMENT_CHECKOUT:-${DISPATCHER_SELFSHIP_CHECKOUT:-$HOME/ai-dispatcher-deploy}}"
+# Default to the checkout the service actually runs from ($HOME/ai-dispatcher), so a
+# restart deploys the merged code. A separate ~/ai-dispatcher-deploy checkout would be
+# merged into but never served. The dispatcher normally passes AUTOSHIP_DEPLOYMENT_CHECKOUT
+# explicitly (DISPATCHER_AUTOSHIP_DEPLOYMENT_DIR), which must point at that same running
+# checkout for the self-instance.
+CHECKOUT="${AUTOSHIP_DEPLOYMENT_CHECKOUT:-${DISPATCHER_SELFSHIP_CHECKOUT:-$HOME/ai-dispatcher}}"
 UNIT="${DISPATCHER_SELFSHIP_UNIT:-ai-dispatcher.service}"
 
 log() { echo "[self-ship] $*"; }
