@@ -328,6 +328,7 @@ function autoshipConfig(overrides: Partial<DispatcherConfig> = {}): DispatcherCo
 function parkedDeps(store: StateStore, opts: {
   ci?: "pass" | "pending" | "fail";
   isDraft?: boolean;
+  issueLabels?: string[];
 }): { deps: DispatcherDeps; comments: string[]; labels: string[]; ships: { count: number } } {
   const comments: string[] = [];
   const labels: string[] = [];
@@ -352,6 +353,8 @@ function parkedDeps(store: StateStore, opts: {
       comment: async (_i: number, b: string) => { comments.push(b); return true; },
       addLabel: async (_i: number, l: string) => { labels.push(l); return true; },
       removeLabel: async () => true,
+      issueLabels: async () => opts.issueLabels ?? [],
+      markPrReady: async () => true,
     } as unknown as DispatcherDeps["github"],
     notifier: { send: async () => undefined },
     ship: async () => { ships.count += 1; return { ok: true, stdout: "", stderr: "", code: 0 }; },
@@ -421,12 +424,34 @@ test("recheckParkedRun ships once CI has resolved to green, without relaunching 
   }
 });
 
-test("recheckParkedRun holds (not re-run) when CI resolved green but the PR is still a draft", async () => {
+test("recheckParkedRun promotes a draft PR and ships it once CI is green (no human-review-required)", async () => {
   const dir = tmp();
   try {
     const store = StateStore.open(dir);
     const run1 = parkedRun(store);
-    const { deps, labels } = parkedDeps(store, { ci: "pass", isDraft: true });
+    const { deps, ships } = parkedDeps(store, { ci: "pass", isDraft: true });
+
+    await recheckParkedRun(deps, run1);
+
+    const after = store.getRun(run1.id);
+    assert.equal(after?.status, "shipped");
+    assert.equal(ships.count, 1);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recheckParkedRun holds a draft PR when the issue carries human-review-required", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run1 = parkedRun(store);
+    const { deps, labels } = parkedDeps(store, {
+      ci: "pass",
+      isDraft: true,
+      issueLabels: ["human-review-required"],
+    });
 
     await recheckParkedRun(deps, run1);
 

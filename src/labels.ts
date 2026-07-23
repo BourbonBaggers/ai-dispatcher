@@ -77,6 +77,17 @@ export const WORKING_LABEL = "agent-working";
  */
 export const HOLD_LABELS = ["needs-input", "blocked", "autoship-held"] as const;
 
+/**
+ * Issue-level escape hatch for autoship's draft-promotion (post-#366 policy: agents open
+ * ready-for-review PRs by default, and autoship promotes a stray draft it finds rather
+ * than holding it -- see autoship.ts). A human (or an agent invoking its own narrow
+ * destructive-change judgment) adds this to keep a specific draft PR from being promoted
+ * and shipped without a human looking at it first. This does NOT affect issue selection
+ * eligibility (that is HOLD_LABELS above) -- it only affects the draft-promotion
+ * decision inside autoshipRun.
+ */
+export const HUMAN_REVIEW_REQUIRED_LABEL = "human-review-required";
+
 /** Statuses in which a run still owns its issue claim. */
 export const ACTIVE_STATUSES = ["claimed", "running"] as const;
 /** Statuses whose artifacts (branch, checkout, plan) must be preserved and reused; the

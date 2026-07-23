@@ -47,6 +47,7 @@ import type { ExecResult } from "./exec.ts";
 import { NOTIFY_PRIORITY_DEFAULT, NOTIFY_PRIORITY_HIGH, type Notifier } from "./notify.ts";
 import type { Logger } from "./logger.ts";
 import type { GithubPrMergeInfo } from "./github.ts";
+import { HUMAN_REVIEW_REQUIRED_LABEL } from "./labels.ts";
 
 /** Label left on a PR that autoship refused to ship, so it is easy to find and requeue. */
 export const AUTOSHIP_HELD_LABEL = "autoship-held";
@@ -59,6 +60,10 @@ export interface AutoshipGithub {
   prDiff(pr: number): Promise<string | null>;
   comment(issue: number, body: string): Promise<boolean>;
   addLabel(issue: number, label: string): Promise<boolean>;
+  /** The issue's current labels -- used only to check for HUMAN_REVIEW_REQUIRED_LABEL. */
+  issueLabels(issue: number): Promise<string[]>;
+  /** `gh pr ready <pr>`: promotes a draft PR to ready for review. */
+  markPrReady(pr: number): Promise<boolean>;
 }
 
 /** Runs the repo-specific ship command with autoship context in the environment. */
@@ -229,7 +234,37 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
     return await mergeBlocked(deps, run, pr, "PR mergeability could not be read");
   }
   if (mergeInfo.isDraft) {
-    return await mergeBlocked(deps, run, pr, "PR is still a draft");
+    // Policy (post-#366): agents open ready-for-review PRs by default now, so a draft
+    // reaching here means either an agent used the narrow destructive-change exception
+    // (CLAUDE.md's dispatcher section) deliberately, or an older/misbehaving agent
+    // drafted a routine change out of habit. Only the former should stay a draft --
+    // signaled by a human (or the agent, on its own initiative) adding
+    // HUMAN_REVIEW_REQUIRED_LABEL to the issue. Absent that label, promote it: the
+    // draft flag is not itself a safety control, CI + the data-loss gate below are.
+    const labels = await github.issueLabels(run.issueNumber);
+    if (labels.includes(HUMAN_REVIEW_REQUIRED_LABEL)) {
+      return await mergeBlocked(
+        deps,
+        run,
+        pr,
+        `PR is still a draft and issue #${run.issueNumber} carries \`${HUMAN_REVIEW_REQUIRED_LABEL}\` -- a human must review and mark it ready`,
+      );
+    }
+    const promoted = await github.markPrReady(pr);
+    if (!promoted) {
+      return await mergeBlocked(
+        deps,
+        run,
+        pr,
+        "PR is still a draft and could not be promoted to ready for review (gh pr ready failed)",
+      );
+    }
+    logger.info("autoship: promoted a draft PR to ready for review", {
+      issue: run.issueNumber,
+      pr,
+    });
+    // Fall through -- re-evaluate as a now-ready PR against the checks below, in the
+    // same pass, rather than waiting for a later recheck.
   }
   if (mergeInfo.reviewDecision === "REVIEW_REQUIRED") {
     return await mergeBlocked(deps, run, pr, "PR requires review approval");

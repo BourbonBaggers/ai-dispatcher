@@ -6,6 +6,8 @@ import {
   removeLabelArgs,
   commentArgs,
   issueStateArgs,
+  issueLabelsArgs,
+  prReadyArgs,
   prChecksArgs,
   prMergeInfoArgs,
   GithubClient,
@@ -22,6 +24,8 @@ test("every gh argv builder threads --repo <slug> through", () => {
     removeLabelArgs(SLUG, 5, "agent-working"),
     commentArgs(SLUG, 5),
     issueStateArgs(SLUG, 5),
+    issueLabelsArgs(SLUG, 5),
+    prReadyArgs(SLUG, 7),
     prChecksArgs(SLUG, 7),
     prMergeInfoArgs(SLUG, 7),
   ];
@@ -147,4 +151,36 @@ test("prMergeInfo fails closed on malformed JSON", async () => {
   const { fn } = fakeExec(() => ok("{}"));
   const client = new GithubClient(repo.ok ? repo.value : (undefined as never), fn);
   assert.equal(await client.prMergeInfo(4), null);
+});
+
+test("issueLabels parses label names from the issue", async () => {
+  const repo = parseRepoSlug(SLUG);
+  const { fn } = fakeExec(() =>
+    ok(JSON.stringify({ labels: [{ name: "human-review-required" }, { name: "bug" }] })),
+  );
+  const client = new GithubClient(repo.ok ? repo.value : (undefined as never), fn);
+  assert.deepEqual(await client.issueLabels(6), ["human-review-required", "bug"]);
+});
+
+test("issueLabels fails safe (empty) on a gh failure or malformed JSON", async () => {
+  const repo = parseRepoSlug(SLUG);
+  const failing = fakeExec(() => ({ ok: false, stdout: "", stderr: "boom", code: 1 }));
+  const failingClient = new GithubClient(repo.ok ? repo.value : (undefined as never), failing.fn);
+  assert.deepEqual(await failingClient.issueLabels(6), []);
+
+  const malformed = fakeExec(() => ok("not json"));
+  const malformedClient = new GithubClient(repo.ok ? repo.value : (undefined as never), malformed.fn);
+  assert.deepEqual(await malformedClient.issueLabels(6), []);
+});
+
+test("markPrReady runs gh pr ready and reports success/failure", async () => {
+  const repo = parseRepoSlug(SLUG);
+  const succeeding = fakeExec(() => ok());
+  const successClient = new GithubClient(repo.ok ? repo.value : (undefined as never), succeeding.fn);
+  assert.equal(await successClient.markPrReady(9), true);
+  assert.deepEqual(succeeding.calls[0]!.args, ["pr", "ready", "9", "--repo", SLUG]);
+
+  const failing = fakeExec(() => ({ ok: false, stdout: "", stderr: "already ready", code: 1 }));
+  const failClient = new GithubClient(repo.ok ? repo.value : (undefined as never), failing.fn);
+  assert.equal(await failClient.markPrReady(9), false);
 });

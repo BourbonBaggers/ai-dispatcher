@@ -75,6 +75,14 @@ export function issueStateArgs(slug: string, issue: number): string[] {
   return ["issue", "view", String(issue), "--repo", slug, "--json", "state", "--jq", ".state"];
 }
 
+export function issueLabelsArgs(slug: string, issue: number): string[] {
+  return ["issue", "view", String(issue), "--repo", slug, "--json", "labels"];
+}
+
+export function prReadyArgs(slug: string, pr: number): string[] {
+  return ["pr", "ready", String(pr), "--repo", slug];
+}
+
 export function prMergeInfoArgs(slug: string, pr: number): string[] {
   return [
     "pr",
@@ -144,6 +152,24 @@ export class GithubClient {
   async issueState(issue: number): Promise<string> {
     const result = await this.exec("gh", issueStateArgs(this.repo.slug, issue));
     return result.ok ? result.stdout.trim() || "UNKNOWN" : "UNKNOWN";
+  }
+
+  /** The issue's current label names. Empty on any read failure -- fail safe (callers
+   * treat "no labels read" the same as "label absent", never as "label present"). */
+  async issueLabels(issue: number): Promise<string[]> {
+    const result = await this.exec("gh", issueLabelsArgs(this.repo.slug, issue));
+    if (!result.ok) return [];
+    try {
+      const raw = JSON.parse(result.stdout.trim()) as { labels?: Array<{ name: string }> };
+      return (raw.labels ?? []).map((l) => l.name);
+    } catch {
+      return [];
+    }
+  }
+
+  /** Promotes a draft PR to ready for review. */
+  async markPrReady(pr: number): Promise<boolean> {
+    return (await this.exec("gh", prReadyArgs(this.repo.slug, pr))).ok;
   }
 
   /**
