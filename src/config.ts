@@ -8,7 +8,7 @@
 
 import { parseArgs } from "node:util";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { resolveAuthorAuthConfig, type DispatcherAuthorAuthConfig } from "./author-auth.ts";
 import {
   DEFAULT_MAX_GENERATED_CONFLICT_RECOVERIES,
@@ -90,6 +90,8 @@ export interface DispatcherConfig {
   logLevel: LogLevel;
   /** Optional repo-specific autoship command; null when disabled (the default). */
   autoshipCmd: string | null;
+  /** Dedicated checkout used only by autoship deployment/rollback commands. */
+  autoshipDeploymentDir: string;
   /** Exact generated paths the autoship merge-conflict repair may discard/regenerate. */
   generatedConflictAllowlist: string[];
   /** Optional repo-owned command that regenerates allowlisted generated files after repair. */
@@ -138,6 +140,10 @@ Options:
   --state-dir <path>         Durable state directory (default: DISPATCHER_STATE_DIR or ./state).
   --repo-dir <path>          Mirror checkout of the target repo (default: DISPATCHER_REPO_DIR).
   --worktree-dir <path>      Parent dir for per-run checkouts (default: DISPATCHER_WORKTREE_DIR).
+  --autoship-deploy-dir <path>
+                             Dedicated autoship deployment checkout (default:
+                             DISPATCHER_AUTOSHIP_DEPLOYMENT_DIR or
+                             <state-dir>/autoship-deployments/<owner>-<repo>).
   --author-auth <mode>       Issue author authorization: author-allowlist | none
                              (default: DISPATCHER_ISSUE_AUTHOR_AUTH_MODE or author-allowlist).
   --trusted-authors <list>   Comma-separated trusted GitHub usernames for author-allowlist
@@ -177,6 +183,7 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
         "state-dir": { type: "string" },
         "repo-dir": { type: "string" },
         "worktree-dir": { type: "string" },
+        "autoship-deploy-dir": { type: "string" },
         "author-auth": { type: "string" },
         "trusted-authors": { type: "string" },
         "log-level": { type: "string" },
@@ -231,6 +238,12 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
   );
   const ntfyUrl = env.NTFY_URL;
   const ntfyTopic = env.NTFY_TOPIC;
+  const stateDir = expandHome(
+    (values["state-dir"] as string | undefined) ?? env.DISPATCHER_STATE_DIR ?? "./state",
+  );
+  const autoshipDeploymentDir =
+    (values["autoship-deploy-dir"] as string | undefined) ??
+    env.DISPATCHER_AUTOSHIP_DEPLOYMENT_DIR;
 
   const config: DispatcherConfig = {
     repo: repoResult.value,
@@ -245,11 +258,13 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
       (values["max-minutes"] as string | undefined) ?? env.DISPATCHER_MAX_RUNTIME_MINUTES,
       90,
     ),
-    stateDir: expandHome(
-      (values["state-dir"] as string | undefined) ?? env.DISPATCHER_STATE_DIR ?? "./state",
-    ),
+    stateDir,
     logLevel: logLevelRaw,
     autoshipCmd: autoship && autoship.trim() !== "" ? autoship : null,
+    autoshipDeploymentDir:
+      autoshipDeploymentDir && autoshipDeploymentDir.trim() !== ""
+        ? expandHome(autoshipDeploymentDir)
+        : join(stateDir, "autoship-deployments", `${repoResult.value.owner}-${repoResult.value.repo}`),
     generatedConflictAllowlist,
     generatedConflictRegenCmd:
       generatedConflictRegen && generatedConflictRegen.trim() !== ""

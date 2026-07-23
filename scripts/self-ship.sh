@@ -14,7 +14,9 @@
 # and survives the dispatcher restart. That detached phase owns verify + rollback + ntfy.
 #
 # Contract (env in): AUTOSHIP_PR_NUMBER, AUTOSHIP_REPO (required).
-# Optional: DISPATCHER_SELFSHIP_CHECKOUT (default ~/ai-dispatcher),
+# Optional: AUTOSHIP_PR_HEAD_SHA, AUTOSHIP_BASE_SHA,
+#           AUTOSHIP_DEPLOYMENT_CHECKOUT / DISPATCHER_SELFSHIP_CHECKOUT
+#           (default ~/ai-dispatcher-deploy),
 #           DISPATCHER_SELFSHIP_UNIT     (default ai-dispatcher.service).
 #
 # Exit 0 = merged, smoke-passed, restart handed off. The detached phase reports the final
@@ -22,11 +24,14 @@
 
 set -euo pipefail
 
-CHECKOUT="${DISPATCHER_SELFSHIP_CHECKOUT:-$HOME/ai-dispatcher}"
+CHECKOUT="${AUTOSHIP_DEPLOYMENT_CHECKOUT:-${DISPATCHER_SELFSHIP_CHECKOUT:-$HOME/ai-dispatcher-deploy}}"
 UNIT="${DISPATCHER_SELFSHIP_UNIT:-ai-dispatcher.service}"
 
 log() { echo "[self-ship] $*"; }
 die() { echo "[self-ship] FAIL: $*" >&2; exit 1; }
+report() { # state health pr_head merged deployed rollback last_good
+  echo "::autoship:: state=$1 health=$2 pr_head=${3:--} merged=${4:--} deployed=${5:--} rollback=${6:--} last_good=${7:--} checkout=$CHECKOUT"
+}
 
 # ── Detached phase: restart, verify health, roll back on self-brick. ──────────
 # Invoked as `self-ship.sh --restart <last_good_sha> <new_sha>` by systemd-run, OUTSIDE
@@ -68,7 +73,7 @@ fi
 # ── Synchronous phase: re-gate, merge, pull, smoke, hand off. ─────────────────
 PR="${AUTOSHIP_PR_NUMBER:?AUTOSHIP_PR_NUMBER is required}"
 REPO="${AUTOSHIP_REPO:?AUTOSHIP_REPO is required}"
-[[ -d "$CHECKOUT/.git" ]] || die "no checkout at $CHECKOUT"
+PR_HEAD="${AUTOSHIP_PR_HEAD_SHA:-}"
 
 # gh pr checks: 0 green, 8 pending, else failed. Capture explicitly (set -e safe).
 ci_rc=0
@@ -79,9 +84,38 @@ case "$ci_rc" in
   *) die "CI not green for PR #$PR (exit $ci_rc)" ;;
 esac
 
+mkdir -p "$(dirname "$CHECKOUT")"
+if [[ ! -d "$CHECKOUT/.git" ]]; then
+  rm -rf "$CHECKOUT"
+  gh repo clone "$REPO" "$CHECKOUT" -- --quiet
+fi
+
 cd "$CHECKOUT"
 git fetch origin --quiet
+# This checkout is dedicated to autoship, so bounded cleanup is allowed here. Do not apply
+# this pattern to an agent or human worktree; those may contain unsaved work.
+if [[ -d .git/rebase-merge || -d .git/rebase-apply ]]; then
+  log "aborting stale rebase state in dedicated deployment checkout"
+  git rebase --abort >/dev/null 2>&1 || true
+fi
+if [[ -f .git/MERGE_HEAD ]]; then
+  log "aborting stale merge state in dedicated deployment checkout"
+  git merge --abort >/dev/null 2>&1 || true
+fi
+if [[ -f .git/CHERRY_PICK_HEAD ]]; then
+  log "aborting stale cherry-pick state in dedicated deployment checkout"
+  git cherry-pick --abort >/dev/null 2>&1 || true
+fi
+if [[ -n "$(git status --porcelain=v1)" ]]; then
+  log "resetting dirty dedicated deployment checkout"
+  git status --porcelain=v1
+  git reset --hard origin/main --quiet
+  git clean -fd --quiet
+fi
+
 # The commit currently running is this checkout's HEAD; rollback returns to it.
+git checkout main --quiet
+git reset --hard origin/main --quiet
 LAST_GOOD="$(git rev-parse HEAD)"
 
 gh pr ready "$PR" --repo "$REPO" >/dev/null 2>&1 || true
@@ -90,9 +124,12 @@ gh pr merge "$PR" --repo "$REPO" --merge --delete-branch >/dev/null 2>&1 || merg
 [[ "$merge_rc" -eq 0 ]] || die "gh pr merge exited $merge_rc"
 
 git fetch origin --quiet
-git checkout main --quiet
-git reset --hard origin/main --quiet
-NEW="$(git rev-parse HEAD)"
+NEW="$(git rev-parse origin/main)"
+if [[ -n "$PR_HEAD" ]] && ! git merge-base --is-ancestor "$PR_HEAD" "$NEW"; then
+  report "merge_succeeded_deployment_not_attempted" "unknown" "$PR_HEAD" "$NEW" "-" "-" "$LAST_GOOD"
+  die "merged main $NEW does not contain expected PR head $PR_HEAD"
+fi
+git reset --hard "$NEW" --quiet
 log "merged PR #$PR; main is $NEW (was $LAST_GOOD)"
 
 # Smoke: a merge of two green branches can still be semantically broken. Typecheck the
@@ -103,6 +140,7 @@ if ! npm run typecheck >/dev/null 2>&1; then
   log "merged code fails typecheck — reverting main, NOT restarting"
   git revert --no-edit -m 1 "$NEW" >/dev/null 2>&1 || git reset --hard "$LAST_GOOD" --quiet
   git push origin main --quiet 2>/dev/null || git push --force-with-lease origin main --quiet
+  report "merge_succeeded_deployment_not_attempted" "unknown" "$PR_HEAD" "$NEW" "-" "-" "$LAST_GOOD"
   die "PR #$PR merged but failed typecheck on main; reverted, service untouched"
 fi
 

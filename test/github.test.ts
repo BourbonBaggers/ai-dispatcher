@@ -121,7 +121,9 @@ test("prMergeInfo parses structured PR mergeability fields", async () => {
     ok(
       JSON.stringify({
         baseRefName: "main",
+        baseRefOid: "base123",
         headRefName: "issue-4-x",
+        headRefOid: "head456",
         isDraft: false,
         mergeStateStatus: "DIRTY",
         reviewDecision: null,
@@ -131,7 +133,9 @@ test("prMergeInfo parses structured PR mergeability fields", async () => {
   const client = new GithubClient(repo.ok ? repo.value : (undefined as never), fn);
   assert.deepEqual(await client.prMergeInfo(4), {
     baseRefName: "main",
+    baseRefOid: "base123",
     headRefName: "issue-4-x",
+    headRefOid: "head456",
     isDraft: false,
     mergeStateStatus: "DIRTY",
     reviewDecision: null,

@@ -66,6 +66,7 @@ test("parseCliConfig resolves a full config with the flag winning over env", () 
   const result = parseCliConfig(["--repo", "acme/widgets", "--once", "--interval", "120"], {
     DISPATCHER_REPO: "other/thing",
     DISPATCHER_REPO_DIR: "/mirror",
+    DISPATCHER_STATE_DIR: "/state",
     DISPATCHER_WORKTREE_DIR: "/worktrees",
     DISPATCHER_MAX_RUNTIME_MINUTES: "45",
     DISPATCHER_ISSUE_AUTHOR_AUTH_MODE: "author-allowlist",
@@ -77,8 +78,30 @@ test("parseCliConfig resolves a full config with the flag winning over env", () 
   assert.equal(c.once, true);
   assert.equal(c.pollIntervalSeconds, 120);
   assert.equal(c.maxRuntimeMinutes, 45);
+  assert.equal(c.autoshipDeploymentDir, "/state/autoship-deployments/acme-widgets");
   assert.equal(c.dryRun, false);
   assert.equal(c.authorAuth.ok && c.authorAuth.mode, "author-allowlist");
+});
+
+test("parseCliConfig resolves the autoship deployment checkout from env or flag", () => {
+  const fromEnv = parseCliConfig(["--repo", "acme/widgets"], {
+    DISPATCHER_REPO_DIR: "/mirror",
+    DISPATCHER_WORKTREE_DIR: "/worktrees",
+    DISPATCHER_AUTOSHIP_DEPLOYMENT_DIR: "/deploy/env",
+  });
+  assert.equal(fromEnv.ok, true);
+  assert.equal(fromEnv.config!.autoshipDeploymentDir, "/deploy/env");
+
+  const fromFlag = parseCliConfig(
+    ["--repo", "acme/widgets", "--autoship-deploy-dir", "/deploy/flag"],
+    {
+      DISPATCHER_REPO_DIR: "/mirror",
+      DISPATCHER_WORKTREE_DIR: "/worktrees",
+      DISPATCHER_AUTOSHIP_DEPLOYMENT_DIR: "/deploy/env",
+    },
+  );
+  assert.equal(fromFlag.ok, true);
+  assert.equal(fromFlag.config!.autoshipDeploymentDir, "/deploy/flag");
 });
 
 test("parseCliConfig falls back to DISPATCHER_REPO when no flag is given", () => {
