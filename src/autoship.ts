@@ -24,6 +24,7 @@
  */
 
 import { assessDataLossRisk, parseUnifiedDiff } from "./autoship-gate.ts";
+import { classifyShipResult, type AutoshipShipState } from "./autoship-deployment.ts";
 import {
   repairGeneratedFileConflicts,
   type GeneratedConflictRepairRequest,
@@ -52,6 +53,7 @@ export interface AutoshipGithub {
 export type ShipRunner = (
   command: string,
   env: Record<string, string>,
+  options?: { cwd?: string },
 ) => Promise<ExecResult>;
 
 export interface AutoshipDeps {
@@ -63,6 +65,8 @@ export interface AutoshipDeps {
   autoshipCmd: string | null;
   /** owner/repository, forwarded to the ship command. */
   repoSlug: string;
+  /** Dedicated checkout/worktree used only by autoship deployment and rollback. */
+  autoshipDeploymentCheckout: string;
   generatedConflictAllowlist: readonly string[];
   generatedConflictRegenCmd: string | null;
   generatedConflictMaxAttempts: number;
@@ -79,7 +83,7 @@ export type AutoshipOutcome =
   | { action: "merge_blocked"; reason: string }
   | { action: "conflict_recovery_failed"; reason: string; conflictPaths: string[] }
   | { action: "shipped" }
-  | { action: "ship_failed"; code: number | null; detail: string };
+  | { action: "ship_failed"; code: number | null; detail: string; state: AutoshipShipState };
 
 /**
  * Decide and, if warranted, ship one finalized run. Safe to call for every run — it
@@ -114,6 +118,9 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   if (mergeInfo.reviewDecision === "REVIEW_REQUIRED") {
     return await mergeBlocked(deps, run, pr, "PR requires review approval");
   }
+  if (!mergeInfo.headRefOid || !mergeInfo.baseRefOid) {
+    return await mergeBlocked(deps, run, pr, "PR head/base SHA could not be read");
+  }
   if (mergeInfo.mergeStateStatus === "DIRTY") {
     const recovered = await recoverGeneratedConflicts(deps, run, pr, mergeInfo);
     if (recovered.action !== "recovered") return recovered.outcome;
@@ -132,32 +139,94 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   }
 
   // 4. Ship. The command owns merge + deploy + health-check + rollback.
-  logger.info("autoship: shipping", { issue: run.issueNumber, pr });
+  logger.info("autoship: shipping", {
+    issue: run.issueNumber,
+    pr,
+    prHeadSha: mergeInfo.headRefOid,
+    baseSha: mergeInfo.baseRefOid,
+    deploymentCheckout: deps.autoshipDeploymentCheckout,
+  });
   const result = await deps.ship(deps.autoshipCmd, {
     AUTOSHIP_PR_NUMBER: String(pr),
     AUTOSHIP_ISSUE_NUMBER: String(run.issueNumber),
     AUTOSHIP_BRANCH: run.branch,
     AUTOSHIP_REPO: deps.repoSlug,
-  });
+    AUTOSHIP_PR_HEAD_SHA: mergeInfo.headRefOid,
+    AUTOSHIP_BASE_SHA: mergeInfo.baseRefOid,
+    AUTOSHIP_DEPLOYMENT_CHECKOUT: deps.autoshipDeploymentCheckout,
+  }, { cwd: deps.autoshipDeploymentCheckout });
+  const classified = classifyShipResult(result);
 
   if (result.code !== 0) {
-    const detail = (result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`).slice(-500);
-    logger.error("autoship: ship command failed", { issue: run.issueNumber, pr, code: result.code });
+    logger.error("autoship: ship command failed", {
+      issue: run.issueNumber,
+      pr,
+      code: result.code,
+      state: classified.state,
+      health: classified.health,
+      report: classified.report,
+    });
     await notifier
       .send(
-        `Autoship FAILED for #${run.issueNumber}`,
-        `PR #${pr} passed CI but the ship command exited ${result.code}. It should have rolled back — verify production. Detail: ${detail}`,
+        autoshipFailureTitle(run.issueNumber, classified.state),
+        autoshipFailureBody(pr, result.code, classified),
         NOTIFY_PRIORITY_HIGH,
       )
       .catch(() => undefined);
-    return { action: "ship_failed", code: result.code, detail };
+    return { action: "ship_failed", code: result.code, detail: classified.detail, state: classified.state };
   }
 
-  logger.info("autoship: shipped", { issue: run.issueNumber, pr });
+  logger.info("autoship: shipped", {
+    issue: run.issueNumber,
+    pr,
+    state: classified.state,
+    health: classified.health,
+    report: classified.report,
+  });
   await notifier
     .send(`Autoship: shipped #${run.issueNumber}`, `PR #${pr} merged and deployed.`, NOTIFY_PRIORITY_DEFAULT)
     .catch(() => undefined);
   return { action: "shipped" };
+}
+
+function autoshipFailureTitle(issue: number, state: AutoshipShipState): string {
+  switch (state) {
+    case "merge_succeeded_deployment_not_attempted":
+      return `Autoship MERGED but did not deploy #${issue}`;
+    case "deployment_failed_rollback_succeeded":
+      return `Autoship rolled back #${issue}`;
+    case "deployment_failed_rollback_failed":
+      return `Autoship rollback FAILED #${issue}`;
+    case "deployment_state_unknown":
+      return `Autoship state UNKNOWN #${issue}`;
+    case "shipped":
+      return `Autoship FAILED for #${issue}`;
+  }
+}
+
+function autoshipFailureBody(
+  pr: number,
+  code: number | null,
+  classified: ReturnType<typeof classifyShipResult>,
+): string {
+  const report = classified.report;
+  const facts = [
+    `PR #${pr} passed CI but the ship command exited ${code}.`,
+    `State: ${classified.state}.`,
+    `Health: ${classified.health}.`,
+    report?.mergedSha ? `Merged SHA: ${report.mergedSha}.` : null,
+    report?.deployedSha ? `Deployed SHA: ${report.deployedSha}.` : null,
+    report?.rollbackSha ? `Rollback SHA: ${report.rollbackSha}.` : null,
+    report?.lastKnownGoodSha ? `Last-known-good SHA: ${report.lastKnownGoodSha}.` : null,
+    report?.deploymentCheckoutPath ? `Deployment checkout: ${report.deploymentCheckoutPath}.` : null,
+    classified.detail ? `Detail: ${classified.detail}` : null,
+  ].filter((line): line is string => line !== null);
+
+  if (classified.state === "deployment_state_unknown") {
+    facts.push("Human production verification is required.");
+  }
+
+  return facts.join(" ");
 }
 
 async function recoverGeneratedConflicts(

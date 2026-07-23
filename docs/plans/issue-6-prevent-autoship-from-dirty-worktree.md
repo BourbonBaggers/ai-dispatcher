@@ -6,7 +6,7 @@ Add pure autoship deployment status/result modeling for clean dedicated checkout
 dirty-state diagnostics, exact SHA context, rollback truthfulness, and bounded recovery
 decisions. Cover the policy with focused unit tests.
 
-## Milestone 2: Autoship Handoff Integration
+## [DONE] Milestone 2: Autoship Handoff Integration
 
 Wire the deployment workspace contract into autoship so the repo-specific ship command
 receives exact PR/base SHA context and a deployment checkout path instead of relying on
