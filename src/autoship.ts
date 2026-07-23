@@ -9,8 +9,10 @@
  * The order of checks is the whole point, and every one of them was paid for in the
  * internal-tools incident that took production down for 40 hours:
  *
- *   1. Only a SUCCEEDED run (or one that FAILED solely because its own final CI check
- *      came back red) that opened a PR is a candidate. Nothing else ships.
+ *   1. Only a clean agent exit (exitCode 0) that opened a PR is a candidate --
+ *      regardless of which of shipped/ci_pending/ci_failed status it currently wears,
+ *      since this function is the sole authority that decides among those. Nothing
+ *      else (an agent that gave up or crashed) ships.
  *   2. Re-confirm CI is green NOW, from `gh pr checks` exit status — never a verdict
  *      observed earlier, never the agent's self-report.
  *   3. Data-loss gate: read the PR diff and hold anything irreversible for a human.
@@ -115,13 +117,15 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   if (!deps.autoshipCmd) {
     return { action: "skipped", reason: "autoship not configured" };
   }
-  // A run classified "failed" purely because its own final CI check came back red
-  // (classifyRunOutcome, runner.ts) still has a real PR worth fixing — only a run that
-  // exited non-zero or made zero commits is excluded, since self-heal is exclusively
-  // about red CI, never about resurrecting a run that never produced mergeable work.
-  const failedOnRedCi = run.status === "failed" && run.exitCode === 0;
-  if (!(run.status === "succeeded" || failedOnRedCi) || run.prNumber === null) {
-    return { action: "skipped", reason: "run is not a PR-producing success" };
+  // Candidacy is about what the run PRODUCED, not which of shipped/ci_pending/ci_failed
+  // status label it currently wears -- this function is the SOLE authority that decides
+  // among those, called both right after a fresh run and again on every parked recheck
+  // (dispatcher.ts's evaluateAutoship), so it must not gate on a status it might itself
+  // be about to overwrite. A clean agent exit (0) with a PR is always worth evaluating;
+  // a non-zero exit or zero commits (both land as `run.status === "failed"`) never is --
+  // there is nothing to ship or fix.
+  if (run.exitCode !== 0 || run.prNumber === null) {
+    return { action: "skipped", reason: "run is not a PR-producing clean exit" };
   }
   const pr = run.prNumber;
 
@@ -192,8 +196,8 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
       // Self-heal AND the escalation attempt are both exhausted. Hold the issue so the
       // dispatcher does not re-run the agent in an infinite poll loop — without a hold,
       // the issue stays eligible because selection only looks at labels, not prior
-      // succeeded runs, so it picks this up every 15 minutes forever. A human must clear
-      // the failing checks and remove autoship-held.
+      // prior resolved runs, so it picks this up every 15 minutes forever. A human must
+      // clear the failing checks and remove autoship-held.
       await stampHold(deps, run, "ci-exhausted");
       await github
         .comment(
@@ -278,6 +282,11 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
       health: classified.health,
       report: classified.report,
     });
+    // A failed (and, per the ship command's own contract, rolled-back) deploy is not
+    // something a retry on the next scan fixes by itself -- without a hold this would
+    // hammer the same ship command again every ~15 minutes on an unresolved deploy
+    // problem, the same silent-loop class of bug as the other hold paths (#366).
+    await stampHold(deps, run, "ship-failed");
     await notifier
       .send(
         autoshipFailureTitle(run.issueNumber, classified.state),
@@ -374,6 +383,11 @@ async function recoverGeneratedConflicts(
       conflicts: result.conflictPaths,
       reason: result.reason,
     });
+    // Same gap as the CI-exhaustion and merge_blocked holds (#366): a comment that says
+    // "held" without ever stamping the label leaves the issue fully eligible, so it gets
+    // re-claimed and re-run on every subsequent scan despite the conflict never resolving
+    // itself.
+    await stampHold(deps, run, "conflict-recovery-failed");
     await github
       .comment(
         run.issueNumber,

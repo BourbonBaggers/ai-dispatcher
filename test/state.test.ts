@@ -122,13 +122,35 @@ test("resumableRuns returns only interrupted/timed_out/token_exhausted, oldest-f
     const a = store.createRun(claimData(1));
     store.updateRun(a.id, { status: "timed_out", createdAt: 100 });
     const b = store.createRun(claimData(2));
-    store.updateRun(b.id, { status: "succeeded" });
+    store.updateRun(b.id, { status: "shipped" });
     const c = store.createRun(claimData(3));
     store.updateRun(c.id, { status: "interrupted", createdAt: 50 });
 
     const resumable = store.resumableRuns();
     assert.deepEqual(
       resumable.map((r) => r.issueNumber),
+      [3, 1], // createdAt 50 then 100
+    );
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("parkedRuns returns only ci_pending runs, oldest-first", () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const a = store.createRun(claimData(1));
+    store.updateRun(a.id, { status: "ci_pending", createdAt: 100 });
+    const b = store.createRun(claimData(2));
+    store.updateRun(b.id, { status: "shipped" });
+    const c = store.createRun(claimData(3));
+    store.updateRun(c.id, { status: "ci_pending", createdAt: 50 });
+
+    const parked = store.parkedRuns();
+    assert.deepEqual(
+      parked.map((r) => r.issueNumber),
       [3, 1], // createdAt 50 then 100
     );
     store.releaseLock();

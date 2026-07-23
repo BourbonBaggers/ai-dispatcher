@@ -4,7 +4,8 @@
  * A terminal `failed` run with no commit or PR increments the issue's consecutive
  * count for the normalized failure signature. On the third matching failure the issue
  * is deferred for 24 hours and one notification is sent. Counters reset when a run
- * succeeds or a failed run made meaningful progress (a commit or PR).
+ * ships, is held (a legitimate non-shipped terminal, not a failure), or a failed run
+ * made meaningful progress (a commit or PR).
  *
  * Pure functions over a plain record array: the store persists the returned records and
  * the dispatcher fires the returned notification, so nothing here touches IO.
@@ -140,7 +141,12 @@ export function recordTerminalRunOutcome(
   run: TerminalRunLike,
   nowMs: number,
 ): RunOutcomeAccounting {
-  if (run.status === "succeeded") {
+  // A confirmed ship, or a deliberate hold, both mean the agent did its job -- the PR
+  // was mergeable (or blocked by policy/human review, not by anything the agent got
+  // wrong). Either resolves any prior failure streak. `ci_pending`/`ci_failed` are
+  // deliberately excluded: they are not "done" yet (see the fall-through below), so
+  // whether this issue is ultimately a failure streak or not is still undecided.
+  if (run.status === "shipped" || run.status === "held") {
     return { records: resolveIssue(records, run.issueNumber, nowMs), deferred: false, summary: null, notification: null };
   }
   if (run.status !== "failed") {

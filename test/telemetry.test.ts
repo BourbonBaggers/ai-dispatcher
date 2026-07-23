@@ -39,7 +39,7 @@ function attempt(over: Partial<AttemptRecord> = {}): AttemptRecord {
     humanInterventionRequired: false,
     frontierModelUsed: false,
     manualOverride: false,
-    terminalStatus: "succeeded",
+    terminalStatus: "shipped",
     ...over,
   };
 }
@@ -62,7 +62,7 @@ test("aggregateIssue folds attempts and stays honest about token provenance", ()
 });
 
 test("aggregateIssue: a PR alone is not success — merge + prod are required", () => {
-  const attempts = [attempt({ terminalStatus: "succeeded", prCreated: true })];
+  const attempts = [attempt({ terminalStatus: "shipped", prCreated: true })];
   // Draft PR only: not success.
   assert.equal(aggregateIssue(1, attempts).success, false);
   assert.equal(aggregateIssue(1, attempts).prStatus, "draft");
@@ -86,7 +86,7 @@ test("aggregateIssue: a PR alone is not success — merge + prod are required", 
 test("aggregateIssue tracks multiple attempted models and the original", () => {
   const attempts = [
     attempt({ attemptId: "a1", startedAt: NOW, modelUsed: "claude-sonnet-5", terminalStatus: "failed", prCreated: false }),
-    attempt({ attemptId: "a2", startedAt: NOW + 10, modelUsed: "gpt-5.5", provider: "openai", terminalStatus: "succeeded", prCreated: true }),
+    attempt({ attemptId: "a2", startedAt: NOW + 10, modelUsed: "gpt-5.5", provider: "openai", terminalStatus: "shipped", prCreated: true }),
   ];
   const rec = aggregateIssue(1, attempts);
   assert.equal(rec.originalModel, "claude-sonnet-5");

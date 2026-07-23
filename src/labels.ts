@@ -79,15 +79,68 @@ export const HOLD_LABELS = ["needs-input", "blocked", "autoship-held"] as const;
 
 /** Statuses in which a run still owns its issue claim. */
 export const ACTIVE_STATUSES = ["claimed", "running"] as const;
-/** Statuses whose artifacts (branch, checkout, plan) must be preserved and reused. */
+/** Statuses whose artifacts (branch, checkout, plan) must be preserved and reused; the
+ * next scan RELAUNCHES THE AGENT to continue (a crash/timeout recovery). */
 export const RESUMABLE_STATUSES = ["interrupted", "timed_out", "token_exhausted"] as const;
+/**
+ * Statuses parked on a PR whose CI has not resolved yet. Unlike RESUMABLE_STATUSES, the
+ * next scan does NOT relaunch the agent — it only re-checks CI (`recheckParkedRun`,
+ * dispatcher.ts). This is the fix for the #366 class of bug: a run that produced a PR
+ * with CI still pending used to be marked "succeeded" outright, releasing the claim, so
+ * the very next scan re-claimed the issue and reran the FULL agent from scratch even
+ * though nothing had changed and CI just hadn't finished yet.
+ */
+export const PARKED_STATUSES = ["ci_pending"] as const;
+/**
+ * Mid-ladder statuses that hold the claim but have no automatic recovery path of their
+ * own via the scan loop — resolution happens synchronously, in-process, via
+ * `evaluateAutoship`'s self-heal/escalate calls, never by a later scan picking this
+ * status back up. Listed here only so a run that is (abnormally) still in this state
+ * blocks a fresh claim rather than being silently double-dispatched.
+ */
+export const LADDER_STATUSES = ["ci_failed"] as const;
 /** Statuses that block a fresh run for the same issue. */
-export const CLAIMING_STATUSES = [...ACTIVE_STATUSES, ...RESUMABLE_STATUSES] as const;
+export const CLAIMING_STATUSES = [
+  ...ACTIVE_STATUSES,
+  ...RESUMABLE_STATUSES,
+  ...PARKED_STATUSES,
+  ...LADDER_STATUSES,
+] as const;
 
+/**
+ * Run outcome semantics (ported from the #366 incident postmortem): a run is `shipped`
+ * ONLY when autoship has actually merged the PR and completed the deploy — never merely
+ * for opening a PR or observing green CI at agent hand-off, both of which used to be
+ * called "succeeded" and release the claim, letting the dispatcher re-run the same issue
+ * from scratch every ~15 minutes while a PR sat open or CI was still checking.
+ *
+ *   - "shipped"       TRUE success: PR merged, deploy completed (or, autoship not
+ *                      configured for this repo, a human has manually taken it from
+ *                      here — see `held` below for that fallback).
+ *   - "ci_pending"     Agent finished, PR open, CI has not resolved. Parked: the claim
+ *                      is held, and the next scan re-checks CI ONLY (no agent relaunch).
+ *   - "ci_failed"      CI is definitively red. Drives the self-heal -> escalate -> held
+ *                      ladder (`evaluateAutoship`, dispatcher.ts). Always resolved
+ *                      further within the same finalize pass; a run should not be found
+ *                      sitting in this status across a scan boundary in normal operation.
+ *   - "held"           Terminal, intentionally blocked: a destructive-change guardrail,
+ *                      a PR that cannot be merged (draft / needs review / unreadable),
+ *                      the self-heal+escalation ladder exhausted with CI still red, a
+ *                      failed ship/deploy attempt, or (when autoship is not configured)
+ *                      a clean, CI-green PR left for a human to review and merge
+ *                      manually. Acceptable without ever shipping — a human decides next.
+ *   - "failed"         The agent itself crashed, gave up (zero commits), or exited
+ *                      non-zero. Distinct from `ci_failed`: this is the agent's fault,
+ *                      not the PR's content's fault. Counts toward the 3-strike
+ *                      failure-deferral policy; `ci_failed`/`ci_pending`/`held` do not.
+ */
 export type DispatcherStatus =
   | "claimed"
   | "running"
-  | "succeeded"
+  | "shipped"
+  | "ci_pending"
+  | "ci_failed"
+  | "held"
   | "failed"
   | "timed_out"
   | "interrupted"

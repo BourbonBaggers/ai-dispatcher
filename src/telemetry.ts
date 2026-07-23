@@ -71,7 +71,7 @@ export interface AttemptRecord {
   humanInterventionRequired: boolean;
   frontierModelUsed: boolean;
   manualOverride: boolean;
-  /** Dispatcher terminal status (succeeded/failed/timed_out/interrupted/token_exhausted). */
+  /** Dispatcher terminal status (shipped/ci_pending/ci_failed/held/failed/timed_out/interrupted/token_exhausted). */
   terminalStatus: string;
 }
 
@@ -181,7 +181,7 @@ export function aggregateIssue(
     totalActiveDurationMs += a.activeDurationMs ?? 0;
     if (a.manualOverride) manualOverrideInvolved = true;
     // The completing model is the last attempt that reached a PR with a clean terminal state.
-    if (a.terminalStatus === "succeeded" && a.prCreated) finalCompletingModel = model;
+    if (a.terminalStatus === "shipped" && a.prCreated) finalCompletingModel = model;
   }
 
   const mergeStatus = overlay.mergeStatus ?? "unmerged";
