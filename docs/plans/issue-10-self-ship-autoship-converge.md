@@ -54,7 +54,7 @@ and its run record survives pruning.
   at `scripts/self-ship.sh`, set `DISPATCHER_AUTOSHIP_DEPLOYMENT_DIR=~/ai-dispatcher`, and
   the un-hold-to-resume-autoship behavior. Keep `shellcheck --severity=error` green.
 
-## Milestone 5: Full validation and PR
+## [DONE] Milestone 5: Full validation and PR
 
 `npm test`, `npm run typecheck`, and `shellcheck --severity=error scripts/self-ship.sh`.
 Commit each milestone, push the branch, open a ready-for-review PR referencing Issue #10.
