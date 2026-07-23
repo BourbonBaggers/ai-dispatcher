@@ -296,28 +296,19 @@ describe("autoshipRun — already merged (#10)", () => {
   });
 });
 
-describe("autoshipRun — data-loss gate", () => {
+describe("autoshipRun — autoship-everything policy (no data-loss / human-review gate)", () => {
   const destructiveDiff = [
     "diff --git a/prisma/migrations/x/migration.sql b/prisma/migrations/x/migration.sql",
     "+++ b/prisma/migrations/x/migration.sql",
     '+DROP TABLE "Retailer";',
   ].join("\n");
 
-  it("holds a destructive PR: labels, comments, ntfy, no ship", async () => {
+  it("ships a destructive PR — there is no data-loss gate; rollback is the net", async () => {
     const h = harness({ diff: destructiveDiff });
     const r = await autoshipRun(h.deps, succeededRun());
-    assert.equal(r.action, "held");
-    assert.equal(h.shipped.length, 0, "must not ship a held PR");
-    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
-    assert.match(h.comments[0]!, /data-loss/i);
-    assert.ok(h.pushes.some((p) => /HELD/.test(p.title) && p.priority === 4));
-  });
-
-  it("holds (fails safe) when the diff cannot be read", async () => {
-    const h = harness({ diff: null });
-    const r = await autoshipRun(h.deps, succeededRun());
-    assert.equal(r.action, "held");
-    assert.equal(h.shipped.length, 0);
+    assert.equal(r.action, "shipped");
+    assert.equal(h.shipped.length, 1);
+    assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL), "destructive changes must not be held");
   });
 
   it("ships a clean additive PR", async () => {
@@ -346,57 +337,29 @@ describe("autoshipRun — generated conflict recovery", () => {
     assert.equal(h.repairs, 1);
   });
 
-  it("does NOT promote a draft PR when the issue carries human-review-required", async () => {
+  it("promotes and ships even when the issue carries human-review-required (no human gate)", async () => {
     const h = harness({ mergeStateStatus: "DIRTY", isDraft: true, issueLabels: ["human-review-required"] });
     const r = await autoshipRun(h.deps, succeededRun());
-    assert.equal(r.action, "merge_blocked");
-    assert.equal(h.promotions, 0);
-    assert.equal(h.repairs, 0);
-    assert.equal(h.shipped.length, 0);
-    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
+    assert.equal(r.action, "shipped");
+    assert.equal(h.promotions, 1);
+    assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL), "human-review-required must not block");
   });
 
-  it("holds (does not ship) when promoting a draft PR fails", async () => {
+  it("ships even when marking the draft ready reports failure (the ship command re-readies + admin-merges)", async () => {
     const h = harness({ isDraft: true, markPrReadyOk: false, diff: "" });
     const r = await autoshipRun(h.deps, succeededRun());
-    assert.deepEqual(r, {
-      action: "merge_blocked",
-      reason: "PR is still a draft and could not be promoted to ready for review (gh pr ready failed)",
-    });
-    assert.equal(h.promotions, 1);
-    assert.equal(h.shipped.length, 0);
-    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
+    assert.equal(r.action, "shipped");
+    assert.equal(h.shipped.length, 1);
   });
 
-  it("does not repair PRs that still require review", async () => {
+  it("ships a PR that reports REVIEW_REQUIRED — the merge forces through with --admin", async () => {
     const h = harness({ mergeStateStatus: "DIRTY", reviewDecision: "REVIEW_REQUIRED" });
     const r = await autoshipRun(h.deps, succeededRun());
-    assert.deepEqual(r, { action: "merge_blocked", reason: "PR requires review approval" });
-    assert.equal(h.repairs, 0);
-    assert.equal(h.shipped.length, 0);
+    assert.equal(r.action, "shipped");
+    assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL), "review-required must not block");
   });
 
-  it("holds (stamps autoship-held) when human-review-required blocks promotion, so it does not get re-dispatched forever", async () => {
-    // Regression test for #366: mergeBlocked used to say "Autoship HELD" in its comment
-    // title without ever stamping the label, so the issue stayed fully eligible and got
-    // re-claimed and re-run on every single poll — dozens of times over many hours,
-    // every one a no-op. That gap is fixed regardless of WHY mergeBlocked fires; this
-    // exercises it via the one case that still leaves a PR in draft on purpose.
-    const h = harness({ isDraft: true, issueLabels: ["human-review-required"] });
-    const r = await autoshipRun(h.deps, succeededRun());
-    assert.equal(r.action, "merge_blocked");
-    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
-    assert.match(h.comments[0]!, /autoship-held.*label is removed/is);
-  });
-
-  it("holds on merge_blocked when a PR requires review, not just when it's a draft", async () => {
-    const h = harness({ reviewDecision: "REVIEW_REQUIRED" });
-    const r = await autoshipRun(h.deps, succeededRun());
-    assert.deepEqual(r, { action: "merge_blocked", reason: "PR requires review approval" });
-    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
-  });
-
-  it("holds on merge_blocked when PR mergeability could not be read at all", async () => {
+  it("merge_blocked ONLY when mergeability itself cannot be read — a genuine unknown, not a policy gate", async () => {
     const h = harness({});
     h.deps.github.prMergeInfo = async () => null;
     const r = await autoshipRun(h.deps, succeededRun());
@@ -404,14 +367,14 @@ describe("autoshipRun — generated conflict recovery", () => {
     assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
   });
 
-  it("logs loudly (does not silently no-op) when the hold label itself fails to apply", async () => {
-    // Regression test: this exact gap (addLabel returning false, discarded uninspected)
-    // is why #366 kept re-dispatching for 7+ hours even after the code was "fixed" to
-    // hold on merge_blocked -- the autoship-held label did not exist in the repo yet, so
-    // every addLabel call silently no-op'd and the issue stayed fully eligible.
-    const h = harness({ reviewDecision: "REVIEW_REQUIRED", addLabelFails: true });
+  it("logs loudly (does not silently no-op) when the hold label itself fails to apply on a genuine merge_blocked", async () => {
+    // Regression test (#366): a failed addLabel used to be discarded uninspected, so the
+    // issue stayed fully eligible and re-dispatched forever. Exercised via the one
+    // remaining merge_blocked case — mergeability truly unreadable.
+    const h = harness({ addLabelFails: true });
+    h.deps.github.prMergeInfo = async () => null;
     const r = await autoshipRun(h.deps, succeededRun());
-    assert.deepEqual(r, { action: "merge_blocked", reason: "PR requires review approval" });
+    assert.deepEqual(r, { action: "merge_blocked", reason: "PR mergeability could not be read" });
     assert.equal(h.labels.length, 0, "the fake reports the label never actually landed");
     assert.ok(
       h.errors.some((e) => /failed to stamp autoship-held/.test(e)),
