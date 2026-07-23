@@ -18,6 +18,7 @@ function succeededRun(over: Partial<RunRecord> = {}): RunRecord {
     exitCode: 0,
     ciSelfHealAttempts: 0,
     ciEscalated: false,
+    deployEscalated: false,
     ...over,
   } as unknown as RunRecord;
 }
@@ -442,15 +443,41 @@ describe("autoshipRun — shipping", () => {
     assert.equal(h.shipped[0]!.cwd, "/deploy/o-r");
   });
 
-  it("reports unknown state on non-zero exit without explicit rollback evidence", async () => {
+  it("escalates a first deploy failure to the frontier model instead of holding", async () => {
+    // Goal 3: mirror the CI ladder for deploy failures. The FIRST ship-command failure
+    // (deployEscalated=false) gets one frontier-model attempt before a human is paged.
+    const h = harness({
+      diff: "",
+      shipResult: { ok: false, stdout: "", stderr: "deploy blew up", code: 1 },
+      ciEscalationModel: "claude-opus-4-8",
+    });
+    const r = await autoshipRun(h.deps, succeededRun({ deployEscalated: false }));
+    assert.deepEqual(r, { action: "ship_escalate", model: "claude-opus-4-8" });
+    assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL), "must not hold before the escalation attempt runs");
+    assert.match(h.comments[0]!, /deploy failed, escalating/i);
+    assert.match(h.comments[0]!, /claude-opus-4-8/);
+    // A first-attempt escalation is routine progress, not a human page: DEFAULT priority.
+    assert.ok(h.pushes.some((p) => /escalating deploy #1 to claude-opus-4-8/.test(p.title) && p.priority === 3));
+  });
+
+  it("holds a deploy failure (autoship-held, HIGH) only after the deploy escalation is also exhausted", async () => {
     const h = harness({ diff: "", shipResult: { ok: false, stdout: "", stderr: "deploy blew up", code: 1 } });
-    const r = await autoshipRun(h.deps, succeededRun());
+    const r = await autoshipRun(h.deps, succeededRun({ deployEscalated: true }));
     assert.equal(r.action, "ship_failed");
     assert.equal(r.state, "deployment_state_unknown");
     assert.ok(h.pushes.some((p) => /UNKNOWN/.test(p.title) && p.priority === 4));
     // Regression test: a failed (and, per contract, rolled-back) deploy must hold too --
     // without this, the same unresolved deploy problem gets retried every ~15 minutes.
     assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
+  });
+
+  it("a spent CI escalation does not consume the deploy escalation budget", async () => {
+    // The two budgets are independent: a run that already burned ciEscalated greening
+    // checks still gets a fresh frontier attempt when the deploy fails.
+    const h = harness({ diff: "", shipResult: { ok: false, stdout: "", stderr: "deploy blew up", code: 1 } });
+    const r = await autoshipRun(h.deps, succeededRun({ ciEscalated: true, deployEscalated: false }));
+    assert.equal(r.action, "ship_escalate");
+    assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL));
   });
 
   it("reports rollback success only when the ship command explicitly says so", async () => {
@@ -463,7 +490,9 @@ describe("autoshipRun — shipping", () => {
         code: 1,
       },
     });
-    const r = await autoshipRun(h.deps, succeededRun());
+    // deployEscalated: the frontier deploy attempt is already spent, so this failure holds
+    // rather than escalating again -- that is the branch that reports the rolled-back state.
+    const r = await autoshipRun(h.deps, succeededRun({ deployEscalated: true }));
     assert.equal(r.action, "ship_failed");
     assert.equal(r.state, "deployment_failed_rollback_succeeded");
     assert.ok(h.pushes.some((p) => /rolled back/i.test(p.title) && p.priority === 4));
@@ -482,7 +511,11 @@ describe("autoshipRun — shipping", () => {
 
   it("does NOT close the issue when the ship command fails", async () => {
     const h = harness({ diff: "", shipResult: { ok: false, stdout: "", stderr: "deploy blew up", code: 1 } });
-    const r = await autoshipRun(h.deps, succeededRun({ issueNumber: 366 } as Partial<RunRecord>));
+    // deployEscalated so this lands on the terminal ship_failed hold, not the escalation.
+    const r = await autoshipRun(
+      h.deps,
+      succeededRun({ issueNumber: 366, deployEscalated: true } as Partial<RunRecord>),
+    );
     assert.equal(r.action, "ship_failed");
     assert.deepEqual(h.closedIssues, []);
   });
