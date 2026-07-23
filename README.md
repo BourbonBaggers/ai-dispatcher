@@ -212,6 +212,16 @@ once that escalation attempt is ALSO still red does autoship give up, stamp
 `autoship-held`, and notify a human — automation gets first crack (twice) at a
 known-recoverable problem, and the human is paged only once it has genuinely given up.
 
+A PR that is not mergeable for a reason other than red CI — still a draft, requires
+review, or its mergeability could not even be read — also stamps `autoship-held`. This
+used to be a comment-only "Autoship HELD" notice with no actual label, so a
+CI-green PR stuck in draft (nobody had marked it ready for review) got silently
+re-claimed and re-run by the dispatcher every single poll cycle forever, forever
+producing an identical no-op "run complete" — indistinguishable from the CI-red
+infinite-loop bug this whole self-heal system exists to prevent, just with a different
+trigger. Clear the label once the PR is ready (or its mergeability issue is resolved) to
+let autoship re-check it.
+
 ## State model
 
 All durable state is one atomically-written JSON file plus a lock, under `--state-dir`:
