@@ -165,6 +165,38 @@ test("parseCliConfig resolves ciSelfHealMaxAttempts from env", () => {
   assert.equal(result.config!.ciSelfHealMaxAttempts, 3);
 });
 
+test("parseCliConfig defaults ciEscalationModel to claude-opus-4-8", () => {
+  const result = parseCliConfig(["--repo", "acme/widgets"], {
+    DISPATCHER_REPO_DIR: "/mirror",
+    DISPATCHER_WORKTREE_DIR: "/worktrees",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.config!.ciEscalationModel, "claude-opus-4-8");
+});
+
+test("parseCliConfig resolves ciEscalationModel from env", () => {
+  const result = parseCliConfig(["--repo", "acme/widgets"], {
+    DISPATCHER_REPO_DIR: "/mirror",
+    DISPATCHER_WORKTREE_DIR: "/worktrees",
+    DISPATCHER_CI_ESCALATION_MODEL: "claude-sonnet-5",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.config!.ciEscalationModel, "claude-sonnet-5");
+});
+
+test("parseCliConfig rejects an unknown ciEscalationModel", () => {
+  const result = parseCliConfig(["--repo", "acme/widgets"], {
+    DISPATCHER_REPO_DIR: "/mirror",
+    DISPATCHER_WORKTREE_DIR: "/worktrees",
+    DISPATCHER_CI_ESCALATION_MODEL: "gpt-3-davinci",
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message ?? "", /Invalid DISPATCHER_CI_ESCALATION_MODEL/);
+});
+
 test("parseCliConfig fails closed inside author-allowlist mode", () => {
   const missing = parseCliConfig(["--repo", "acme/widgets"], {
     DISPATCHER_REPO_DIR: "/mirror",

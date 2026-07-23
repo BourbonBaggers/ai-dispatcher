@@ -204,9 +204,13 @@ Autoship also self-heals a red-CI PR before paging a human: when the re-confirme
 check fails, it relaunches the agent on the same branch (a resume, so the agent is handed
 the actual failing checks rather than guessing) instead of immediately holding. Only after
 `DISPATCHER_CI_SELF_HEAL_MAX_ATTEMPTS` (default `2`) such attempts are still red does
-autoship give up, stamp `autoship-held`, and notify a human — automation gets first crack
-at a known-recoverable problem, and the human is paged only once it has genuinely given
-up.
+autoship escalate: ONE further attempt is relaunched on `DISPATCHER_CI_ESCALATION_MODEL`
+(default `claude-opus-4-8`) — a stronger model gets one last try at a failure the default
+model got stuck on. The escalation is posted to the issue as its own comment ("Autoship:
+self-heal failed, escalating") so there is visibility into which attempt is running. Only
+once that escalation attempt is ALSO still red does autoship give up, stamp
+`autoship-held`, and notify a human — automation gets first crack (twice) at a
+known-recoverable problem, and the human is paged only once it has genuinely given up.
 
 ## State model
 

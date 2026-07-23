@@ -69,6 +69,7 @@ function config(overrides: Partial<DispatcherConfig> = {}): DispatcherConfig {
     generatedConflictMaxAttempts: 1,
     generatedConflictCiWaitSeconds: 900,
     ciSelfHealMaxAttempts: 2,
+    ciEscalationModel: "claude-opus-4-8",
     authorAuth: resolveAuthorAuthConfig("none", undefined),
     ntfyUrl: null,
     ntfyTopic: null,
