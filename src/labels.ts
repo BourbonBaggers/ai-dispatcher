@@ -110,12 +110,23 @@ export const PARKED_STATUSES = ["ci_pending"] as const;
  * blocks a fresh claim rather than being silently double-dispatched.
  */
 export const LADDER_STATUSES = ["ci_failed"] as const;
+/**
+ * Terminal-but-blocked: a green PR autoship refused to ship (destructive-change gate,
+ * un-mergeable PR, exhausted CI/deploy ladder, or an already-merged PR it stood down on).
+ * Unlike the pre-#10 behaviour, a held run KEEPS its issue claim: clearing `autoship-held`
+ * must RESUME autoship of the existing ready PR (`recheckHeldRun`, dispatcher.ts) — merge +
+ * deploy the PR that is already there — not re-dispatch a fresh agent run from scratch over
+ * work that is already done. Holding the claim is what stops that re-dispatch; the recheck
+ * is what actually converges it.
+ */
+export const HELD_STATUSES = ["held"] as const;
 /** Statuses that block a fresh run for the same issue. */
 export const CLAIMING_STATUSES = [
   ...ACTIVE_STATUSES,
   ...RESUMABLE_STATUSES,
   ...PARKED_STATUSES,
   ...LADDER_STATUSES,
+  ...HELD_STATUSES,
 ] as const;
 
 /**
@@ -137,9 +148,13 @@ export const CLAIMING_STATUSES = [
  *   - "held"           Terminal, intentionally blocked: a destructive-change guardrail,
  *                      a PR that cannot be merged (draft / needs review / unreadable),
  *                      the self-heal+escalation ladder exhausted with CI still red, a
- *                      failed ship/deploy attempt, or (when autoship is not configured)
- *                      a clean, CI-green PR left for a human to review and merge
- *                      manually. Acceptable without ever shipping — a human decides next.
+ *                      failed ship/deploy attempt, an already-merged PR autoship stood
+ *                      down on, or (when autoship is not configured) a clean, CI-green PR
+ *                      left for a human to review and merge manually. Acceptable without
+ *                      ever shipping — a human decides next. A held run KEEPS its claim
+ *                      (HELD_STATUSES ⊂ CLAIMING_STATUSES) so the issue is not re-dispatched
+ *                      from scratch; clearing `autoship-held` RESUMES autoship of the ready
+ *                      PR instead (`recheckHeldRun`).
  *   - "failed"         The agent itself crashed, gave up (zero commits), or exited
  *                      non-zero. Distinct from `ci_failed`: this is the agent's fault,
  *                      not the PR's content's fault. Counts toward the 3-strike

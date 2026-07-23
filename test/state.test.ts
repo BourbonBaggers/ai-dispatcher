@@ -159,6 +159,33 @@ test("parkedRuns returns only ci_pending runs, oldest-first", () => {
   }
 });
 
+test("heldRuns returns only held runs, and a held run still holds its claim (#10)", () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const a = store.createRun(claimData(1));
+    store.updateRun(a.id, { status: "held", createdAt: 100 });
+    const b = store.createRun(claimData(2));
+    store.updateRun(b.id, { status: "shipped" });
+    const c = store.createRun(claimData(3));
+    store.updateRun(c.id, { status: "held", createdAt: 50 });
+
+    assert.deepEqual(
+      store.heldRuns().map((r) => r.issueNumber),
+      [3, 1], // createdAt 50 then 100
+    );
+    // A held run keeps its claim so the issue is not re-dispatched from scratch while a
+    // human decides — clearing autoship-held resumes autoship of the ready PR instead.
+    assert.equal(store.claimingRunsByIssue().get(1), "held");
+    assert.equal(store.claimingRunsByIssue().get(3), "held");
+    // A shipped run, by contrast, releases its claim.
+    assert.equal(store.claimingRunsByIssue().has(2), false);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a corrupt state file is preserved and replaced with empty state", () => {
   const dir = tmp();
   try {
