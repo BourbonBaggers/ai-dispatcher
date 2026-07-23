@@ -17,6 +17,7 @@ import {
   PARKED_STATUSES,
   RESUMABLE_STATUSES,
   LADDER_STATUSES,
+  CLAIMING_STATUSES,
   WORKING_LABEL,
   branchNameFor,
   type DispatcherAgent,
@@ -32,7 +33,7 @@ import {
 import { launchRun } from "./runner.ts";
 import { join } from "node:path";
 import { NOTIFY_PRIORITY_DEFAULT, NOTIFY_PRIORITY_HIGH, type Notifier } from "./notify.ts";
-import { autoshipRun, type ShipRunner } from "./autoship.ts";
+import { autoshipRun, AUTOSHIP_HELD_LABEL, type ShipRunner } from "./autoship.ts";
 import { modelByCliModel } from "./models.ts";
 import { UNAVAILABLE_TOKENS, type AttemptRecord, type TelemetryStore } from "./telemetry.ts";
 import type { GithubClient, GithubIssue } from "./github.ts";
@@ -106,14 +107,18 @@ export function selectResumable(
 }
 
 /**
- * Whether a terminal run releases its issue claim. A resumable run (interrupted /
- * timed_out / token_exhausted) KEEPS its claim so the next scan resumes it rather than
- * starting the issue over; a parked run (ci_pending) also keeps its claim so the next
- * scan just re-checks CI instead of relaunching the agent; a ladder run (ci_failed) is
- * never actually left in this state across a scan boundary in normal operation (the
- * self-heal/escalate ladder resolves it synchronously) but keeps its claim too, so an
- * abnormal case never gets silently double-dispatched. Every other terminal status
- * (shipped, held, failed) frees the issue.
+ * Whether a terminal run has stopped actively working — i.e. the dispatcher should drop
+ * its `agent-working` label and NOT promise an automatic agent resume in the issue
+ * comment. A resumable run (interrupted / timed_out / token_exhausted) is still working
+ * (the next scan relaunches the agent); a parked run (ci_pending) is waiting on a CI
+ * recheck; a ladder run (ci_failed) is mid-self-heal. All three keep `agent-working`. Every
+ * other terminal status (shipped, held, failed) is done working, so this returns true.
+ *
+ * NOTE: this is NOT the same question as "does the run keep its ISSUE claim" — that is
+ * `CLAIMING_STATUSES` (state.ts), which additionally includes `held`. A held run has no
+ * agent working (so this returns true, dropping the label) yet still holds its claim, so
+ * the issue is not re-dispatched from scratch while a human decides — clearing
+ * `autoship-held` resumes autoship of the existing PR instead (`recheckHeldRun`).
  */
 export function shouldReleaseClaim(status: string): boolean {
   return !(
@@ -192,6 +197,25 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
       started: store.getRun(parked.id),
       message: `Rechecked CI for issue #${parked.issueNumber}.`,
     };
+  }
+
+  // ── Resume autoship for an un-held PR ──
+  // A held run keeps its issue claim, so a human clearing `autoship-held` no longer makes
+  // the issue eligible for a fresh-from-scratch re-dispatch (issue #10) — instead the
+  // dispatcher resumes autoship of the ready PR that is already there. Checked before fresh
+  // work for the same reason resumables/parked are: finish what is already in flight first.
+  // Reads at most one label set per held run; a still-held run is a cheap no-op. Skipped in
+  // dry-run, which must never merge/deploy anything.
+  if (!config.dryRun) {
+    for (const run of store.heldRuns()) {
+      const { rechecked } = await recheckHeldRun(deps, run);
+      if (rechecked) {
+        return {
+          started: store.getRun(run.id),
+          message: `Resumed autoship for un-held issue #${run.issueNumber} (PR #${run.prNumber ?? "?"}).`,
+        };
+      }
+    }
   }
 
   // ── Fresh work ──
@@ -577,6 +601,12 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
         store.updateRun(run.id, { status: "ci_failed" });
         await escalateRun(deps, run, outcome.model, "deploy");
         return { relaunched: true };
+      case "already_merged":
+        // The PR was merged out of band; autoship stood down (it did NOT deploy or verify,
+        // so this is not `shipped`). Held keeps the claim so the issue is neither
+        // re-dispatched nor re-shipped; a human verifies the deploy and closes it.
+        store.updateRun(run.id, { status: "held" });
+        return { relaunched: false };
       case "held":
       case "merge_blocked":
       case "conflict_recovery_failed":
@@ -608,6 +638,34 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
 export async function recheckParkedRun(deps: DispatcherDeps, run: RunRecord): Promise<void> {
   deps.logger.info("rechecking parked run's CI", { runId: run.id, issue: run.issueNumber });
   await evaluateAutoship(deps, run);
+}
+
+/**
+ * Rechecks a HELD run to see whether a human has approved it for shipping. A held run keeps
+ * its issue claim (HELD_STATUSES ⊂ CLAIMING_STATUSES), so the issue is never re-dispatched
+ * from scratch while it waits. The single signal that a human has approved is the removal of
+ * the `autoship-held` label; while that label is still present this is a cheap no-op. Once it
+ * is gone, this RESUMES autoship of the existing ready PR through the exact same
+ * `evaluateAutoship` pipeline a fresh or parked run goes through — merge + deploy the PR that
+ * is already there — rather than relaunching the agent to redo work that is already done
+ * (issue #10). Like `recheckParkedRun`, it deliberately does NOT go through `finalizeRun`:
+ * there is no new agent run to record telemetry for, and `evaluateAutoship` owns its own
+ * comment/notify for every outcome. Returns whether it actually resumed, so the scan loop
+ * knows whether this counts as the scan's action.
+ */
+export async function recheckHeldRun(deps: DispatcherDeps, run: RunRecord): Promise<{ rechecked: boolean }> {
+  const labels = await deps.github.issueLabels(run.issueNumber);
+  if (labels.includes(AUTOSHIP_HELD_LABEL)) {
+    // Still held by a human — leave it exactly as it is.
+    return { rechecked: false };
+  }
+  deps.logger.info("held PR un-held — resuming autoship without relaunching the agent", {
+    runId: run.id,
+    issue: run.issueNumber,
+    pr: run.prNumber ?? undefined,
+  });
+  await evaluateAutoship(deps, run);
+  return { rechecked: true };
 }
 
 /**
@@ -744,7 +802,10 @@ export function pruneOldRuns(deps: DispatcherDeps): void {
 export function runsToKeep(runs: RunRecord[], budget: number): Set<string> {
   const keep = new Set<string>();
   for (const run of runs) {
-    if (run.status === "claimed" || run.status === "running" || !shouldReleaseClaim(run.status)) {
+    // Never prune a run that still holds its issue claim — that would drop a live claim
+    // out from under the issue. This is every CLAIMING status: active, resumable, parked,
+    // mid-ladder, AND held (a held run keeps its claim so it is not re-dispatched, #10).
+    if ((CLAIMING_STATUSES as readonly string[]).includes(run.status)) {
       keep.add(run.id);
     }
   }
