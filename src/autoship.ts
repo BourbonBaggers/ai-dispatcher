@@ -54,6 +54,8 @@ export const AUTOSHIP_HELD_LABEL = "autoship-held";
 
 /** The GitHub surface autoship needs. A subset of GithubClient, so tests inject a fake. */
 export interface AutoshipGithub {
+  /** PR lifecycle state — used to recognise an already-merged PR and stand down (#10). */
+  prState(pr: number): Promise<"open" | "merged" | "closed" | "unknown">;
   prChecksState(pr: number): Promise<"pass" | "pending" | "fail">;
   waitForPrChecks(pr: number, timeoutSeconds: number): Promise<"pass" | "pending" | "fail">;
   prMergeInfo(pr: number): Promise<GithubPrMergeInfo | null>;
@@ -111,6 +113,7 @@ export type AutoshipOutcome =
   | { action: "merge_blocked"; reason: string }
   | { action: "conflict_recovery_failed"; reason: string; conflictPaths: string[] }
   | { action: "shipped" }
+  | { action: "already_merged" }
   | { action: "ship_escalate"; model: string }
   | { action: "ship_failed"; code: number | null; detail: string; state: AutoshipShipState };
 
@@ -136,6 +139,18 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
     return { action: "skipped", reason: "run is not a PR-producing clean exit" };
   }
   const pr = run.prNumber;
+
+  // 1b. Already merged? Stand down. A human (or a prior autoship pass) may have merged this
+  // PR out of band — most commonly by merging a held self-modification by hand instead of
+  // clearing `autoship-held` to let autoship do it. Running the ship command anyway would
+  // call `gh pr merge` on an already-merged PR, fail, and be misread as a broken deploy
+  // (the "PR already merged" hold loop in #10). Recognise it, hold cleanly with a plain
+  // informational note (NOT an error page), and never touch the ship command. The issue is
+  // deliberately NOT closed here: autoship did not perform or verify this deploy, and
+  // "merge is not shipped" (#366) — a human owns verifying it and closing the issue.
+  if ((await github.prState(pr)) === "merged") {
+    return await alreadyMerged(deps, run, pr);
+  }
 
   // 2. Re-confirm CI now. A verdict from when the run ended is not trusted.
   const ci = await github.prChecksState(pr);
@@ -582,6 +597,46 @@ async function stampHold(deps: AutoshipDeps, run: RunRecord, context: string): P
       { issue: run.issueNumber, context },
     );
   }
+}
+
+/**
+ * Stand down on a PR that is already merged (see the call site). Holds so the issue is not
+ * re-dispatched or re-shipped, but with a plain informational comment + DEFAULT-priority
+ * notification, not a failure page — an out-of-band merge is a human action, not a broken
+ * deploy. Idempotent and cheap to re-run: a later recheck sees `merged` again and lands
+ * right back here, a stable fixed point.
+ */
+async function alreadyMerged(deps: AutoshipDeps, run: RunRecord, pr: number): Promise<AutoshipOutcome> {
+  const { github, notifier, logger } = deps;
+  logger.info("autoship: PR already merged out of band — standing down", {
+    issue: run.issueNumber,
+    pr,
+  });
+  await stampHold(deps, run, "already-merged");
+  await github
+    .comment(
+      run.issueNumber,
+      [
+        "## Autoship standing down — PR already merged",
+        "",
+        `PR #${pr} is already merged, so autoship has nothing to merge or deploy and did **not**`,
+        "run the ship command. Autoship did not perform or verify this deploy — merging a PR is",
+        "not the same as shipping it (#366). If this repository self-deploys, confirm the",
+        "service is running the merged code, then close this issue.",
+        "",
+        "The `autoship-held` label keeps this out of the dispatch queue; the dispatcher will not",
+        "re-run the agent for it.",
+      ].join("\n"),
+    )
+    .catch(() => false);
+  await notifier
+    .send(
+      `Autoship stood down #${run.issueNumber}`,
+      `PR #${pr} is already merged — autoship did not deploy it; verify and close.`,
+      NOTIFY_PRIORITY_DEFAULT,
+    )
+    .catch(() => undefined);
+  return { action: "already_merged" };
 }
 
 async function mergeBlocked(
