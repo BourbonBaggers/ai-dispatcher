@@ -355,18 +355,32 @@ async function selfHealRun(deps: DispatcherDeps, run: RunRecord, attempt: number
 }
 
 /**
- * Escalation: the one-shot follow-up after selfHealRun's budget is exhausted and CI is
- * still red. Relaunches on the same branch/checkout (a resume, exactly like selfHealRun)
- * but overrides the run's agent/model/effort to `cliModel` — resolved via `modelByCliModel`
+ * Escalation: the one-shot follow-up after an automated ladder's budget is exhausted and
+ * the problem persists. Two callers, one per budget:
+ *   - `kind: "ci"`  — selfHealRun's budget is spent and CI is still red (sets `ciEscalated`).
+ *   - `kind: "deploy"` — the ship command failed and no deploy escalation has run yet
+ *     (sets `deployEscalated`).
+ * The two budgets are independent by design: a run may burn its CI escalation greening
+ * checks, ship, and only then hit a deploy failure — that deploy still deserves a fresh
+ * frontier attempt, so it flips a different flag.
+ *
+ * Relaunches on the same branch/checkout (a resume, exactly like selfHealRun) but
+ * overrides the run's agent/model/effort to `cliModel` — resolved via `modelByCliModel`
  * so the launched CLI and its model label stay consistent with the registry entry (an
  * escalation model is necessarily a `claude` model today, but this does not hard-code
  * that). Falls back to "claude" only if the configured model is somehow not in the
  * registry; `config.ts` already validates DISPATCHER_CI_ESCALATION_MODEL at startup, so
  * that fallback is a belt-and-suspenders default, not the expected path. Uses "effort:max"
  * or its per-agent equivalent — a last-resort attempt should not be effort-capped.
- * `run.ciEscalated` is set before launching so autoshipRun never grants a second one.
+ * The relevant escalation flag is set before launching so autoshipRun never grants a
+ * second one for the same failure kind.
  */
-async function escalateRun(deps: DispatcherDeps, run: RunRecord, cliModel: string): Promise<void> {
+async function escalateRun(
+  deps: DispatcherDeps,
+  run: RunRecord,
+  cliModel: string,
+  kind: "ci" | "deploy" = "ci",
+): Promise<void> {
   const { config, store, github, logger, notifier } = deps;
   const now = deps.now ?? (() => Date.now());
 
@@ -383,13 +397,13 @@ async function escalateRun(deps: DispatcherDeps, run: RunRecord, cliModel: strin
     cliModel,
     effortLabel: "effort:max",
     cliEffort,
-    ciEscalated: true,
+    ...(kind === "deploy" ? { deployEscalated: true } : { ciEscalated: true }),
     exitCode: null,
     failureSummary: null,
     finishedAt: null,
   });
 
-  logger.info("self-heal: escalating to a stronger model", {
+  logger.info(`self-heal: escalating ${kind} to a stronger model`, {
     runId: run.id,
     issue: run.issueNumber,
     agent,
@@ -553,7 +567,15 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
         return { relaunched: true };
       case "ci_escalate":
         store.updateRun(run.id, { status: "ci_failed" });
-        await escalateRun(deps, run, outcome.model);
+        await escalateRun(deps, run, outcome.model, "ci");
+        return { relaunched: true };
+      case "ship_escalate":
+        // A deploy failure gets the same one-shot frontier attempt CI failures do: relaunch
+        // the agent on the same PR to fix the code-or-deploy-path bug, then re-ship. Marked
+        // ci_failed so the run keeps its claim across the relaunch (LADDER_STATUSES), exactly
+        // like the CI escalation above -- the status names the ladder, not the failure kind.
+        store.updateRun(run.id, { status: "ci_failed" });
+        await escalateRun(deps, run, outcome.model, "deploy");
         return { relaunched: true };
       case "held":
       case "merge_blocked":
