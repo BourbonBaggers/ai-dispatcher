@@ -12,6 +12,7 @@ import {
   runsToKeep,
   reconcile,
   recheckParkedRun,
+  recheckHeldRun,
   MAX_AUTO_RESUMES,
   type DispatcherDeps,
 } from "../src/dispatcher.ts";
@@ -137,18 +138,19 @@ test("selectParked returns null when nothing is parked", () => {
 
 // ── claim release ─────────────────────────────────────────────────────────────
 
-test("resumable and parked statuses keep their claim; terminal ones release it", () => {
-  // Resumable (crash/timeout -- the next scan relaunches the agent).
+test("shouldReleaseClaim marks a run done-working (drops agent-working, no resume message)", () => {
+  // This governs the agent-working label + the "will auto-resume" comment, NOT issue-claim
+  // retention (that is CLAIMING_STATUSES, exercised in state.test.ts).
+  // Still working (agent-working stays): crash/timeout resumables, parked CI recheck, and
+  // the mid-ladder ci_failed marker.
   assert.equal(shouldReleaseClaim("interrupted"), false);
   assert.equal(shouldReleaseClaim("timed_out"), false);
   assert.equal(shouldReleaseClaim("token_exhausted"), false);
-  // Parked (ci_pending -- the next scan only re-checks CI) and mid-ladder (ci_failed --
-  // resolved synchronously, never actually left across a scan boundary, but must still
-  // hold the claim defensively).
   assert.equal(shouldReleaseClaim("ci_pending"), false);
   assert.equal(shouldReleaseClaim("ci_failed"), false);
-  // Truly terminal: a run is only "shipped" once autoship has actually merged + deployed
-  // (#366) -- it, `held`, `failed`, and `abandoned` all release the claim.
+  // Done working (agent-working dropped, no resume message): shipped, held, failed,
+  // abandoned. NB `held` still KEEPS its issue claim (see state.test.ts) even though no
+  // agent is working it — the two concepts are distinct.
   assert.equal(shouldReleaseClaim("shipped"), true);
   assert.equal(shouldReleaseClaim("held"), true);
   assert.equal(shouldReleaseClaim("failed"), true);
@@ -228,6 +230,18 @@ test("runsToKeep also retains a parked (ci_pending) run unconditionally, like a 
   ];
   const keep = runsToKeep(runs, 1);
   assert.ok(keep.has("parked"), "a parked run must never be pruned out from under its claim");
+});
+
+test("runsToKeep retains a held run unconditionally — its claim keeps the issue from being re-dispatched (#10)", () => {
+  const runs = [
+    run({ id: "held", status: "held", createdAt: 1 }),
+    run({ id: "a", status: "shipped", createdAt: 2 }),
+    run({ id: "b", status: "failed", createdAt: 3 }),
+  ];
+  // Budget of 1: without special-casing, the newest terminal (b) would win the only slot and
+  // the held run would be pruned, dropping the claim that blocks a fresh re-dispatch.
+  const keep = runsToKeep(runs, 1);
+  assert.ok(keep.has("held"), "a held run must never be pruned out from under its claim");
 });
 
 // ── reconcile ─────────────────────────────────────────────────────────────────
@@ -330,15 +344,24 @@ function parkedDeps(store: StateStore, opts: {
   ci?: "pass" | "pending" | "fail";
   isDraft?: boolean;
   issueLabels?: string[];
-}): { deps: DispatcherDeps; comments: string[]; labels: string[]; ships: { count: number } } {
+  prState?: "open" | "merged" | "closed" | "unknown";
+}): {
+  deps: DispatcherDeps;
+  comments: string[];
+  labels: string[];
+  removedLabels: string[];
+  ships: { count: number };
+} {
   const comments: string[] = [];
   const labels: string[] = [];
+  const removedLabels: string[] = [];
   const ships = { count: 0 };
   const deps: DispatcherDeps = {
     config: autoshipConfig(),
     store,
     logger: createLogger("error", () => undefined),
     github: {
+      prState: async () => opts.prState ?? "open",
       prChecksState: async () => opts.ci ?? "pending",
       waitForPrChecks: async () => opts.ci ?? "pending",
       prMergeInfo: async () => ({
@@ -353,7 +376,7 @@ function parkedDeps(store: StateStore, opts: {
       prDiff: async () => "",
       comment: async (_i: number, b: string) => { comments.push(b); return true; },
       addLabel: async (_i: number, l: string) => { labels.push(l); return true; },
-      removeLabel: async () => true,
+      removeLabel: async (_i: number, l: string) => { removedLabels.push(l); return true; },
       issueLabels: async () => opts.issueLabels ?? [],
       markPrReady: async () => true,
       closeIssue: async () => true,
@@ -362,7 +385,7 @@ function parkedDeps(store: StateStore, opts: {
     ship: async () => { ships.count += 1; return { ok: true, stdout: "", stderr: "", code: 0 }; },
     now: () => 5000,
   };
-  return { deps, comments, labels, ships };
+  return { deps, comments, labels, removedLabels, ships };
 }
 
 function parkedRun(store: StateStore): RunRecord {
@@ -460,6 +483,76 @@ test("recheckParkedRun holds a draft PR when the issue carries human-review-requ
     const after = store.getRun(run1.id);
     assert.equal(after?.status, "held");
     assert.ok(labels.includes("autoship-held"));
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── recheckHeldRun (#10: un-hold resumes autoship of the ready PR, not a fresh run) ──
+
+function heldRun(store: StateStore): RunRecord {
+  const created = parkedRun(store);
+  return store.updateRun(created.id, { status: "held" });
+}
+
+test("recheckHeldRun is a no-op while the issue still carries autoship-held", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run1 = heldRun(store);
+    // Still held by a human: the approval signal (label removed) has not happened.
+    const { deps, comments, labels, ships } = parkedDeps(store, {
+      ci: "pass",
+      issueLabels: ["autoship-held"],
+    });
+
+    const { rechecked } = await recheckHeldRun(deps, run1);
+
+    assert.equal(rechecked, false, "a still-held run must not be resumed");
+    assert.equal(store.getRun(run1.id)?.status, "held");
+    assert.equal(ships.count, 0, "the ship command must not run while still held");
+    assert.equal(comments.length, 0);
+    assert.equal(labels.length, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recheckHeldRun resumes autoship and ships once autoship-held is cleared, without relaunching the agent", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run1 = heldRun(store);
+    // Human approved: the autoship-held label is gone (issueLabels default []).
+    const { deps, ships } = parkedDeps(store, { ci: "pass" });
+
+    const { rechecked } = await recheckHeldRun(deps, run1);
+
+    assert.equal(rechecked, true);
+    assert.equal(store.getRun(run1.id)?.status, "shipped");
+    assert.equal(ships.count, 1, "the existing ready PR is merged + deployed exactly once");
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recheckHeldRun on an un-held but already-merged PR stands down (held), never re-running the ship command (#10)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run1 = heldRun(store);
+    // The human merged the PR by hand instead of un-holding, then cleared the label.
+    const { deps, labels, ships } = parkedDeps(store, { ci: "pass", prState: "merged" });
+
+    const { rechecked } = await recheckHeldRun(deps, run1);
+
+    assert.equal(rechecked, true);
+    assert.equal(store.getRun(run1.id)?.status, "held", "converges to a stable held, not a re-dispatch");
+    assert.equal(ships.count, 0, "never run gh pr merge on an already-merged PR");
+    assert.ok(labels.includes("autoship-held"), "re-stamped so it stays out of the queue");
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });
