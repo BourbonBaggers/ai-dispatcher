@@ -55,6 +55,8 @@ function harness(opts: {
   markPrReadyOk?: boolean;
   /** Whether closeIssue (gh issue close) succeeds -- default true. */
   closeIssueOk?: boolean;
+  /** PR lifecycle state returned by prState() -- default "open". */
+  prState?: "open" | "merged" | "closed" | "unknown";
 }): Harness {
   const shipped: Harness["shipped"] = [];
   const comments: string[] = [];
@@ -75,6 +77,7 @@ function harness(opts: {
     ciSelfHealMaxAttempts: opts.ciSelfHealMaxAttempts ?? 2,
     ciEscalationModel: opts.ciEscalationModel ?? "claude-opus-4-8",
     github: {
+      prState: async () => opts.prState ?? "open",
       prChecksState: async () => opts.ci ?? "pass",
       waitForPrChecks: async () => opts.waitedCi ?? "pass",
       prMergeInfo: async () => ({
@@ -262,6 +265,34 @@ describe("autoshipRun — CI self-heal", () => {
       succeededRun({ status: "failed", exitCode: 1 } as Partial<RunRecord>),
     );
     assert.equal(r.action, "skipped");
+  });
+});
+
+describe("autoshipRun — already merged (#10)", () => {
+  it("stands down on an already-merged PR without running the ship command", async () => {
+    const h = harness({ prState: "merged", diff: "" });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.deepEqual(r, { action: "already_merged" });
+    assert.equal(h.shipped.length, 0, "must never run gh pr merge on an already-merged PR");
+    // Held (via autoship-held) so the issue is neither re-dispatched nor re-shipped...
+    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
+    assert.match(h.comments[0]!, /already merged/i);
+    // ...but this is not an error page: an out-of-band merge is a human action, so DEFAULT.
+    assert.ok(h.pushes.some((p) => /stood down #1/.test(p.title) && p.priority === 3));
+  });
+
+  it("does NOT close the issue for an already-merged PR — merge is not a verified ship (#366)", async () => {
+    const h = harness({ prState: "merged", diff: "" });
+    const r = await autoshipRun(h.deps, succeededRun({ issueNumber: 9 } as Partial<RunRecord>));
+    assert.equal(r.action, "already_merged");
+    assert.deepEqual(h.closedIssues, [], "autoship did not deploy/verify it, so it does not close it");
+  });
+
+  it("evaluates a still-open PR normally (does not short-circuit)", async () => {
+    const h = harness({ prState: "open", diff: "" });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.equal(r.action, "shipped");
+    assert.equal(h.shipped.length, 1);
   });
 });
 

@@ -103,6 +103,10 @@ export function prChecksArgs(slug: string, pr: number): string[] {
   return ["pr", "checks", String(pr), "--repo", slug];
 }
 
+export function prStateArgs(slug: string, pr: number): string[] {
+  return ["pr", "view", String(pr), "--repo", slug, "--json", "state", "--jq", ".state"];
+}
+
 // ── Client ─────────────────────────────────────────────────────────────────────
 
 export class GithubClient {
@@ -212,6 +216,29 @@ export class GithubClient {
       await new Promise((resolve) =>
         setTimeout(resolve, Math.max(1, pollSeconds) * 1000),
       );
+    }
+  }
+
+  /**
+   * The PR's lifecycle state, read from `gh pr view --json state`: `open`, `merged`, or
+   * `closed` (closed without merging). `unknown` on any read/parse failure — callers
+   * treat that like `open` and fall through to the normal gates (fail safe: never assume
+   * a PR is merged/closed on a read error). Used so autoship recognises an already-merged
+   * PR and stands down instead of running `gh pr merge` on it and mistaking the
+   * "already merged" failure for a broken deploy (#10).
+   */
+  async prState(pr: number): Promise<"open" | "merged" | "closed" | "unknown"> {
+    const result = await this.exec("gh", prStateArgs(this.repo.slug, pr));
+    if (!result.ok) return "unknown";
+    switch (result.stdout.trim().toUpperCase()) {
+      case "OPEN":
+        return "open";
+      case "MERGED":
+        return "merged";
+      case "CLOSED":
+        return "closed";
+      default:
+        return "unknown";
     }
   }
 

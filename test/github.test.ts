@@ -11,6 +11,7 @@ import {
   closeIssueArgs,
   prChecksArgs,
   prMergeInfoArgs,
+  prStateArgs,
   GithubClient,
 } from "../src/github.ts";
 import type { ExecFn, ExecResult } from "../src/exec.ts";
@@ -30,6 +31,7 @@ test("every gh argv builder threads --repo <slug> through", () => {
     closeIssueArgs(SLUG, 5),
     prChecksArgs(SLUG, 7),
     prMergeInfoArgs(SLUG, 7),
+    prStateArgs(SLUG, 7),
   ];
   for (const args of builders) {
     const idx = args.indexOf("--repo");
@@ -153,6 +155,28 @@ test("prMergeInfo fails closed on malformed JSON", async () => {
   const { fn } = fakeExec(() => ok("{}"));
   const client = new GithubClient(repo.ok ? repo.value : (undefined as never), fn);
   assert.equal(await client.prMergeInfo(4), null);
+});
+
+test("prState maps gh pr view state to a lowercase lifecycle value", async () => {
+  const repo = parseRepoSlug(SLUG);
+  const cases: Array<[string, "open" | "merged" | "closed" | "unknown"]> = [
+    ["OPEN", "open"],
+    ["MERGED", "merged"],
+    ["CLOSED", "closed"],
+    ["weird", "unknown"],
+  ];
+  for (const [raw, expected] of cases) {
+    const { fn } = fakeExec(() => ok(`${raw}\n`));
+    const client = new GithubClient(repo.ok ? repo.value : (undefined as never), fn);
+    assert.equal(await client.prState(4), expected);
+  }
+});
+
+test("prState fails safe (unknown, treated like open) on a gh read failure", async () => {
+  const repo = parseRepoSlug(SLUG);
+  const { fn } = fakeExec(() => ({ ok: false, stdout: "", stderr: "boom", code: 1 }));
+  const client = new GithubClient(repo.ok ? repo.value : (undefined as never), fn);
+  assert.equal(await client.prState(4), "unknown");
 });
 
 test("issueLabels parses label names from the issue", async () => {
