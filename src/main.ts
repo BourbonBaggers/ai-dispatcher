@@ -8,6 +8,7 @@
  */
 
 import { parseCliConfig, expandHome, type DispatcherConfig } from "./config.ts";
+import { mkdirSync } from "node:fs";
 import { StateStore, LockHeldError } from "./state.ts";
 import { createLogger, type Logger } from "./logger.ts";
 import { createNotifier } from "./notify.ts";
@@ -69,11 +70,14 @@ export function buildDeps(config: DispatcherConfig, store: StateStore, logger: L
     // Autoship runner: invokes the configured ship command with a bash login shell so it
     // can source .env and reach nvm/gh, with a generous budget for deploy + health-check.
     // Inert unless config.autoshipCmd is set (autoshipRun self-guards on that).
-    ship: (command, env) =>
-      run("bash", ["-lc", command], {
+    ship: (command, env, options) => {
+      if (options?.cwd) mkdirSync(options.cwd, { recursive: true });
+      return run("bash", ["-lc", command], {
+        cwd: options?.cwd ?? config.autoshipDeploymentDir,
         env,
         timeoutMs: 20 * 60_000,
-      }),
+      });
+    },
   };
 }
 
