@@ -23,7 +23,7 @@ function succeededRun(over: Partial<RunRecord> = {}): RunRecord {
 
 interface Harness {
   deps: AutoshipDeps;
-  shipped: { command: string; env: Record<string, string> }[];
+  shipped: { command: string; env: Record<string, string>; cwd: string | undefined }[];
   comments: string[];
   labels: string[];
   pushes: { title: string; priority: number }[];
@@ -50,6 +50,7 @@ function harness(opts: {
   const deps: AutoshipDeps = {
     autoshipCmd: opts.autoshipCmd === undefined ? "ship.sh" : opts.autoshipCmd,
     repoSlug: "o/r",
+    autoshipDeploymentCheckout: "/deploy/o-r",
     generatedConflictAllowlist: ["docs/memory.md", "docs/researcher.md"],
     generatedConflictRegenCmd: null,
     generatedConflictMaxAttempts: 1,
@@ -60,7 +61,9 @@ function harness(opts: {
       waitForPrChecks: async () => opts.waitedCi ?? "pass",
       prMergeInfo: async () => ({
         baseRefName: "main",
+        baseRefOid: "base123",
         headRefName: "issue-1-x",
+        headRefOid: "head456",
         isDraft: opts.isDraft ?? false,
         mergeStateStatus: opts.mergeStateStatus ?? "CLEAN",
         reviewDecision: opts.reviewDecision ?? null,
@@ -78,7 +81,7 @@ function harness(opts: {
         commit: "cafebabe",
       };
     },
-    ship: async (command, env) => { shipped.push({ command, env }); return opts.shipResult ?? ok; },
+    ship: async (command, env, options) => { shipped.push({ command, env, cwd: options?.cwd }); return opts.shipResult ?? ok; },
     notifier: { send: async (title, _b, priority = 3) => { pushes.push({ title, priority }); } },
     logger: { debug() {}, info() {}, warn() {}, error() {} },
   };
@@ -288,20 +291,41 @@ describe("autoshipRun — generated conflict recovery", () => {
 });
 
 describe("autoshipRun — shipping", () => {
-  it("passes PR context to the ship command", async () => {
+  it("passes exact SHA and deployment checkout context to the ship command", async () => {
     const h = harness({ diff: "" });
     await autoshipRun(h.deps, succeededRun());
     assert.equal(h.shipped[0]!.command, "ship.sh");
     assert.equal(h.shipped[0]!.env.AUTOSHIP_PR_NUMBER, "42");
     assert.equal(h.shipped[0]!.env.AUTOSHIP_REPO, "o/r");
     assert.equal(h.shipped[0]!.env.AUTOSHIP_BRANCH, "issue-1-x");
+    assert.equal(h.shipped[0]!.env.AUTOSHIP_PR_HEAD_SHA, "head456");
+    assert.equal(h.shipped[0]!.env.AUTOSHIP_BASE_SHA, "base123");
+    assert.equal(h.shipped[0]!.env.AUTOSHIP_DEPLOYMENT_CHECKOUT, "/deploy/o-r");
+    assert.equal(h.shipped[0]!.cwd, "/deploy/o-r");
   });
 
-  it("reports ship_failed and ntfys high when the ship command exits non-zero", async () => {
+  it("reports unknown state on non-zero exit without explicit rollback evidence", async () => {
     const h = harness({ diff: "", shipResult: { ok: false, stdout: "", stderr: "deploy blew up", code: 1 } });
     const r = await autoshipRun(h.deps, succeededRun());
     assert.equal(r.action, "ship_failed");
-    assert.ok(h.pushes.some((p) => /FAILED/.test(p.title) && p.priority === 4));
+    assert.equal(r.state, "deployment_state_unknown");
+    assert.ok(h.pushes.some((p) => /UNKNOWN/.test(p.title) && p.priority === 4));
+  });
+
+  it("reports rollback success only when the ship command explicitly says so", async () => {
+    const h = harness({
+      diff: "",
+      shipResult: {
+        ok: false,
+        stdout: "::autoship:: state=deployment_failed_rollback_succeeded health=pass rollback=base123 last_good=base123\n",
+        stderr: "deploy failed",
+        code: 1,
+      },
+    });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.equal(r.action, "ship_failed");
+    assert.equal(r.state, "deployment_failed_rollback_succeeded");
+    assert.ok(h.pushes.some((p) => /rolled back/i.test(p.title) && p.priority === 4));
   });
 
   it("does not throw if notifier rejects (best-effort)", async () => {

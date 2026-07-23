@@ -364,6 +364,7 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
           notifier,
           logger,
           autoshipCmd: deps.config.autoshipCmd,
+          autoshipDeploymentCheckout: deps.config.autoshipDeploymentDir,
           repoSlug: deps.config.repo.slug,
           generatedConflictAllowlist: deps.config.generatedConflictAllowlist,
           generatedConflictRegenCmd: deps.config.generatedConflictRegenCmd,

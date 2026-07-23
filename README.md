@@ -172,9 +172,24 @@ Logs are one JSON object per line on stdout, ready for `journalctl`/`docker logs
 
 
 **Running more than one repo.** One process polls one --repo. To dispatch several repos,
-run one unit per repo, each with its OWN DISPATCHER_STATE_DIR, DISPATCHER_REPO_DIR, and
-DISPATCHER_WORKTREE_DIR (the state dir carries the single-instance lock, so shared dirs
-collide). Autoship, when enabled, is per-instance via DISPATCHER_AUTOSHIP_CMD.
+run one unit per repo, each with its OWN DISPATCHER_STATE_DIR, DISPATCHER_REPO_DIR,
+DISPATCHER_WORKTREE_DIR, and autoship deployment checkout (the state dir carries the
+single-instance lock, so shared dirs collide). Autoship, when enabled, is per-instance via
+DISPATCHER_AUTOSHIP_CMD.
+
+Autoship never runs the deployment command from an agent issue checkout. The dispatcher
+passes `AUTOSHIP_DEPLOYMENT_CHECKOUT` (default:
+`<DISPATCHER_STATE_DIR>/autoship-deployments/<owner>-<repo>`) and runs the command from
+that directory. It also passes exact immutable context:
+`AUTOSHIP_PR_HEAD_SHA`, `AUTOSHIP_BASE_SHA`, `AUTOSHIP_PR_NUMBER`, `AUTOSHIP_ISSUE_NUMBER`,
+`AUTOSHIP_BRANCH`, and `AUTOSHIP_REPO`. Repo-specific commands should deploy the exact
+merged SHA they produce, record last-known-good before changing production, and emit one
+status line on failure when state is known:
+`::autoship:: state=<state> health=<pass|fail|unknown> pr_head=<sha> merged=<sha> deployed=<sha|-> rollback=<sha|-> last_good=<sha|-> checkout=<path>`.
+Recognized states are `merge_succeeded_deployment_not_attempted`,
+`deployment_failed_rollback_succeeded`, `deployment_failed_rollback_failed`,
+`deployment_state_unknown`, and `shipped`. Without this line, non-zero exits are reported
+as unknown production state requiring human verification.
 
 Autoship can repair a green PR that is blocked only by generated-file merge conflicts.
 The recoverable paths are exact and explicit: `DISPATCHER_GENERATED_CONFLICT_ALLOWLIST`
@@ -216,8 +231,8 @@ per-run branch/checkout are always preserved.
 
 ## Limits and non-goals
 
-- **Ends at a draft PR.** It never merges, closes issues, or deploys. Autoship is
-  deliberately not wired in this extraction (`DISPATCHER_AUTOSHIP_CMD` is reserved).
+- **Default path ends at a draft PR.** It never merges, closes issues, or deploys unless
+  an operator explicitly configures `DISPATCHER_AUTOSHIP_CMD`.
 - **No web UI / SSE.** The embedded version's dashboard is intentionally dropped; the
   interface is the CLI, the logs, and the issue comments it posts.
 - **Serial, single-host.** One agent at a time, on the host where the CLIs are installed.

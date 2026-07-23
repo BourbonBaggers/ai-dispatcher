@@ -23,7 +23,9 @@ export interface GithubIssue {
 
 export interface GithubPrMergeInfo {
   baseRefName: string;
+  baseRefOid: string;
   headRefName: string;
+  headRefOid: string;
   isDraft: boolean;
   mergeStateStatus: string;
   reviewDecision: string | null;
@@ -81,7 +83,7 @@ export function prMergeInfoArgs(slug: string, pr: number): string[] {
     "--repo",
     slug,
     "--json",
-    "baseRefName,headRefName,isDraft,mergeStateStatus,reviewDecision",
+    "baseRefName,baseRefOid,headRefName,headRefOid,isDraft,mergeStateStatus,reviewDecision",
   ];
 }
 
@@ -180,7 +182,9 @@ export class GithubClient {
       const raw = JSON.parse(result.stdout.trim()) as Partial<GithubPrMergeInfo>;
       if (
         typeof raw.baseRefName !== "string" ||
+        typeof raw.baseRefOid !== "string" ||
         typeof raw.headRefName !== "string" ||
+        typeof raw.headRefOid !== "string" ||
         typeof raw.isDraft !== "boolean" ||
         typeof raw.mergeStateStatus !== "string"
       ) {
@@ -188,7 +192,9 @@ export class GithubClient {
       }
       return {
         baseRefName: raw.baseRefName,
+        baseRefOid: raw.baseRefOid,
         headRefName: raw.headRefName,
+        headRefOid: raw.headRefOid,
         isDraft: raw.isDraft,
         mergeStateStatus: raw.mergeStateStatus,
         reviewDecision: typeof raw.reviewDecision === "string" ? raw.reviewDecision : null,
