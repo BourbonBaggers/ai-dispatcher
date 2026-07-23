@@ -13,7 +13,7 @@ receives exact PR/base SHA context and a deployment checkout path instead of rel
 the agent checkout. Update notifications and logs so merge/deploy/rollback state is
 reported deterministically.
 
-## Milestone 3: Full Validation and PR
+## [DONE] Milestone 3: Full Validation and PR
 
 Run the required test and typecheck suite, commit completed milestones, push the issue
 branch, and open a draft PR containing `Closes #6`.
