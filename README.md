@@ -185,6 +185,14 @@ when those files must be recreated by a hook or script. Recovery is bounded by
 `DISPATCHER_GENERATED_CONFLICT_CI_WAIT_SECONDS` (default `900`) for repaired-branch CI
 before autoship may merge.
 
+Autoship also self-heals a red-CI PR before paging a human: when the re-confirmed CI
+check fails, it relaunches the agent on the same branch (a resume, so the agent is handed
+the actual failing checks rather than guessing) instead of immediately holding. Only after
+`DISPATCHER_CI_SELF_HEAL_MAX_ATTEMPTS` (default `2`) such attempts are still red does
+autoship give up, stamp `autoship-held`, and notify a human — automation gets first crack
+at a known-recoverable problem, and the human is paged only once it has genuinely given
+up.
+
 ## State model
 
 All durable state is one atomically-written JSON file plus a lock, under `--state-dir`:

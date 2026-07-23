@@ -9,7 +9,8 @@
  * The order of checks is the whole point, and every one of them was paid for in the
  * internal-tools incident that took production down for 40 hours:
  *
- *   1. Only a SUCCEEDED run that opened a PR is a candidate. Nothing else ships.
+ *   1. Only a SUCCEEDED run (or one that FAILED solely because its own final CI check
+ *      came back red) that opened a PR is a candidate. Nothing else ships.
  *   2. Re-confirm CI is green NOW, from `gh pr checks` exit status — never a verdict
  *      observed earlier, never the agent's self-report.
  *   3. Data-loss gate: read the PR diff and hold anything irreversible for a human.
@@ -17,6 +18,15 @@
  *   4. Only then invoke the ship command. Its exit code is authoritative: 0 = shipped
  *      and verified (the command owns deploy + health-check + rollback); non-zero = it
  *      failed and rolled back, and we escalate.
+ *
+ * Self-healing: a red CI verdict at step 2 does not immediately page a human. Up to
+ * `ciSelfHealMaxAttempts` times, this module instead hands control back to the caller
+ * (`{ action: "ci_self_heal" }`), which relaunches the agent on the same branch to
+ * diagnose and fix the failure — a resume, so dispatch-agent.sh feeds it the actual
+ * failing checks rather than making it guess. Only once that budget is exhausted does a
+ * red PR get the `autoship-held` label and a human notification. This mirrors the
+ * generated-conflict repair above it: automation gets first crack at a known-recoverable
+ * problem, and a human is paged only once automation has genuinely given up.
  *
  * The ship command is trusted to be honest about success because it, not this module,
  * can see production health. This module's job is to make sure it is only ever called on
@@ -67,6 +77,8 @@ export interface AutoshipDeps {
   generatedConflictRegenCmd: string | null;
   generatedConflictMaxAttempts: number;
   generatedConflictCiWaitSeconds: number;
+  /** Cap on self-heal relaunches for a red-CI PR before autoship-held is stamped. */
+  ciSelfHealMaxAttempts: number;
   repairGeneratedConflicts?: (
     request: GeneratedConflictRepairRequest,
   ) => Promise<GeneratedConflictRepairResult>;
@@ -75,6 +87,7 @@ export interface AutoshipDeps {
 export type AutoshipOutcome =
   | { action: "skipped"; reason: string }
   | { action: "ci_not_green"; state: "pending" | "fail" }
+  | { action: "ci_self_heal"; attempt: number; maxAttempts: number }
   | { action: "held"; reasons: string[] }
   | { action: "merge_blocked"; reason: string }
   | { action: "conflict_recovery_failed"; reason: string; conflictPaths: string[] }
@@ -92,7 +105,12 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   if (!deps.autoshipCmd) {
     return { action: "skipped", reason: "autoship not configured" };
   }
-  if (run.status !== "succeeded" || run.prNumber === null) {
+  // A run classified "failed" purely because its own final CI check came back red
+  // (classifyRunOutcome, runner.ts) still has a real PR worth fixing — only a run that
+  // exited non-zero or made zero commits is excluded, since self-heal is exclusively
+  // about red CI, never about resurrecting a run that never produced mergeable work.
+  const failedOnRedCi = run.status === "failed" && run.exitCode === 0;
+  if (!(run.status === "succeeded" || failedOnRedCi) || run.prNumber === null) {
     return { action: "skipped", reason: "run is not a PR-producing success" };
   }
   const pr = run.prNumber;
@@ -102,7 +120,31 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   if (ci !== "pass") {
     logger.info("autoship: CI not green, not shipping", { issue: run.issueNumber, pr, ci });
     if (ci === "fail") {
-      // CI has definitively failed. Hold the issue so the dispatcher does not re-run the
+      const attemptsSoFar = run.ciSelfHealAttempts ?? 0;
+      if (attemptsSoFar < deps.ciSelfHealMaxAttempts) {
+        // CI failed, but we have not exhausted the self-heal budget yet. Hand this back
+        // to the caller to relaunch the agent on the same branch (a resume, so
+        // dispatch-agent.sh feeds it the actual failing checks) rather than paging a
+        // human immediately — humans should only see autoship-held once automation has
+        // genuinely given up.
+        const attempt = attemptsSoFar + 1;
+        logger.info("autoship: CI failed, attempting self-heal", {
+          issue: run.issueNumber,
+          pr,
+          attempt,
+          maxAttempts: deps.ciSelfHealMaxAttempts,
+        });
+        await notifier
+          .send(
+            `Autoship: self-heal ${attempt}/${deps.ciSelfHealMaxAttempts} for #${run.issueNumber}`,
+            `PR #${pr} CI failed — relaunching the agent to diagnose and fix before holding for a human.`,
+            NOTIFY_PRIORITY_DEFAULT,
+          )
+          .catch(() => undefined);
+        return { action: "ci_self_heal", attempt, maxAttempts: deps.ciSelfHealMaxAttempts };
+      }
+
+      // Self-heal is exhausted. Hold the issue so the dispatcher does not re-run the
       // agent in an infinite poll loop — without a hold, the issue stays eligible because
       // selection only looks at labels, not prior succeeded runs, so it picks this up every
       // 15 minutes forever. A human must clear the failing checks and remove autoship-held.
@@ -111,18 +153,19 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
         .comment(
           run.issueNumber,
           [
-            "## Autoship held — CI is failing",
+            "## Autoship held — CI is still failing after self-heal",
             "",
-            `CI checks on PR #\${pr} are failing. The dispatcher will not re-run until the \`autoship-held\` label is removed.`,
+            `CI checks on PR #${pr} are failing after ${attemptsSoFar} automatic fix attempt(s). ` +
+              "The dispatcher will not re-run until the `autoship-held` label is removed.",
             "",
-            "Fix the failing checks, then remove the \`autoship-held\` label to re-enable dispatch.",
+            "Fix the failing checks, then remove the `autoship-held` label to re-enable dispatch.",
           ].join("\n"),
         )
         .catch(() => false);
       await notifier
         .send(
-          `Autoship HELD #\${run.issueNumber}`,
-          `PR #\${pr} CI is failing — held for human review.`,
+          `Autoship HELD #${run.issueNumber}`,
+          `PR #${pr} CI is still failing after ${attemptsSoFar} self-heal attempt(s) — held for human review.`,
           NOTIFY_PRIORITY_HIGH,
         )
         .catch(() => undefined);

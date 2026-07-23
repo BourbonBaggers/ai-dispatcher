@@ -15,6 +15,8 @@ function succeededRun(over: Partial<RunRecord> = {}): RunRecord {
     branch: "issue-1-x",
     issueNumber: 1,
     issueTitle: "t",
+    exitCode: 0,
+    ciSelfHealAttempts: 0,
     ...over,
   } as unknown as RunRecord;
 }
@@ -38,6 +40,7 @@ function harness(opts: {
   diff?: string | null;
   shipResult?: ExecResult;
   repairResult?: GeneratedConflictRepairResult;
+  ciSelfHealMaxAttempts?: number;
 }): Harness {
   const shipped: Harness["shipped"] = [];
   const comments: string[] = [];
@@ -51,6 +54,7 @@ function harness(opts: {
     generatedConflictRegenCmd: null,
     generatedConflictMaxAttempts: 1,
     generatedConflictCiWaitSeconds: 900,
+    ciSelfHealMaxAttempts: opts.ciSelfHealMaxAttempts ?? 2,
     github: {
       prChecksState: async () => opts.ci ?? "pass",
       waitForPrChecks: async () => opts.waitedCi ?? "pass",
@@ -100,7 +104,10 @@ describe("autoshipRun — gating", () => {
 
   it("skips a non-success run", async () => {
     const h = harness({});
-    const r = await autoshipRun(h.deps, succeededRun({ status: "failed" } as Partial<RunRecord>));
+    const r = await autoshipRun(
+      h.deps,
+      succeededRun({ status: "failed", exitCode: 1 } as Partial<RunRecord>),
+    );
     assert.equal(r.action, "skipped");
   });
 
@@ -117,11 +124,74 @@ describe("autoshipRun — gating", () => {
     assert.equal(h.shipped.length, 0);
   });
 
-  it("does not ship when CI has failed", async () => {
-    const h = harness({ ci: "fail" });
-    const r = await autoshipRun(h.deps, succeededRun());
+  it("does not ship when CI has failed (self-heal budget already exhausted)", async () => {
+    const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 2 });
+    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 2 }));
     assert.equal(r.action, "ci_not_green");
     assert.equal(h.shipped.length, 0);
+  });
+});
+
+describe("autoshipRun — CI self-heal", () => {
+  it("attempts a self-heal relaunch on the first red CI, without holding", async () => {
+    const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 2 });
+    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 0 }));
+    assert.deepEqual(r, { action: "ci_self_heal", attempt: 1, maxAttempts: 2 });
+    assert.equal(h.shipped.length, 0);
+    assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL), "must not hold while self-heal budget remains");
+    assert.equal(h.comments.length, 0, "no held-for-human comment yet");
+    assert.ok(h.pushes.some((p) => /self-heal 1\/2/.test(p.title) && p.priority === 3));
+  });
+
+  it("attempts a second self-heal when one attempt has already been made", async () => {
+    const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 2 });
+    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 1 }));
+    assert.deepEqual(r, { action: "ci_self_heal", attempt: 2, maxAttempts: 2 });
+    assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL));
+  });
+
+  it("holds with autoship-held once the self-heal budget is exhausted", async () => {
+    const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 2 });
+    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 2 }));
+    assert.deepEqual(r, { action: "ci_not_green", state: "fail" });
+    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
+    assert.match(h.comments[0]!, /still failing after self-heal/i);
+    assert.ok(h.pushes.some((p) => /HELD/.test(p.title) && p.priority === 4));
+  });
+
+  it("holds immediately when the self-heal budget is configured to zero", async () => {
+    const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 0 });
+    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 0 }));
+    assert.equal(r.action, "ci_not_green");
+    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
+  });
+
+  it("interpolates the PR and issue number correctly in the held comment/notification", async () => {
+    // Regression test: an earlier version of this code path had escaped template
+    // literals (`\${pr}`) that printed the literal text "${pr}" instead of the number.
+    const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 0 });
+    await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 0, issueNumber: 366 }));
+    assert.match(h.comments[0]!, /PR #42/);
+    assert.ok(!h.comments[0]!.includes("${pr}"));
+    assert.ok(h.pushes.some((p) => p.title.includes("#366") && !p.title.includes("${")));
+  });
+
+  it("treats a run that FAILED solely on red CI (exit 0) as a self-heal/ship candidate", async () => {
+    const h = harness({ ci: "pass", diff: "" });
+    const r = await autoshipRun(
+      h.deps,
+      succeededRun({ status: "failed", exitCode: 0, ciSelfHealAttempts: 1 } as Partial<RunRecord>),
+    );
+    assert.equal(r.action, "shipped");
+  });
+
+  it("still skips a failed run that exited non-zero (not a red-CI-only failure)", async () => {
+    const h = harness({});
+    const r = await autoshipRun(
+      h.deps,
+      succeededRun({ status: "failed", exitCode: 1 } as Partial<RunRecord>),
+    );
+    assert.equal(r.action, "skipped");
   });
 });
 

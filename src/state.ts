@@ -53,6 +53,12 @@ export interface RunRecord {
   lastProgressSeq: number;
   /** Total output lines seen this run. */
   outputSeq: number;
+  /**
+   * How many times autoship has relaunched the agent to fix this run's red-CI PR.
+   * Distinct from `resumeCount` (which tracks crash/timeout resumes): this counts
+   * self-heal attempts specifically, and is what caps them (DISPATCHER_CI_SELF_HEAL_MAX_ATTEMPTS).
+   */
+  ciSelfHealAttempts: number;
   remotePid: number | null;
   createdAt: number;
   startedAt: number;
@@ -268,6 +274,7 @@ export class StateStore {
       | "lastProgressSeq"
       | "outputSeq"
       | "remotePid"
+      | "ciSelfHealAttempts"
     >,
   ): RunRecord {
     if (this.activeRun()) throw new Error("a run is already active — the dispatcher is serial");
@@ -287,6 +294,7 @@ export class StateStore {
       resumeCount: 0,
       lastProgressSeq: 0,
       outputSeq: 0,
+      ciSelfHealAttempts: 0,
       remotePid: null,
       createdAt: now,
       startedAt: now,
