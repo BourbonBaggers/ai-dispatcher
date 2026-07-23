@@ -29,6 +29,7 @@ interface Harness {
   labels: string[];
   pushes: { title: string; priority: number }[];
   repairs: number;
+  errors: string[];
 }
 
 function harness(opts: {
@@ -43,11 +44,14 @@ function harness(opts: {
   repairResult?: GeneratedConflictRepairResult;
   ciSelfHealMaxAttempts?: number;
   ciEscalationModel?: string;
+  /** Simulates the repo label not existing yet (or another gh failure) — addLabel no-ops. */
+  addLabelFails?: boolean;
 }): Harness {
   const shipped: Harness["shipped"] = [];
   const comments: string[] = [];
   const labels: string[] = [];
   const pushes: Harness["pushes"] = [];
+  const errors: string[] = [];
   let repairs = 0;
   const deps: AutoshipDeps = {
     autoshipCmd: opts.autoshipCmd === undefined ? "ship.sh" : opts.autoshipCmd,
@@ -73,7 +77,11 @@ function harness(opts: {
       }),
       prDiff: async () => (opts.diff === undefined ? "" : opts.diff),
       comment: async (_i, b) => { comments.push(b); return true; },
-      addLabel: async (_i, l) => { labels.push(l); return true; },
+      addLabel: async (_i, l) => {
+        if (opts.addLabelFails) return false;
+        labels.push(l);
+        return true;
+      },
     },
     repairGeneratedConflicts: async () => {
       repairs += 1;
@@ -86,7 +94,12 @@ function harness(opts: {
     },
     ship: async (command, env, options) => { shipped.push({ command, env, cwd: options?.cwd }); return opts.shipResult ?? ok; },
     notifier: { send: async (title, _b, priority = 3) => { pushes.push({ title, priority }); } },
-    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    logger: {
+      debug() {},
+      info() {},
+      warn() {},
+      error(msg: string) { errors.push(msg); },
+    },
   };
   return {
     deps,
@@ -94,6 +107,7 @@ function harness(opts: {
     comments,
     labels,
     pushes,
+    errors,
     get repairs() {
       return repairs;
     },
@@ -306,6 +320,21 @@ describe("autoshipRun — generated conflict recovery", () => {
     const r = await autoshipRun(h.deps, succeededRun());
     assert.deepEqual(r, { action: "merge_blocked", reason: "PR mergeability could not be read" });
     assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
+  });
+
+  it("logs loudly (does not silently no-op) when the hold label itself fails to apply", async () => {
+    // Regression test: this exact gap (addLabel returning false, discarded uninspected)
+    // is why #366 kept re-dispatching for 7+ hours even after the code was "fixed" to
+    // hold on merge_blocked -- the autoship-held label did not exist in the repo yet, so
+    // every addLabel call silently no-op'd and the issue stayed fully eligible.
+    const h = harness({ isDraft: true, addLabelFails: true });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.deepEqual(r, { action: "merge_blocked", reason: "PR is still a draft" });
+    assert.equal(h.labels.length, 0, "the fake reports the label never actually landed");
+    assert.ok(
+      h.errors.some((e) => /failed to stamp autoship-held/.test(e)),
+      "a failed label stamp must be logged, not silently discarded",
+    );
   });
 
   it("repairs generated-only conflicts, waits for CI, then ships", async () => {

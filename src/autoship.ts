@@ -194,7 +194,7 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
       // the issue stays eligible because selection only looks at labels, not prior
       // succeeded runs, so it picks this up every 15 minutes forever. A human must clear
       // the failing checks and remove autoship-held.
-      await github.addLabel(run.issueNumber, AUTOSHIP_HELD_LABEL).catch(() => false);
+      await stampHold(deps, run, "ci-exhausted");
       await github
         .comment(
           run.issueNumber,
@@ -444,6 +444,28 @@ async function recoverGeneratedConflicts(
   return { action: "recovered" };
 }
 
+/**
+ * Best-effort label stamp for a hold outcome. `addLabel` returns false (never throws) on
+ * a failed gh invocation, and every caller here used to discard that boolean — so when
+ * AUTOSHIP_HELD_LABEL did not yet exist as a repo label, every stamp attempt silently
+ * no-op'd and the issue stayed fully eligible, indistinguishable from a healthy hold.
+ * That gap is exactly what let #366 loop for 7+ hours after the CI-exhaustion hold (and
+ * later mergeBlocked) were "fixed" in code: the label existing in GitHub was never
+ * verified. This does not retry — a missing label is a one-time repo setup problem, not
+ * a transient one — but it makes the failure loud instead of invisible.
+ */
+async function stampHold(deps: AutoshipDeps, run: RunRecord, context: string): Promise<void> {
+  const { github, logger } = deps;
+  const ok = await github.addLabel(run.issueNumber, AUTOSHIP_HELD_LABEL).catch(() => false);
+  if (!ok) {
+    logger.error(
+      "autoship: failed to stamp autoship-held — the issue remains eligible and may be " +
+        "re-dispatched again despite this hold (check that the label exists in the repo)",
+      { issue: run.issueNumber, context },
+    );
+  }
+}
+
 async function mergeBlocked(
   deps: AutoshipDeps,
   run: RunRecord,
@@ -460,7 +482,7 @@ async function mergeBlocked(
   // action (mark ready for review / approve / investigate an unreadable PR) is required
   // in all three mergeBlocked cases, and none of them resolve themselves on a retry, so
   // this now holds exactly like the CI-exhausted and data-loss-gate paths do.
-  await github.addLabel(run.issueNumber, AUTOSHIP_HELD_LABEL).catch(() => false);
+  await stampHold(deps, run, "merge-blocked");
   await github
     .comment(
       run.issueNumber,
@@ -493,7 +515,7 @@ async function hold(
   const { github, notifier, logger } = deps;
   logger.warn("autoship: held for data-loss risk", { issue: run.issueNumber, pr, reasons });
 
-  await github.addLabel(run.issueNumber, AUTOSHIP_HELD_LABEL).catch(() => false);
+  await stampHold(deps, run, "data-loss-gate");
   const body = [
     "## Autoship held — data-loss risk",
     "",
