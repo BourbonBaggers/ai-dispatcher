@@ -644,8 +644,10 @@ export async function recheckParkedRun(deps: DispatcherDeps, run: RunRecord): Pr
  * Rechecks a HELD run to see whether a human has approved it for shipping. A held run keeps
  * its issue claim (HELD_STATUSES ⊂ CLAIMING_STATUSES), so the issue is never re-dispatched
  * from scratch while it waits. The single signal that a human has approved is the removal of
- * the `autoship-held` label; while that label is still present this is a cheap no-op. Once it
- * is gone, this RESUMES autoship of the existing ready PR through the exact same
+ * the `autoship-held` label; while that label is still present this is a cheap no-op. A closed
+ * issue retires the held run before any label or autoship work, because human closure is
+ * terminal and must not produce repeated notifications. Once the label is gone on an OPEN
+ * issue, this RESUMES autoship of the existing ready PR through the exact same
  * `evaluateAutoship` pipeline a fresh or parked run goes through — merge + deploy the PR that
  * is already there — rather than relaunching the agent to redo work that is already done
  * (issue #10). Like `recheckParkedRun`, it deliberately does NOT go through `finalizeRun`:
@@ -654,6 +656,24 @@ export async function recheckParkedRun(deps: DispatcherDeps, run: RunRecord): Pr
  * knows whether this counts as the scan's action.
  */
 export async function recheckHeldRun(deps: DispatcherDeps, run: RunRecord): Promise<{ rechecked: boolean }> {
+  // A human closing the issue is a terminal resolution. Retire the historical hold so
+  // it releases its claim, becomes prunable, and cannot emit the same "already merged"
+  // alert on every poll. UNKNOWN also fails closed: a transient GitHub read failure is
+  // not evidence that a human approved shipping.
+  const issueState = await deps.github.issueState(run.issueNumber);
+  if (issueState === "CLOSED") {
+    deps.store.updateRun(run.id, { status: "abandoned" });
+    deps.logger.info("closed issue — retiring held run", {
+      runId: run.id,
+      issue: run.issueNumber,
+      pr: run.prNumber ?? undefined,
+    });
+    return { rechecked: false };
+  }
+  if (issueState !== "OPEN") {
+    return { rechecked: false };
+  }
+
   const labels = await deps.github.issueLabels(run.issueNumber);
   if (labels.includes(AUTOSHIP_HELD_LABEL)) {
     // Still held by a human — leave it exactly as it is.
