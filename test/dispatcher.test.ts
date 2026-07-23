@@ -473,12 +473,12 @@ test("recheckParkedRun promotes a draft PR and ships it once CI is green (no hum
   }
 });
 
-test("recheckParkedRun holds a draft PR when the issue carries human-review-required", async () => {
+test("recheckParkedRun promotes and ships a draft PR even with human-review-required (no human gate)", async () => {
   const dir = tmp();
   try {
     const store = StateStore.open(dir);
     const run1 = parkedRun(store);
-    const { deps, labels } = parkedDeps(store, {
+    const { deps, labels, ships } = parkedDeps(store, {
       ci: "pass",
       isDraft: true,
       issueLabels: ["human-review-required"],
@@ -487,8 +487,9 @@ test("recheckParkedRun holds a draft PR when the issue carries human-review-requ
     await recheckParkedRun(deps, run1);
 
     const after = store.getRun(run1.id);
-    assert.equal(after?.status, "held");
-    assert.ok(labels.includes("autoship-held"));
+    assert.equal(after?.status, "shipped");
+    assert.equal(ships.count, 1, "the draft is promoted and shipped, not held");
+    assert.ok(!labels.includes("autoship-held"), "human-review-required must not hold under autoship-everything policy");
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });
