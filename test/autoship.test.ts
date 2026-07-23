@@ -30,6 +30,7 @@ interface Harness {
   pushes: { title: string; priority: number }[];
   repairs: number;
   errors: string[];
+  promotions: number;
 }
 
 function harness(opts: {
@@ -46,6 +47,10 @@ function harness(opts: {
   ciEscalationModel?: string;
   /** Simulates the repo label not existing yet (or another gh failure) — addLabel no-ops. */
   addLabelFails?: boolean;
+  /** Issue labels returned by issueLabels() -- default none. */
+  issueLabels?: string[];
+  /** Whether markPrReady (gh pr ready) succeeds -- default true. */
+  markPrReadyOk?: boolean;
 }): Harness {
   const shipped: Harness["shipped"] = [];
   const comments: string[] = [];
@@ -53,6 +58,7 @@ function harness(opts: {
   const pushes: Harness["pushes"] = [];
   const errors: string[] = [];
   let repairs = 0;
+  let promotions = 0;
   const deps: AutoshipDeps = {
     autoshipCmd: opts.autoshipCmd === undefined ? "ship.sh" : opts.autoshipCmd,
     repoSlug: "o/r",
@@ -82,6 +88,11 @@ function harness(opts: {
         labels.push(l);
         return true;
       },
+      issueLabels: async () => opts.issueLabels ?? [],
+      markPrReady: async () => {
+        promotions += 1;
+        return opts.markPrReadyOk ?? true;
+      },
     },
     repairGeneratedConflicts: async () => {
       repairs += 1;
@@ -110,6 +121,9 @@ function harness(opts: {
     errors,
     get repairs() {
       return repairs;
+    },
+    get promotions() {
+      return promotions;
     },
   };
 }
@@ -278,12 +292,38 @@ describe("autoshipRun — data-loss gate", () => {
 });
 
 describe("autoshipRun — generated conflict recovery", () => {
-  it("does not repair draft PRs even when GitHub reports conflicts", async () => {
-    const h = harness({ mergeStateStatus: "DIRTY", isDraft: true });
+  it("promotes a draft PR (no human-review-required label) and still evaluates conflict recovery normally", async () => {
+    // Policy change (post-#366): agents open ready-for-review PRs by default now, so a
+    // draft reaching autoship gets promoted rather than parked forever behind a human
+    // click. Draft status alone must not block generated-conflict recovery once promoted.
+    const cleanDiff = ["diff --git a/src/x.ts b/src/x.ts", "+++ b/src/x.ts", "+export const x = 1;"].join("\n");
+    const h = harness({ mergeStateStatus: "DIRTY", isDraft: true, diff: cleanDiff });
     const r = await autoshipRun(h.deps, succeededRun());
-    assert.deepEqual(r, { action: "merge_blocked", reason: "PR is still a draft" });
+    assert.equal(r.action, "shipped");
+    assert.equal(h.promotions, 1);
+    assert.equal(h.repairs, 1);
+  });
+
+  it("does NOT promote a draft PR when the issue carries human-review-required", async () => {
+    const h = harness({ mergeStateStatus: "DIRTY", isDraft: true, issueLabels: ["human-review-required"] });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.equal(r.action, "merge_blocked");
+    assert.equal(h.promotions, 0);
     assert.equal(h.repairs, 0);
     assert.equal(h.shipped.length, 0);
+    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
+  });
+
+  it("holds (does not ship) when promoting a draft PR fails", async () => {
+    const h = harness({ isDraft: true, markPrReadyOk: false, diff: "" });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.deepEqual(r, {
+      action: "merge_blocked",
+      reason: "PR is still a draft and could not be promoted to ready for review (gh pr ready failed)",
+    });
+    assert.equal(h.promotions, 1);
+    assert.equal(h.shipped.length, 0);
+    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
   });
 
   it("does not repair PRs that still require review", async () => {
@@ -294,15 +334,15 @@ describe("autoshipRun — generated conflict recovery", () => {
     assert.equal(h.shipped.length, 0);
   });
 
-  it("holds (stamps autoship-held) on merge_blocked, so a draft PR does not get re-dispatched forever", async () => {
+  it("holds (stamps autoship-held) when human-review-required blocks promotion, so it does not get re-dispatched forever", async () => {
     // Regression test for #366: mergeBlocked used to say "Autoship HELD" in its comment
     // title without ever stamping the label, so the issue stayed fully eligible and got
     // re-claimed and re-run on every single poll — dozens of times over many hours,
-    // every one a no-op, because nothing had changed and nothing was going to change
-    // until a human converted the PR out of draft.
-    const h = harness({ isDraft: true });
+    // every one a no-op. That gap is fixed regardless of WHY mergeBlocked fires; this
+    // exercises it via the one case that still leaves a PR in draft on purpose.
+    const h = harness({ isDraft: true, issueLabels: ["human-review-required"] });
     const r = await autoshipRun(h.deps, succeededRun());
-    assert.deepEqual(r, { action: "merge_blocked", reason: "PR is still a draft" });
+    assert.equal(r.action, "merge_blocked");
     assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
     assert.match(h.comments[0]!, /autoship-held.*label is removed/is);
   });
@@ -327,9 +367,9 @@ describe("autoshipRun — generated conflict recovery", () => {
     // is why #366 kept re-dispatching for 7+ hours even after the code was "fixed" to
     // hold on merge_blocked -- the autoship-held label did not exist in the repo yet, so
     // every addLabel call silently no-op'd and the issue stayed fully eligible.
-    const h = harness({ isDraft: true, addLabelFails: true });
+    const h = harness({ reviewDecision: "REVIEW_REQUIRED", addLabelFails: true });
     const r = await autoshipRun(h.deps, succeededRun());
-    assert.deepEqual(r, { action: "merge_blocked", reason: "PR is still a draft" });
+    assert.deepEqual(r, { action: "merge_blocked", reason: "PR requires review approval" });
     assert.equal(h.labels.length, 0, "the fake reports the label never actually landed");
     assert.ok(
       h.errors.some((e) => /failed to stamp autoship-held/.test(e)),
