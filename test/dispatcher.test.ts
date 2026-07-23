@@ -343,6 +343,7 @@ function autoshipConfig(overrides: Partial<DispatcherConfig> = {}): DispatcherCo
 function parkedDeps(store: StateStore, opts: {
   ci?: "pass" | "pending" | "fail";
   isDraft?: boolean;
+  issueState?: "OPEN" | "CLOSED" | "UNKNOWN";
   issueLabels?: string[];
   prState?: "open" | "merged" | "closed" | "unknown";
 }): {
@@ -351,11 +352,15 @@ function parkedDeps(store: StateStore, opts: {
   labels: string[];
   removedLabels: string[];
   ships: { count: number };
+  reads: { issueLabels: number };
+  notifications: { count: number };
 } {
   const comments: string[] = [];
   const labels: string[] = [];
   const removedLabels: string[] = [];
   const ships = { count: 0 };
+  const reads = { issueLabels: 0 };
+  const notifications = { count: 0 };
   const deps: DispatcherDeps = {
     config: autoshipConfig(),
     store,
@@ -377,15 +382,16 @@ function parkedDeps(store: StateStore, opts: {
       comment: async (_i: number, b: string) => { comments.push(b); return true; },
       addLabel: async (_i: number, l: string) => { labels.push(l); return true; },
       removeLabel: async (_i: number, l: string) => { removedLabels.push(l); return true; },
-      issueLabels: async () => opts.issueLabels ?? [],
+      issueState: async () => opts.issueState ?? "OPEN",
+      issueLabels: async () => { reads.issueLabels += 1; return opts.issueLabels ?? []; },
       markPrReady: async () => true,
       closeIssue: async () => true,
     } as unknown as DispatcherDeps["github"],
-    notifier: { send: async () => undefined },
+    notifier: { send: async () => { notifications.count += 1; } },
     ship: async () => { ships.count += 1; return { ok: true, stdout: "", stderr: "", code: 0 }; },
     now: () => 5000,
   };
-  return { deps, comments, labels, removedLabels, ships };
+  return { deps, comments, labels, removedLabels, ships, reads, notifications };
 }
 
 function parkedRun(store: StateStore): RunRecord {
@@ -495,6 +501,57 @@ function heldRun(store: StateStore): RunRecord {
   const created = parkedRun(store);
   return store.updateRun(created.id, { status: "held" });
 }
+
+test("recheckHeldRun retires a closed issue without autoship, labels, comments, or notifications", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run1 = heldRun(store);
+    const { deps, comments, labels, removedLabels, ships, reads, notifications } = parkedDeps(store, {
+      ci: "pass",
+      issueState: "CLOSED",
+      prState: "merged",
+    });
+
+    const { rechecked } = await recheckHeldRun(deps, run1);
+
+    assert.equal(rechecked, false);
+    assert.equal(store.getRun(run1.id)?.status, "abandoned", "closed issue releases the stale held claim");
+    assert.equal(reads.issueLabels, 0, "closed issue is terminal before the hold-label read");
+    assert.equal(ships.count, 0);
+    assert.equal(comments.length, 0);
+    assert.equal(labels.length, 0);
+    assert.equal(removedLabels.length, 0);
+    assert.equal(notifications.count, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recheckHeldRun fails closed when the issue state cannot be read", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run1 = heldRun(store);
+    const { deps, comments, labels, ships, reads } = parkedDeps(store, {
+      ci: "pass",
+      issueState: "UNKNOWN",
+    });
+
+    const { rechecked } = await recheckHeldRun(deps, run1);
+
+    assert.equal(rechecked, false);
+    assert.equal(store.getRun(run1.id)?.status, "held");
+    assert.equal(reads.issueLabels, 0);
+    assert.equal(ships.count, 0);
+    assert.equal(comments.length, 0);
+    assert.equal(labels.length, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("recheckHeldRun is a no-op while the issue still carries autoship-held", async () => {
   const dir = tmp();
