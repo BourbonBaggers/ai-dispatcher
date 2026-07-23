@@ -35,7 +35,6 @@
  * a green, non-destructive PR.
  */
 
-import { assessDataLossRisk, parseUnifiedDiff } from "./autoship-gate.ts";
 import { classifyShipResult, type AutoshipShipState } from "./autoship-deployment.ts";
 import {
   repairGeneratedFileConflicts,
@@ -47,7 +46,6 @@ import type { ExecResult } from "./exec.ts";
 import { NOTIFY_PRIORITY_DEFAULT, NOTIFY_PRIORITY_HIGH, type Notifier } from "./notify.ts";
 import type { Logger } from "./logger.ts";
 import type { GithubPrMergeInfo } from "./github.ts";
-import { HUMAN_REVIEW_REQUIRED_LABEL } from "./labels.ts";
 
 /** Label left on a PR that autoship refused to ship, so it is easy to find and requeue. */
 export const AUTOSHIP_HELD_LABEL = "autoship-held";
@@ -252,41 +250,19 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
     return await mergeBlocked(deps, run, pr, "PR mergeability could not be read");
   }
   if (mergeInfo.isDraft) {
-    // Policy (post-#366): agents open ready-for-review PRs by default now, so a draft
-    // reaching here means either an agent used the narrow destructive-change exception
-    // (CLAUDE.md's dispatcher section) deliberately, or an older/misbehaving agent
-    // drafted a routine change out of habit. Only the former should stay a draft --
-    // signaled by a human (or the agent, on its own initiative) adding
-    // HUMAN_REVIEW_REQUIRED_LABEL to the issue. Absent that label, promote it: the
-    // draft flag is not itself a safety control, CI + the data-loss gate below are.
-    const labels = await github.issueLabels(run.issueNumber);
-    if (labels.includes(HUMAN_REVIEW_REQUIRED_LABEL)) {
-      return await mergeBlocked(
-        deps,
-        run,
-        pr,
-        `PR is still a draft and issue #${run.issueNumber} carries \`${HUMAN_REVIEW_REQUIRED_LABEL}\` -- a human must review and mark it ready`,
-      );
-    }
-    const promoted = await github.markPrReady(pr);
-    if (!promoted) {
-      return await mergeBlocked(
-        deps,
-        run,
-        pr,
-        "PR is still a draft and could not be promoted to ready for review (gh pr ready failed)",
-      );
-    }
+    // POLICY (2026-07-23): no human-review gate. Always promote a draft to ready and
+    // ship it — a draft is not a safety control, CI + the escalation ladders are.
+    await github.markPrReady(pr).catch(() => false);
     logger.info("autoship: promoted a draft PR to ready for review", {
       issue: run.issueNumber,
       pr,
     });
-    // Fall through -- re-evaluate as a now-ready PR against the checks below, in the
-    // same pass, rather than waiting for a later recheck.
+    // Fall through and ship in the same pass.
   }
-  if (mergeInfo.reviewDecision === "REVIEW_REQUIRED") {
-    return await mergeBlocked(deps, run, pr, "PR requires review approval");
-  }
+  // POLICY (2026-07-23): reviewDecision === "REVIEW_REQUIRED" is deliberately NOT a
+  // block. Autoship ships every green PR without human approval; the ship command
+  // merges with admin override (branch-protection review requirements are removed on
+  // these repos). The only permitted hold is a frontier-model-stumped failure.
   if (!mergeInfo.headRefOid || !mergeInfo.baseRefOid) {
     return await mergeBlocked(deps, run, pr, "PR head/base SHA could not be read");
   }
@@ -295,19 +271,15 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
     if (recovered.action !== "recovered") return recovered.outcome;
   }
 
-  // 3. Data-loss gate. Unreadable diff → hold (fail safe).
-  const diff = await github.prDiff(pr);
-  if (diff === null) {
-    return await hold(deps, run, pr, [
-      "the PR diff could not be read, so the data-loss gate could not be evaluated",
-    ]);
-  }
-  const assessment = assessDataLossRisk(parseUnifiedDiff(diff));
-  if (assessment.held) {
-    return await hold(deps, run, pr, assessment.reasons);
-  }
+  // POLICY (2026-07-23): autoship EVERYTHING. The ONLY permitted hold is after a
+  // failure has been retried and escalated to the frontier model and it is still
+  // stumped (the CI-exhausted and ship-failed ladders below). There is deliberately
+  // NO data-loss / destructive-change gate and NO human-review gate here: backup +
+  // rollback (captured by deploy.sh before every deploy, restored by rollback.sh /
+  // self-ship's detached rollback phase) is the safety net for an irreversible or bad
+  // change, not a pre-merge hold. Destructive migrations ship like anything else.
 
-  // 4. Ship. The command owns merge + deploy + health-check + rollback.
+  // Ship. The command owns merge + deploy + health-check + rollback.
   logger.info("autoship: shipping", {
     issue: run.issueNumber,
     pr,
@@ -678,35 +650,3 @@ async function mergeBlocked(
   return { action: "merge_blocked", reason };
 }
 
-/** Record a hold: label the PR, comment why, ntfy, and leave it open for a human. */
-async function hold(
-  deps: AutoshipDeps,
-  run: RunRecord,
-  pr: number,
-  reasons: string[],
-): Promise<AutoshipOutcome> {
-  const { github, notifier, logger } = deps;
-  logger.warn("autoship: held for data-loss risk", { issue: run.issueNumber, pr, reasons });
-
-  await stampHold(deps, run, "data-loss-gate");
-  const body = [
-    "## Autoship held — data-loss risk",
-    "",
-    "CI is green, but this PR contains changes that look irreversible, so it was **not**",
-    "shipped automatically. A human must review and merge it.",
-    "",
-    ...reasons.map((r) => `- ${r}`),
-    "",
-    "Destructive migrations, bulk deletes, and irreversible transforms never ship unattended.",
-  ].join("\n");
-  await github.comment(run.issueNumber, body).catch(() => false);
-  await notifier
-    .send(
-      `Autoship HELD #${run.issueNumber}`,
-      `PR #${pr} is green but looks destructive; held for review. ${reasons[0] ?? ""}`,
-      NOTIFY_PRIORITY_HIGH,
-    )
-    .catch(() => undefined);
-
-  return { action: "held", reasons };
-}
