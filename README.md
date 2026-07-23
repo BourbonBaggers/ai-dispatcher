@@ -212,6 +212,16 @@ once that escalation attempt is ALSO still red does autoship give up, stamp
 `autoship-held`, and notify a human — automation gets first crack (twice) at a
 known-recoverable problem, and the human is paged only once it has genuinely given up.
 
+A **deploy** failure escalates the same way. When the ship command exits non-zero (it has,
+per its own contract, already rolled back), autoship does not immediately hold: the first
+such failure spends ONE attempt on `DISPATCHER_CI_ESCALATION_MODEL`, relaunching the agent
+on the same issue/PR to fix the code-or-deploy-path bug and re-ship (posted as an "Autoship:
+deploy failed, escalating" comment). This is a SEPARATE one-shot budget from the CI
+escalation (`deployEscalated` vs `ciEscalated`), so a run that already spent its CI
+escalation greening checks still gets a fresh frontier attempt at the deploy, and neither
+budget consumes the other. Only a second deploy failure (the escalated model's) stamps
+`autoship-held` and pages a human.
+
 A PR that is not mergeable for a reason other than red CI — still a draft, requires
 review, or its mergeability could not even be read — also stamps `autoship-held`. This
 used to be a comment-only "Autoship HELD" notice with no actual label, so a
@@ -240,9 +250,11 @@ The terminal statuses:
 - **`ci_pending`** — the agent finished and opened a PR, but CI had not resolved yet.
   **Parked**: the claim stays, and the next scan re-checks CI ONLY — it does not
   relaunch the agent to wait on a check that is already running.
-- **`ci_failed`** — CI is definitively red. Drives the self-heal → escalate → held
-  ladder described above. Always resolved further within the same finalize pass; a run
-  should not be found sitting in this status across a scan boundary in normal operation.
+- **`ci_failed`** — a ladder-in-progress marker (CI is definitively red, or a deploy
+  failure is being escalated). Drives the self-heal → escalate → held ladder described
+  above and keeps the issue claim across the relaunch. Always resolved further within the
+  same finalize pass; a run should not be found sitting in this status across a scan
+  boundary in normal operation.
 - **`held`** — terminal, intentionally blocked: a destructive-change guardrail, a PR that
   cannot be merged (draft / needs review / unreadable), the self-heal+escalation ladder
   exhausted with CI still red, a failed ship/deploy attempt, or (autoship not

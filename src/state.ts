@@ -59,8 +59,15 @@ export interface RunRecord {
    * self-heal attempts specifically, and is what caps them (DISPATCHER_CI_SELF_HEAL_MAX_ATTEMPTS).
    */
   ciSelfHealAttempts: number;
-  /** Whether the one-shot escalation attempt (a different, stronger model) has run. */
+  /** Whether the one-shot CI escalation attempt (a different, stronger model) has run. */
   ciEscalated: boolean;
+  /**
+   * Whether the one-shot DEPLOY escalation attempt has run. A separate budget from
+   * `ciEscalated`: a run may exhaust CI self-heal + escalation to fix red checks, ship,
+   * and only THEN hit a deploy failure — that deploy failure deserves its own fresh
+   * frontier-model attempt, and a CI escalation must never consume it (or vice-versa).
+   */
+  deployEscalated: boolean;
   remotePid: number | null;
   createdAt: number;
   startedAt: number;
@@ -283,6 +290,7 @@ export class StateStore {
       | "remotePid"
       | "ciSelfHealAttempts"
       | "ciEscalated"
+      | "deployEscalated"
     >,
   ): RunRecord {
     if (this.activeRun()) throw new Error("a run is already active — the dispatcher is serial");
@@ -304,6 +312,7 @@ export class StateStore {
       outputSeq: 0,
       ciSelfHealAttempts: 0,
       ciEscalated: false,
+      deployEscalated: false,
       remotePid: null,
       createdAt: now,
       startedAt: now,
