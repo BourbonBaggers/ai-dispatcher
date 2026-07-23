@@ -232,6 +232,23 @@ infinite-loop bug this whole self-heal system exists to prevent, just with a dif
 trigger. Clear the label once the PR is ready (or its mergeability issue is resolved) to
 let autoship re-check it.
 
+Because a held run keeps its issue claim, clearing `autoship-held` no longer re-dispatches
+a fresh agent run — the dispatcher **resumes autoship of the ready PR** instead (re-checking
+CI + the data-loss gate, then merging and deploying the PR that is already there). If the PR
+turns out to be **already merged** (for example, merged by hand instead of un-holding),
+autoship recognises that and **stands down** with a plain informational hold rather than
+running `gh pr merge` on it and misreading the "already merged" failure as a broken deploy;
+it does not close the issue, because a merge is not a verified ship (see below).
+
+**Self-shipping.** When the dispatcher ships changes to *itself*
+(`BourbonBaggers/ai-dispatcher`), point `DISPATCHER_AUTOSHIP_CMD` at this repo's
+[`scripts/self-ship.sh`](scripts/self-ship.sh) and set `DISPATCHER_AUTOSHIP_DEPLOYMENT_DIR`
+to the checkout the systemd unit runs *from* (e.g. `~/ai-dispatcher`) so a restart serves
+the merged code. `self-ship.sh` re-gates and merges, then hands the restart to a **detached**
+transient unit (outside the dispatcher's own cgroup, so the restart does not kill the ship
+command mid-flight) which verifies health and **rolls back** to the previous commit if the
+new code does not come up. See [`.env.example`](.env.example) for the exact variables.
+
 ## Run outcome semantics
 
 A run's terminal `status` is never "succeeded" for merely opening a PR or observing
@@ -257,10 +274,13 @@ The terminal statuses:
   boundary in normal operation.
 - **`held`** — terminal, intentionally blocked: a destructive-change guardrail, a PR that
   cannot be merged (draft / needs review / unreadable), the self-heal+escalation ladder
-  exhausted with CI still red, a failed ship/deploy attempt, or (autoship not
-  configured) a clean PR left for a human to review and merge manually. Acceptable
-  without ever shipping — a human decides next, and `autoship-held` keeps it out of the
-  queue until they clear the label.
+  exhausted with CI still red, a failed ship/deploy attempt, an already-merged PR autoship
+  stood down on, or (autoship not configured) a clean PR left for a human to review and
+  merge manually. Acceptable without ever shipping — a human decides next, and
+  `autoship-held` keeps it out of the queue until they clear the label. A held run **keeps
+  its issue claim**: clearing `autoship-held` **resumes autoship of the existing ready PR**
+  (merge → deploy the PR that is already there), it does **not** re-dispatch a fresh agent
+  run over work that is already done.
 - **`failed`** — the agent itself crashed, gave up (zero commits), or exited non-zero.
   Distinct from `ci_failed`: this is the agent's fault, not the PR's content's fault.
   Counts toward the 3-strike failure-deferral policy; `ci_failed`/`ci_pending`/`held` do

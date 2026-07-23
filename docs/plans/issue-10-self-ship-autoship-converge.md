@@ -46,7 +46,7 @@ and its run record survives pruning.
 - `dispatcher.ts`: map `already_merged` → `held` (a stable, claim-holding terminal).
 - Tests: a merged PR yields `already_merged`, runs no ship command, and holds cleanly.
 
-## Milestone 4: self-ship.sh checkout default + self-ship docs
+## [DONE] Milestone 4: self-ship.sh checkout default + self-ship docs
 
 - `scripts/self-ship.sh`: default the deployment checkout to `~/ai-dispatcher` (the
   running service checkout), not `~/ai-dispatcher-deploy`.
