@@ -355,6 +355,7 @@ function parkedDeps(store: StateStore, opts: {
       removeLabel: async () => true,
       issueLabels: async () => opts.issueLabels ?? [],
       markPrReady: async () => true,
+      closeIssue: async () => true,
     } as unknown as DispatcherDeps["github"],
     notifier: { send: async () => undefined },
     ship: async () => { ships.count += 1; return { ok: true, stdout: "", stderr: "", code: 0 }; },

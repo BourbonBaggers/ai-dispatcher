@@ -8,6 +8,7 @@ import {
   issueStateArgs,
   issueLabelsArgs,
   prReadyArgs,
+  closeIssueArgs,
   prChecksArgs,
   prMergeInfoArgs,
   GithubClient,
@@ -26,6 +27,7 @@ test("every gh argv builder threads --repo <slug> through", () => {
     issueStateArgs(SLUG, 5),
     issueLabelsArgs(SLUG, 5),
     prReadyArgs(SLUG, 7),
+    closeIssueArgs(SLUG, 5),
     prChecksArgs(SLUG, 7),
     prMergeInfoArgs(SLUG, 7),
   ];
@@ -183,4 +185,16 @@ test("markPrReady runs gh pr ready and reports success/failure", async () => {
   const failing = fakeExec(() => ({ ok: false, stdout: "", stderr: "already ready", code: 1 }));
   const failClient = new GithubClient(repo.ok ? repo.value : (undefined as never), failing.fn);
   assert.equal(await failClient.markPrReady(9), false);
+});
+
+test("closeIssue runs gh issue close and reports success/failure", async () => {
+  const repo = parseRepoSlug(SLUG);
+  const succeeding = fakeExec(() => ok());
+  const successClient = new GithubClient(repo.ok ? repo.value : (undefined as never), succeeding.fn);
+  assert.equal(await successClient.closeIssue(366), true);
+  assert.deepEqual(succeeding.calls[0]!.args, ["issue", "close", "366", "--repo", SLUG]);
+
+  const failing = fakeExec(() => ({ ok: false, stdout: "", stderr: "already closed", code: 1 }));
+  const failClient = new GithubClient(repo.ok ? repo.value : (undefined as never), failing.fn);
+  assert.equal(await failClient.closeIssue(366), false);
 });

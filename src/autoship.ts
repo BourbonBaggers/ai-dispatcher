@@ -64,6 +64,8 @@ export interface AutoshipGithub {
   issueLabels(issue: number): Promise<string[]>;
   /** `gh pr ready <pr>`: promotes a draft PR to ready for review. */
   markPrReady(pr: number): Promise<boolean>;
+  /** `gh issue close <n>`: the ONLY place an issue closes -- see the shipped path below. */
+  closeIssue(issue: number): Promise<boolean>;
 }
 
 /** Runs the repo-specific ship command with autoship context in the environment. */
@@ -339,6 +341,31 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
     health: classified.health,
     report: classified.report,
   });
+
+  // Close the issue HERE, and only here: PR bodies never carry a GitHub auto-close
+  // keyword (Closes/Fixes/Resolves #n), specifically so merging never closes an issue
+  // before its deploy is verified (#366 -- an issue auto-closed on merge while its
+  // deploy was still mid-build, prod still on the previous release). The ship command's
+  // exit code alone is not quite enough to trust: classifyShipResult can still report
+  // health "fail"/"unknown" on a structured status line even when the process exited 0
+  // (e.g. a script that reports honestly but exits 0 for its own reasons), so gate on
+  // the parsed health, not merely on having reached this branch.
+  if (classified.health === "pass") {
+    const closed = await github.closeIssue(run.issueNumber).catch(() => false);
+    if (!closed) {
+      logger.error("autoship: shipped but failed to close the issue", {
+        issue: run.issueNumber,
+        pr,
+      });
+    }
+  } else {
+    logger.warn("autoship: shipped with a non-pass health state -- leaving the issue open for a human", {
+      issue: run.issueNumber,
+      pr,
+      health: classified.health,
+    });
+  }
+
   await notifier
     .send(`Autoship: shipped #${run.issueNumber}`, `PR #${pr} merged and deployed.`, NOTIFY_PRIORITY_DEFAULT)
     .catch(() => undefined);
