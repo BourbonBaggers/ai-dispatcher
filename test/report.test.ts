@@ -34,7 +34,7 @@ function attempt(over: Partial<AttemptRecord> = {}): AttemptRecord {
     humanInterventionRequired: false,
     frontierModelUsed: false,
     manualOverride: false,
-    terminalStatus: "succeeded",
+    terminalStatus: "shipped",
     ...over,
   };
 }

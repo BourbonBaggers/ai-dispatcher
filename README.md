@@ -222,14 +222,55 @@ infinite-loop bug this whole self-heal system exists to prevent, just with a dif
 trigger. Clear the label once the PR is ready (or its mergeability issue is resolved) to
 let autoship re-check it.
 
+## Run outcome semantics
+
+A run's terminal `status` is never "succeeded" for merely opening a PR or observing
+green CI at hand-off — those were the actual root cause of the #366 incident: a
+"succeeded" run released its issue claim, so a PR that was open with CI still checking
+(or even already red) got silently re-claimed and rerun by the dispatcher from scratch
+every ~15 minutes, for hours, with no failure ever showing up as a red CI run because
+CI was never the problem — the claim was released too early.
+
+The terminal statuses:
+
+- **`shipped`** — the only TRUE success: the PR is merged and the deploy has completed
+  (or, when autoship is not configured for this repo, a human has manually taken it from
+  here — that maps to `held` below instead of fabricating a shipped result nothing
+  actually verified).
+- **`ci_pending`** — the agent finished and opened a PR, but CI had not resolved yet.
+  **Parked**: the claim stays, and the next scan re-checks CI ONLY — it does not
+  relaunch the agent to wait on a check that is already running.
+- **`ci_failed`** — CI is definitively red. Drives the self-heal → escalate → held
+  ladder described above. Always resolved further within the same finalize pass; a run
+  should not be found sitting in this status across a scan boundary in normal operation.
+- **`held`** — terminal, intentionally blocked: a destructive-change guardrail, a PR that
+  cannot be merged (draft / needs review / unreadable), the self-heal+escalation ladder
+  exhausted with CI still red, a failed ship/deploy attempt, or (autoship not
+  configured) a clean PR left for a human to review and merge manually. Acceptable
+  without ever shipping — a human decides next, and `autoship-held` keeps it out of the
+  queue until they clear the label.
+- **`failed`** — the agent itself crashed, gave up (zero commits), or exited non-zero.
+  Distinct from `ci_failed`: this is the agent's fault, not the PR's content's fault.
+  Counts toward the 3-strike failure-deferral policy; `ci_failed`/`ci_pending`/`held` do
+  not (parking or being blocked by policy isn't evidence the agent is failing).
+
+`interrupted` / `timed_out` / `token_exhausted` are unchanged: crash/timeout recovery,
+resumed by relaunching the agent on the next scan.
+
+Only `evaluateAutoship` (dispatcher.ts) ever writes `shipped` or `held`, and it is the
+only place `ci_pending`/`ci_failed` transition based on a fresh CI read — called both
+right after a fresh/resumed/self-healed/escalated run finishes and again on every parked
+recheck, so a run's status is always a live re-evaluation, never a stale snapshot from
+whenever the agent process happened to exit.
+
 ## State model
 
 All durable state is one atomically-written JSON file plus a lock, under `--state-dir`:
 
-- `state.json` — runs (status, claim, resume/progress counters, PR/commit), provider
-  cooldown windows, and per-issue failure deferrals. Written temp-file-then-rename, so a
-  crash mid-write never corrupts it; a corrupt file is preserved as `.corrupt-<ts>` and
-  replaced with empty state rather than crash-looping.
+- `state.json` — runs (status, claim, resume/progress counters, parked/ladder CI
+  state, PR/commit), provider cooldown windows, and per-issue failure deferrals. Written
+  temp-file-then-rename, so a crash mid-write never corrupts it; a corrupt file is
+  preserved as `.corrupt-<ts>` and replaced with empty state rather than crash-looping.
 - `dispatcher.lock` — single-instance guard. A second dispatcher against the same state
   dir refuses to start; a lock from a dead pid is reclaimed automatically.
 

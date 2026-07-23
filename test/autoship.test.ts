@@ -365,6 +365,9 @@ describe("autoshipRun — generated conflict recovery", () => {
     assert.equal(r.action, "conflict_recovery_failed");
     assert.equal(h.shipped.length, 0);
     assert.match(h.comments[0]!, /merge conflicts need review/i);
+    // Regression test (same #366 bug class): a "held"-sounding comment used to post
+    // without ever stamping the label, so the issue stayed eligible and got re-run.
+    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
   });
 
   it("does not ship when repaired-branch CI is still pending", async () => {
@@ -395,6 +398,9 @@ describe("autoshipRun — shipping", () => {
     assert.equal(r.action, "ship_failed");
     assert.equal(r.state, "deployment_state_unknown");
     assert.ok(h.pushes.some((p) => /UNKNOWN/.test(p.title) && p.priority === 4));
+    // Regression test: a failed (and, per contract, rolled-back) deploy must hold too --
+    // without this, the same unresolved deploy problem gets retried every ~15 minutes.
+    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
   });
 
   it("reports rollback success only when the ship command explicitly says so", async () => {

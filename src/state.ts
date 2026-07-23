@@ -22,7 +22,7 @@ import {
   rmSync,
 } from "node:fs";
 import { join } from "node:path";
-import { ACTIVE_STATUSES, CLAIMING_STATUSES, RESUMABLE_STATUSES } from "./labels.ts";
+import { ACTIVE_STATUSES, CLAIMING_STATUSES, PARKED_STATUSES, RESUMABLE_STATUSES } from "./labels.ts";
 import type { DispatcherAgent, DispatcherStatus } from "./labels.ts";
 import type { IssueFailureRecord } from "./failure-policy.ts";
 
@@ -236,6 +236,11 @@ export class StateStore {
 
   resumableRuns(): RunRecord[] {
     return this.runsByStatus(RESUMABLE_STATUSES);
+  }
+
+  /** Runs parked on a PR whose CI has not resolved yet — recheck-only, never relaunched. */
+  parkedRuns(): RunRecord[] {
+    return this.runsByStatus(PARKED_STATUSES);
   }
 
   /** issueNumber → status, for every run that still holds a claim on its issue. */

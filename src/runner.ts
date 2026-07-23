@@ -105,7 +105,9 @@ export interface RunSignals {
 }
 
 export type TerminalStatus =
-  | "succeeded"
+  | "shipped"
+  | "ci_pending"
+  | "ci_failed"
   | "failed"
   | "timed_out"
   | "interrupted"
@@ -124,10 +126,22 @@ export type RunOutcome =
  *   3. no result line (killed blind — resumable, MUST precede the commit/CI branches
  *      whose defaults would otherwise misjudge it as a hard failure)
  *   4. clean exit, zero commits (agent gave up — not "complete")
- *   5. clean exit, CI red (not mergeable)
- *   6. clean exit, CI pending (succeeded but unverified)
- *   7. clean exit (succeeded)
+ *   5. clean exit, CI red -> `ci_failed` (drives the self-heal/escalate/held ladder)
+ *   6. clean exit, CI pending -> `ci_pending` (parked; the NEXT scan re-checks CI only,
+ *      it does not relaunch the agent)
+ *   7. clean exit, CI pass -> `shipped`, but PROVISIONALLY: this is the agent's own
+ *      observation at hand-off, not authoritative. `evaluateAutoship` (dispatcher.ts)
+ *      re-checks CI itself moments later and can downgrade this to `ci_pending` /
+ *      `ci_failed` / `held` if the agent's snapshot was stale or wrong, or confirm it
+ *      once the PR is ACTUALLY merged and deployed. Never trust an agent's self-report
+ *      of success (see autoship.ts) -- this label is a hand-off, not a verdict.
  *   8. non-zero exit (failed)
+ *
+ * None of statuses 5-7 are ever "succeeded" outright: that word used to cover all three
+ * (see #366) and, because a "succeeded" run released its issue claim, a PR that was
+ * merely open with CI still pending (or even red) got silently re-claimed and rerun by
+ * the dispatcher from scratch every ~15 minutes. `ci_pending`/`ci_failed` now keep the
+ * claim; only a confirmed ship (or an intentional `held`) ever lets the issue go.
  */
 export function classifyRunOutcome(signals: RunSignals): RunOutcome {
   const {
@@ -188,9 +202,11 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
 
   if (exitCode === 0 && resultCi === "fail") {
     // CI says the PR is broken. The agent's own opinion of its tests is not the deciding
-    // vote — it has claimed a green suite while CI was red.
+    // vote — it has claimed a green suite while CI was red. Distinct from `failed`: the
+    // agent DID its job (produced a PR); the PR's content is what's broken, and that
+    // drives the self-heal -> escalate -> held ladder, not the 3-strike failure deferral.
     return {
-      status: "failed",
+      status: "ci_failed",
       exitCode: 0,
       summary:
         "The agent opened a PR, but its CI is red. The work is not mergeable — see the failing checks in the run output.",
@@ -198,16 +214,22 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
   }
 
   if (exitCode === 0 && resultCi === "pending") {
+    // Parked, not succeeded: the claim stays and the next scan just re-checks CI --
+    // relaunching the whole agent to wait on a check that is already running would be
+    // pure waste (and, historically, exactly this case looping was silent for hours).
     return {
-      status: "succeeded",
+      status: "ci_pending",
       exitCode: 0,
       summary:
-        "The agent opened a PR, but CI had not finished when the run ended — the result is unverified. Check the PR before trusting it.",
+        "The agent opened a PR; CI had not finished when the run ended. The dispatcher will re-check CI on its own, without relaunching the agent, until it resolves.",
     };
   }
 
   if (exitCode === 0) {
-    return { status: "succeeded", exitCode: 0, summary: null };
+    // Provisional: the agent's own hand-off observation, not a verdict. evaluateAutoship
+    // re-confirms CI and only calls this truly `shipped` once the PR is merged and
+    // deployed (or downgrades it if the agent's snapshot was stale/wrong).
+    return { status: "shipped", exitCode: 0, summary: null };
   }
 
   return { status: "failed", exitCode, summary: `The agent exited with code ${exitCode}.` };

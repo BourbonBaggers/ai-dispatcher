@@ -14,7 +14,9 @@
  */
 
 import {
+  PARKED_STATUSES,
   RESUMABLE_STATUSES,
+  LADDER_STATUSES,
   WORKING_LABEL,
   branchNameFor,
   type DispatcherAgent,
@@ -106,10 +108,29 @@ export function selectResumable(
 /**
  * Whether a terminal run releases its issue claim. A resumable run (interrupted /
  * timed_out / token_exhausted) KEEPS its claim so the next scan resumes it rather than
- * starting the issue over; every other terminal status frees the issue.
+ * starting the issue over; a parked run (ci_pending) also keeps its claim so the next
+ * scan just re-checks CI instead of relaunching the agent; a ladder run (ci_failed) is
+ * never actually left in this state across a scan boundary in normal operation (the
+ * self-heal/escalate ladder resolves it synchronously) but keeps its claim too, so an
+ * abnormal case never gets silently double-dispatched. Every other terminal status
+ * (shipped, held, failed) frees the issue.
  */
 export function shouldReleaseClaim(status: string): boolean {
-  return !(RESUMABLE_STATUSES as readonly string[]).includes(status);
+  return !(
+    (RESUMABLE_STATUSES as readonly string[]).includes(status) ||
+    (PARKED_STATUSES as readonly string[]).includes(status) ||
+    (LADDER_STATUSES as readonly string[]).includes(status)
+  );
+}
+
+/**
+ * Chooses the parked (ci_pending) run to recheck this scan, or null. Oldest-first: the
+ * parked runs are already ordered by createdAt. Unlike `selectResumable`, there is no
+ * cap or provider-suppression check -- a CI recheck is a single cheap `gh pr checks`
+ * call, not a full agent relaunch, so none of the token/resume-budget concerns apply.
+ */
+export function selectParked(parked: RunRecord[]): RunRecord | null {
+  return parked[0] ?? null;
 }
 
 /** Runs a single scan: resume first, else claim and launch at most one fresh issue. */
@@ -148,6 +169,28 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
     return {
       started: resumed,
       message: `Resumed the interrupted run on issue #${resumable.issueNumber} before starting new work.`,
+    };
+  }
+
+  // ── Recheck parked (CI-pending) work ──
+  // A parked run holds its issue's claim without any agent process running, so it is
+  // checked before fresh work for the same reason resumables are: leaving it parked
+  // while starting something new would work, but finishing what is already in flight is
+  // the right default. Unlike resuming, this NEVER relaunches the agent -- it is a
+  // single `gh pr checks` call re-evaluated through the exact same ship/hold decision
+  // (`evaluateAutoship`) a fresh run goes through.
+  const parked = selectParked(store.parkedRuns());
+  if (parked) {
+    if (config.dryRun) {
+      return {
+        started: null,
+        message: `[dry-run] would recheck CI for issue #${parked.issueNumber} (PR #${parked.prNumber ?? "?"}).`,
+      };
+    }
+    await recheckParkedRun(deps, parked);
+    return {
+      started: store.getRun(parked.id),
+      message: `Rechecked CI for issue #${parked.issueNumber}.`,
     };
   }
 
@@ -361,9 +404,12 @@ async function escalateRun(deps: DispatcherDeps, run: RunRecord, cliModel: strin
 
 /**
  * Once-only GitHub bookkeeping after a run reaches a terminal state: apply the failure
- * deferral policy, release the working label (unless the run is still resumable), comment
- * on the issue, and send the run notification (except for token exhaustion, which already
- * notified through its own cooldown path).
+ * deferral policy, release the working label (unless the run is still resumable/parked),
+ * comment on the issue, hand off to `evaluateAutoship` to resolve the real outcome, and
+ * send the run notification (except for token exhaustion, which already notified through
+ * its own cooldown path, and except when evaluateAutoship just triggered a self-heal/
+ * escalation relaunch, whose OWN recursive finalizeRun call will send the real one once
+ * that settles).
  */
 export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise<void> {
   const { store, github, logger, notifier } = deps;
@@ -401,55 +447,145 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
 
   logger.info("run finalized", { runId: run.id, issue: run.issueNumber, status: run.status });
 
-  // Autoship: for a green-CI PR success, merge + deploy behind the data-loss gate. Inert
-  // unless both a ship runner and config.autoshipCmd are present; self-guards otherwise.
-  if (deps.ship) {
-    try {
-      const outcome = await autoshipRun(
-        {
-          github,
-          ship: deps.ship,
-          notifier,
-          logger,
-          autoshipCmd: deps.config.autoshipCmd,
-          autoshipDeploymentCheckout: deps.config.autoshipDeploymentDir,
-          repoSlug: deps.config.repo.slug,
-          generatedConflictAllowlist: deps.config.generatedConflictAllowlist,
-          generatedConflictRegenCmd: deps.config.generatedConflictRegenCmd,
-          generatedConflictMaxAttempts: deps.config.generatedConflictMaxAttempts,
-          generatedConflictCiWaitSeconds: deps.config.generatedConflictCiWaitSeconds,
-          ciSelfHealMaxAttempts: deps.config.ciSelfHealMaxAttempts,
-          ciEscalationModel: deps.config.ciEscalationModel,
-        },
-        run,
-      );
-      logger.info("autoship outcome", { runId: run.id, issue: run.issueNumber, action: outcome.action });
-      if (outcome.action === "ci_self_heal") {
-        await selfHealRun(deps, run, outcome.attempt);
-      } else if (outcome.action === "ci_escalate") {
-        await escalateRun(deps, run, outcome.model);
-      }
-    } catch (err) {
-      // An autoship failure must never break the loop; it has its own ntfy path.
-      logger.error("autoship threw", {
-        runId: run.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
+  // evaluateAutoship is the sole authority on whether this run's PR actually ships,
+  // stays parked, drives the self-heal ladder, or gets held -- see its own doc comment.
+  const { relaunched } = await evaluateAutoship(deps, run);
+
+  // A relaunch's own recursive finalizeRun call (via selfHealRun/escalateRun) sends the
+  // real "run finished" notification once IT settles; sending one here too, for a status
+  // (ci_failed) that is already stale by the time this line runs, would just be a
+  // misleading extra push moments before the accurate one.
+  if (relaunched) return;
+
+  // Re-read: evaluateAutoship may have just changed run.status (shipped/ci_pending/held)
+  // in the store -- `run` above is a snapshot from before that call.
+  const finalRun = store.getRun(run.id) ?? run;
 
   // Token exhaustion already sent its single notification through the cooldown path;
   // re-sending here would defeat the one-alert-per-window guarantee.
-  if (run.status !== "token_exhausted") {
-    const priority = run.status === "succeeded" ? NOTIFY_PRIORITY_DEFAULT : NOTIFY_PRIORITY_HIGH;
+  if (finalRun.status !== "token_exhausted") {
+    const priority =
+      finalRun.status === "shipped" || finalRun.status === "ci_pending"
+        ? NOTIFY_PRIORITY_DEFAULT
+        : NOTIFY_PRIORITY_HIGH;
     notifier
       .send(
-        `Dispatcher: #${run.issueNumber} ${run.status.replace("_", " ")}`,
-        run.prUrl ? `PR: ${run.prUrl}` : (run.failureSummary ?? run.issueTitle),
+        `Dispatcher: #${finalRun.issueNumber} ${finalRun.status.replace("_", " ")}`,
+        finalRun.prUrl ? `PR: ${finalRun.prUrl}` : (finalRun.failureSummary ?? finalRun.issueTitle),
         priority,
       )
       .catch(() => undefined);
   }
+}
+
+/**
+ * Runs the autoship decision for one run and applies its outcome to the persisted
+ * status. This is the ONLY place a run's status becomes `shipped` or `held`, and the
+ * only place `ci_pending`/`ci_failed` transition based on a fresh CI read. Called both
+ * right after a fresh/resumed/self-healed/escalated run finishes (from `finalizeRun`)
+ * and again on every parked recheck (`recheckParkedRun`, WITHOUT going through
+ * `finalizeRun` at all) -- so it must be safe and cheap to call repeatedly against the
+ * same run.id, and it owns its own comment/notify for every outcome (autoshipRun's
+ * internal paths already do this for shipped/held/self-heal/escalate; only the
+ * still-pending recheck path is deliberately silent).
+ *
+ * Returns whether it triggered a self-heal/escalation relaunch, so `finalizeRun` knows
+ * whether its own tail notification would just be stale noise.
+ */
+async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{ relaunched: boolean }> {
+  const { store, github, notifier, logger } = deps;
+
+  if (!deps.ship) {
+    // Autoship not configured for this repo: nothing will ever merge + deploy
+    // automatically, and there is no self-heal ladder without it. Map the agent's own
+    // preliminary classification onto the closest available terminal meaning, rather
+    // than leaving a "shipped" run pretending to be a real success or a "ci_failed" run
+    // stuck in a status this configuration can never resolve: a green PR is left for a
+    // human to review and merge manually (`held`); a red PR falls back to the plain
+    // `failed` accounting the dispatcher used before the self-heal ladder existed.
+    // `ci_pending` stands as-is -- parking and cheaply re-checking CI is a universal
+    // improvement that does not depend on autoship being configured.
+    if (run.status === "shipped") store.updateRun(run.id, { status: "held" });
+    else if (run.status === "ci_failed") store.updateRun(run.id, { status: "failed" });
+    return { relaunched: false };
+  }
+
+  try {
+    const outcome = await autoshipRun(
+      {
+        github,
+        ship: deps.ship,
+        notifier,
+        logger,
+        autoshipCmd: deps.config.autoshipCmd,
+        autoshipDeploymentCheckout: deps.config.autoshipDeploymentDir,
+        repoSlug: deps.config.repo.slug,
+        generatedConflictAllowlist: deps.config.generatedConflictAllowlist,
+        generatedConflictRegenCmd: deps.config.generatedConflictRegenCmd,
+        generatedConflictMaxAttempts: deps.config.generatedConflictMaxAttempts,
+        generatedConflictCiWaitSeconds: deps.config.generatedConflictCiWaitSeconds,
+        ciSelfHealMaxAttempts: deps.config.ciSelfHealMaxAttempts,
+        ciEscalationModel: deps.config.ciEscalationModel,
+      },
+      run,
+    );
+    logger.info("autoship outcome", { runId: run.id, issue: run.issueNumber, action: outcome.action });
+
+    switch (outcome.action) {
+      case "shipped":
+        store.updateRun(run.id, { status: "shipped" });
+        return { relaunched: false };
+      case "ci_not_green":
+        if (outcome.state === "pending") {
+          // Only touch the record on the TRANSITION into parked -- a recheck that finds
+          // it still pending must stay silent and cheap, not re-write every ~15 minutes
+          // while nothing has actually changed.
+          if (run.status !== "ci_pending") store.updateRun(run.id, { status: "ci_pending" });
+        } else {
+          // Self-heal and escalation are both exhausted; autoshipRun already stamped
+          // autoship-held and commented in that case.
+          store.updateRun(run.id, { status: "held" });
+        }
+        return { relaunched: false };
+      case "ci_self_heal":
+        store.updateRun(run.id, { status: "ci_failed" });
+        await selfHealRun(deps, run, outcome.attempt);
+        return { relaunched: true };
+      case "ci_escalate":
+        store.updateRun(run.id, { status: "ci_failed" });
+        await escalateRun(deps, run, outcome.model);
+        return { relaunched: true };
+      case "held":
+      case "merge_blocked":
+      case "conflict_recovery_failed":
+      case "ship_failed":
+        store.updateRun(run.id, { status: "held" });
+        return { relaunched: false };
+      case "skipped":
+        return { relaunched: false };
+    }
+  } catch (err) {
+    // An autoship failure must never break the loop; it has its own ntfy path.
+    logger.error("autoship threw", {
+      runId: run.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { relaunched: false };
+  }
+}
+
+/**
+ * Re-examines a parked (ci_pending) run's PR without relaunching the agent -- just a
+ * fresh CI check via `evaluateAutoship`. If CI has resolved, this proceeds exactly like
+ * a fresh run's autoship evaluation (ship it, or start the self-heal ladder); if still
+ * pending, the run stays parked and the next scan checks again. Deliberately does NOT
+ * go through `finalizeRun` -- there is no new agent run to record telemetry for or post
+ * a "run finished" comment about, and evaluateAutoship already owns its own comment/
+ * notify for every outcome that actually changes.
+ */
+export async function recheckParkedRun(deps: DispatcherDeps, run: RunRecord): Promise<void> {
+  deps.logger.info("rechecking parked run's CI", { runId: run.id, issue: run.issueNumber });
+  await evaluateAutoship(deps, run);
 }
 
 /**
@@ -492,16 +628,22 @@ export function attemptRecordFromRun(run: RunRecord, nowMs: number): AttemptReco
   };
 }
 
-/** Builds the issue comment for a finished run. */
+/**
+ * Builds the issue comment for a finished run. `run.status` here is always the
+ * PROVISIONAL classification from classifyRunOutcome (runner.ts) -- posted before
+ * evaluateAutoship gets a chance to confirm/override it, so "shipped" at this point
+ * means "CI was green when the agent finished," not "actually merged and deployed
+ * yet." autoship's own follow-up comment (self-heal / escalate / held / shipped)
+ * clarifies the real outcome moments later.
+ */
 export function buildIssueComment(
   run: RunRecord,
   resumable: boolean,
   deferralSummary: string | null,
 ): string {
-  const header =
-    run.status === "succeeded"
-      ? `🤖 **Dispatcher run complete** — ${run.agent} (\`${run.cliModel}\`, effort \`${run.cliEffort}\`)`
-      : `🤖 **Dispatcher run ${run.status.replace("_", " ")}** — ${run.agent} (\`${run.cliModel}\`, effort \`${run.cliEffort}\`)`;
+  const statusLabel =
+    run.status === "shipped" ? "complete — CI green, handing off to autoship" : run.status.replace("_", " ");
+  const header = `🤖 **Dispatcher run ${statusLabel}** — ${run.agent} (\`${run.cliModel}\`, effort \`${run.cliEffort}\`)`;
 
   const lines = [header, ""];
   lines.push(`- Branch: \`${run.branch}\``);
@@ -512,7 +654,17 @@ export function buildIssueComment(
   if (deferralSummary) lines.push(`- Queue deferral: ${deferralSummary}`);
 
   lines.push("");
-  if (resumable) {
+  if (run.status === "ci_pending") {
+    lines.push(
+      "CI had not finished when the run ended. The dispatcher will check back once CI resolves — " +
+        "it will NOT relaunch the agent while waiting.",
+    );
+  } else if (run.status === "ci_failed") {
+    lines.push(
+      "CI is red. The dispatcher is relaunching the agent to diagnose and fix it (self-heal), " +
+        "escalating to a stronger model if that does not resolve it, before holding for a human.",
+    );
+  } else if (resumable) {
     lines.push(
       "The branch and checkout are preserved. The dispatcher will resume this run on its next " +
         "scan, continuing from the first milestone without a `[DONE]` marker — completed work is not redone.",

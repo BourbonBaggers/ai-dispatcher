@@ -63,18 +63,36 @@ test("a differing failure signature restarts the counter", () => {
   assert.equal(out.deferred, false);
 });
 
-test("a succeeded run resolves and clears the deferral", () => {
+test("a shipped run resolves and clears the deferral", () => {
   let records: IssueFailureRecord[] = [];
   for (let i = 1; i <= 3; i++) {
     records = recordTerminalRunOutcome(records, failedRun(), NOW + i).records;
   }
   const success = recordTerminalRunOutcome(
     records,
-    failedRun({ status: "succeeded" }),
+    failedRun({ status: "shipped" }),
     NOW + 10,
   );
   const blocking = getBlockingIssueDeferrals(success.records, NOW + 11);
   assert.equal(blocking.has(42), false);
+});
+
+test("a held run ALSO resolves and clears the deferral -- the agent did its job, it's just blocked", () => {
+  let records: IssueFailureRecord[] = [];
+  for (let i = 1; i <= 3; i++) {
+    records = recordTerminalRunOutcome(records, failedRun(), NOW + i).records;
+  }
+  const held = recordTerminalRunOutcome(records, failedRun({ status: "held" }), NOW + 10);
+  const blocking = getBlockingIssueDeferrals(held.records, NOW + 11);
+  assert.equal(blocking.has(42), false);
+});
+
+test("a ci_pending or ci_failed run does NOT resolve the deferral -- the outcome isn't decided yet", () => {
+  const records = recordTerminalRunOutcome([], failedRun(), NOW).records;
+  const stillPending = recordTerminalRunOutcome(records, failedRun({ status: "ci_pending" }), NOW + 1);
+  assert.deepEqual(stillPending.records, records);
+  const stillFailingCi = recordTerminalRunOutcome(records, failedRun({ status: "ci_failed" }), NOW + 1);
+  assert.deepEqual(stillFailingCi.records, records);
 });
 
 test("a failed run that produced a commit does not count against the issue", () => {

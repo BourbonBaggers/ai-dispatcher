@@ -110,9 +110,9 @@ function signals(overrides: Partial<RunSignals> = {}): RunSignals {
 
 const exhaustion: TokenExhaustionSignal = { resetAt: null, wallClock: null, resetLabel: null };
 
-test("a clean exit with commits and green CI succeeds", () => {
+test("a clean exit with commits and green CI is provisionally shipped (autoship confirms)", () => {
   const outcome = classifyRunOutcome(signals());
-  assert.equal(outcome.status, "succeeded");
+  assert.equal(outcome.status, "shipped");
   assert.equal(outcome.exitCode, 0);
 });
 
@@ -129,7 +129,7 @@ test("a stray exhaustion match on a CLEAN exit does NOT trip a cooldown", () => 
   const outcome = classifyRunOutcome(
     signals({ resultExit: 0, resultCommits: 1, resultCi: "pass", tokenExhaustion: exhaustion }),
   );
-  assert.equal(outcome.status, "succeeded");
+  assert.equal(outcome.status, "shipped");
 });
 
 test("exhaustion during a timeout stays a timeout, not a cooldown", () => {
@@ -164,15 +164,15 @@ test("a clean exit with zero commits is a failure — the agent gave up", () => 
   assert.equal(outcome.exitCode, 0);
 });
 
-test("a clean exit with commits but red CI is a failure — CI is the deciding vote", () => {
+test("a clean exit with commits but red CI is ci_failed, not a plain failure — CI drives the self-heal ladder", () => {
   const outcome = classifyRunOutcome(signals({ resultCi: "fail" }));
-  assert.equal(outcome.status, "failed");
+  assert.equal(outcome.status, "ci_failed");
 });
 
-test("a clean exit with commits and pending CI succeeds but is flagged unverified", () => {
+test("a clean exit with commits and pending CI is parked (ci_pending), not succeeded", () => {
   const outcome = classifyRunOutcome(signals({ resultCi: "pending" }));
-  assert.equal(outcome.status, "succeeded");
-  assert.match(outcome.status === "succeeded" ? (outcome.summary ?? "") : "", /unverified/i);
+  assert.equal(outcome.status, "ci_pending");
+  assert.match(outcome.status === "ci_pending" ? (outcome.summary ?? "") : "", /re-check CI/i);
 });
 
 test("a plain non-zero exit with a result line is a failure carrying the exit code", () => {
