@@ -111,6 +111,7 @@ export type AutoshipOutcome =
   | { action: "merge_blocked"; reason: string }
   | { action: "conflict_recovery_failed"; reason: string; conflictPaths: string[] }
   | { action: "shipped" }
+  | { action: "ship_escalate"; model: string }
   | { action: "ship_failed"; code: number | null; detail: string; state: AutoshipShipState };
 
 /**
@@ -319,10 +320,51 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
       health: classified.health,
       report: classified.report,
     });
-    // A failed (and, per the ship command's own contract, rolled-back) deploy is not
-    // something a retry on the next scan fixes by itself -- without a hold this would
-    // hammer the same ship command again every ~15 minutes on an unresolved deploy
-    // problem, the same silent-loop class of bug as the other hold paths (#366).
+    const alreadyEscalated = run.deployEscalated ?? false;
+    if (!alreadyEscalated) {
+      // Mirror the CI ladder: before paging a human, spend exactly one attempt with a
+      // stronger model (ciEscalationModel, e.g. claude-opus-4-8). A deploy failure can be
+      // a code bug OR a deploy-path bug the escalated model can fix (as a human did for
+      // #366); the escalated run re-enters on the same issue/PR, and if it fixes the
+      // problem autoship re-attempts the ship and closes on health pass. This is a
+      // SEPARATE, one-shot budget from the CI escalation (run.deployEscalated, not
+      // ciEscalated), so a run that already spent its CI escalation still gets a fresh
+      // frontier attempt at the deploy. No stampHold here: the issue must stay eligible so
+      // the escalated run can pick it back up.
+      logger.info("autoship: ship failed, escalating model", {
+        issue: run.issueNumber,
+        pr,
+        code: result.code,
+        state: classified.state,
+        escalationModel: deps.ciEscalationModel,
+      });
+      await github
+        .comment(
+          run.issueNumber,
+          [
+            "## Autoship: deploy failed, escalating",
+            "",
+            `The ship command failed (exit ${result.code}, state \`${classified.state}\`). ` +
+              `Escalating to \`${deps.ciEscalationModel}\` for one last automated fix attempt ` +
+              "before holding for human review.",
+          ].join("\n"),
+        )
+        .catch(() => false);
+      await notifier
+        .send(
+          `Autoship: escalating deploy #${run.issueNumber} to ${deps.ciEscalationModel}`,
+          `PR #${pr} merged/deployed but the ship command exited ${result.code} (${classified.state}) — escalating to ${deps.ciEscalationModel} for one last attempt.`,
+          NOTIFY_PRIORITY_DEFAULT,
+        )
+        .catch(() => undefined);
+      return { action: "ship_escalate", model: deps.ciEscalationModel };
+    }
+
+    // The deploy escalation attempt is also exhausted (opus's deploy failed too). A failed
+    // (and, per the ship command's own contract, rolled-back) deploy is not something a
+    // retry on the next scan fixes by itself -- without a hold this would hammer the same
+    // ship command again every ~15 minutes on an unresolved deploy problem, the same
+    // silent-loop class of bug as the other hold paths (#366). Now a human is involved.
     await stampHold(deps, run, "ship-failed");
     await notifier
       .send(
