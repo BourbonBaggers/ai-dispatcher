@@ -112,6 +112,10 @@ export function prStateArgs(slug: string, pr: number): string[] {
   return ["pr", "view", String(pr), "--repo", slug, "--json", "state", "--jq", ".state"];
 }
 
+export function prTitleBodyArgs(slug: string, pr: number): string[] {
+  return ["pr", "view", String(pr), "--repo", slug, "--json", "title,body"];
+}
+
 // ── Client ─────────────────────────────────────────────────────────────────────
 
 export class GithubClient {
@@ -299,5 +303,21 @@ export class GithubClient {
   async prDiff(pr: number): Promise<string | null> {
     const result = await this.exec("gh", ["pr", "diff", String(pr), "--repo", this.repo.slug]);
     return result.ok ? result.stdout : null;
+  }
+
+  /**
+   * The PR's title and body, used only to refuse a GitHub auto-close keyword before an
+   * ad hoc `ship` merges it (issue #27) -- untrusted free text, never fed to a shell.
+   */
+  async prTitleAndBody(pr: number): Promise<{ title: string; body: string } | null> {
+    const result = await this.exec("gh", prTitleBodyArgs(this.repo.slug, pr));
+    if (!result.ok) return null;
+    try {
+      const raw = JSON.parse(result.stdout.trim()) as { title?: unknown; body?: unknown };
+      if (typeof raw.title !== "string") return null;
+      return { title: raw.title, body: typeof raw.body === "string" ? raw.body : "" };
+    } catch {
+      return null;
+    }
   }
 }
