@@ -7,7 +7,7 @@
  * exits non-zero with usage text.
  */
 
-import { parseCliConfig, expandHome, type DispatcherConfig } from "./config.ts";
+import { parseCliConfig, parseShipCliConfig, expandHome, type DispatcherConfig } from "./config.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { StateStore, LockHeldError } from "./state.ts";
@@ -19,6 +19,7 @@ import { run } from "./exec.ts";
 import { TelemetryStore } from "./telemetry.ts";
 import { buildRoutingReport } from "./report.ts";
 import { runHistoryCommand, runStatusCommand } from "./status.ts";
+import { shipRun, type ShipDeps, type ShipOutcome } from "./ship.ts";
 
 /** Sleeps for `ms`, resolving early if the abort signal fires. */
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -106,7 +107,79 @@ export function runReport(argv: string[], env: NodeJS.ProcessEnv, out: (s: strin
   return 0;
 }
 
+/** Formats a `shipRun` outcome as a single human-readable terminal line. */
+function formatShipOutcome(outcome: ShipOutcome): string {
+  switch (outcome.action) {
+    case "blocked":
+      return `Not shipped: ${outcome.reason}`;
+    case "ci_not_green":
+      return `Not shipped: CI is ${outcome.state}. Rerun once it resolves.`;
+    case "deploy_pending":
+      return `Merged; deployment is detached and still verifying (merged SHA: ${outcome.mergedSha ?? "unknown"}). Rerun to confirm.`;
+    case "deploy_failed":
+      return `Not shipped: ${outcome.detail}`;
+    case "shipped": {
+      const issueNote =
+        outcome.issueClosed === null
+          ? ""
+          : outcome.issueClosed
+            ? " Issue closed."
+            : " WARNING: issue could not be closed.";
+      return `Shipped. Merged ${outcome.mergedSha}, deployed ${outcome.deployedSha}.${issueNote}`;
+    }
+  }
+}
+
+/** The `ai-dispatcher ship` subcommand: one-shot merge/deploy/verify for an ad hoc PR. */
+export async function runShipCommand(
+  argv: string[],
+  env: NodeJS.ProcessEnv,
+  out: (s: string) => void,
+  err: (s: string) => void,
+): Promise<number> {
+  const parsed = parseShipCliConfig(argv, env);
+  if (!parsed.ok) {
+    err(`${parsed.message}\n`);
+    return 2;
+  }
+  if (parsed.help) {
+    out(`${parsed.message}\n`);
+    return 0;
+  }
+  const config = parsed.config!;
+  const logger = createLogger(config.logLevel);
+  const deps: ShipDeps = {
+    github: new GithubClient(config.repo),
+    autoshipCmd: config.autoshipCmd,
+    repoSlug: config.repo.slug,
+    autoshipDeploymentCheckout: config.autoshipDeploymentDir,
+    logger,
+    ship: (command, shipEnv, options) => {
+      if (options?.cwd) mkdirSync(options.cwd, { recursive: true });
+      return run("bash", ["-lc", command], {
+        cwd: options?.cwd ?? config.autoshipDeploymentDir,
+        env: shipEnv,
+        timeoutMs: config.autoshipTimeoutMinutes * 60_000,
+        killProcessGroup: true,
+        killGraceMs: 30_000,
+      });
+    },
+  };
+
+  const outcome = await shipRun(deps, { pr: config.pr, issueNumber: config.issue });
+  out(`${formatShipOutcome(outcome)}\n`);
+  return outcome.action === "shipped" ? 0 : 1;
+}
+
 export async function main(argv: string[]): Promise<number> {
+  if (argv[0] === "ship") {
+    return await runShipCommand(
+      argv.slice(1),
+      process.env,
+      (s) => process.stdout.write(s),
+      (s) => process.stderr.write(s),
+    );
+  }
   // `report` is a read-only subcommand that bypasses the loop config entirely.
   if (argv[0] === "report") {
     return runReport(argv.slice(1), process.env, (s) => process.stdout.write(`${s}\n`));
