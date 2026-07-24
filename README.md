@@ -153,6 +153,26 @@ status, current phase, trigger, timestamps/duration, last commit, plan path, rec
 exhaustion evidence, failure summary, and optional `ghCommand`. `RunOutputEntry` is one
 of `output`, `phase`, or `lifecycle`.
 
+## One-shot ship for ad hoc pull requests (#27)
+
+`ship` lets work created in an ordinary interactive coding session (no dispatcher issue,
+no agent run) use the same merge/deploy/health/rollback machinery as autoship, for exactly
+one named PR:
+
+```bash
+ai-dispatcher ship --repo owner/repo --pr 123
+ai-dispatcher ship --repo owner/repo --pr 123 --issue 456   # close #456 after verified delivery
+```
+
+It requires `DISPATCHER_AUTOSHIP_CMD` to be configured — there is nothing to ship with
+otherwise. It makes exactly one pass and never retries, repairs, or escalates: if the PR
+is a draft, has a merge conflict, carries a GitHub auto-close keyword (`Closes`/`Fixes`/
+`Resolves #n`, checked so merging can never close an issue before deployment is verified),
+or CI is not green, it reports what to fix and exits non-zero. Rerun it once that is
+resolved — an already-merged PR is redeployed and reverified by its exact merge SHA, so
+rerunning after a partial failure is safe. `--issue` is optional; without it, no issue
+operation occurs at all. Exit code is `0` only when production is verified delivered.
+
 ## Requirements
 
 - **Node.js 24+** (the service runs its TypeScript directly via native type-stripping; no

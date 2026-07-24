@@ -63,7 +63,7 @@ anything is not ready, exit non-zero with an explanation; the user reruns it lat
   `shipped`; non-zero for every blocked/not-ready/failed outcome).
 - Unit test the CLI parsing in `test/config.test.ts`.
 
-## Milestone 5: docs + verification
+## [DONE] Milestone 5: docs + verification
 
 - Document the command in `README.md` next to the existing `status`/`history` local
   commands section.
