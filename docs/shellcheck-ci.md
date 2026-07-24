@@ -1,5 +1,8 @@
 # ShellCheck CI Guard
 
+> Historical incident evidence. The current executable contract is
+> `scripts/shellcheck-ci.sh` plus its regression tests.
+
 Issue #12 investigated two live PR checks that appeared to be stuck in ShellCheck:
 
 - `BourbonBaggers/ai-dispatcher` PR #11, run `30033367167`, commit

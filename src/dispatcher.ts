@@ -112,13 +112,12 @@ export function selectResumable(
  * comment. A resumable run (interrupted / timed_out / token_exhausted) is still working
  * (the next scan relaunches the agent); a parked run (ci_pending) is waiting on a CI
  * recheck; a ladder run (ci_failed) is mid-self-heal. All three keep `agent-working`. Every
- * other terminal status (shipped, held, failed) is done working, so this returns true.
+ * other terminal status (pr_ready, shipped, held, failed) is done working, so this returns true.
  *
  * NOTE: this is NOT the same question as "does the run keep its ISSUE claim" — that is
- * `CLAIMING_STATUSES` (state.ts), which additionally includes `held`. A held run has no
- * agent working (so this returns true, dropping the label) yet still holds its claim, so
- * the issue is not re-dispatched from scratch while a human decides — clearing
- * `autoship-held` resumes autoship of the existing PR instead (`recheckHeldRun`).
+ * `CLAIMING_STATUSES` (state.ts), which additionally includes `pr_ready` and `held`.
+ * Neither has an active agent, but both retain the issue claim: a PR handoff must not
+ * rerun, and clearing a proven exhausted `autoship-held` resumes the existing PR.
  */
 export function shouldReleaseClaim(status: string): boolean {
   return !(
@@ -680,6 +679,21 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
     switch (outcome.action) {
       case "shipped":
         store.updateRun(run.id, { status: "shipped" });
+        try {
+          deps.telemetry?.setIssueOutcome(run.issueNumber, {
+            prStatus: "merged",
+            ciStatus: "pass",
+            mergeStatus: "merged",
+            productionStatus: "deployed",
+          });
+        } catch (err) {
+          // Evidence must never turn a verified production success into a deploy repair.
+          logger.warn("telemetry outcome update failed", {
+            runId: run.id,
+            issue: run.issueNumber,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
         return { relaunched: false };
       case "deploy_pending":
         // Self-deployment restarts this service from a detached systemd unit. Persist a
@@ -870,17 +884,15 @@ export function attemptRecordFromRun(run: RunRecord, nowMs: number): AttemptReco
 
 /**
  * Builds the issue comment for a finished run. `run.status` here is always the
- * PROVISIONAL classification from classifyRunOutcome (runner.ts) -- posted before
- * evaluateAutoship gets a chance to confirm/override it, so "shipped" at this point
- * means "CI was green when the agent finished," not "actually merged and deployed
- * yet." autoship's own follow-up action determines the real outcome moments later.
+ * classification from classifyRunOutcome (runner.ts), posted before autoship. `pr_ready`
+ * means the agent handed off a green PR; only autoship may later persist `shipped`.
  */
 export function buildIssueComment(
   run: RunRecord,
   resumable: boolean,
 ): string {
   const statusLabel =
-    run.status === "shipped" ? "complete — CI green, handing off to autoship" : run.status.replace("_", " ");
+    run.status === "pr_ready" ? "PR ready — CI green, handing off to autoship" : run.status.replace("_", " ");
   const header = `🤖 **Dispatcher run ${statusLabel}** — ${run.agent} (\`${run.cliModel}\`, effort \`${run.cliEffort}\`)`;
 
   const lines = [header, ""];

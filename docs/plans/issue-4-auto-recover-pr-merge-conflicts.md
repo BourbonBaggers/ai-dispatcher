@@ -1,5 +1,9 @@
 # Issue 4: Auto-Recover Generated-File PR Conflicts
 
+> Historical completed plan. Current code and `AGENTS.md` are authoritative. The original
+> plan’s refusal language does not mean “ask the operator”: mixed/source conflicts enter
+> the assigned-model repair ladder and then the automatic frontier attempt.
+
 ## [DONE] Milestone 1: Recovery Decision Model
 
 Add pure recovery policy code for explicit generated-file allowlists, conflict-path
@@ -18,8 +22,11 @@ missing.
 Wire generated-file conflict recovery into the autoship path after CI is confirmed green
 and before the normal merge/deploy command. Record recovery decisions in logs,
 notifications, and PR comments, and refuse non-allowlisted conflicts without shipping.
+Non-allowlisted conflicts return to the agent recovery ladder; they are not an operator
+handoff.
 
 ## [DONE] Milestone 4: Full Validation and PR
 
 Run the required test and typecheck suite, commit each completed milestone, push the
-issue branch, and open a draft PR containing `Closes #4`.
+issue branch, and open a draft PR without an auto-close keyword. The dispatcher closes
+the issue only after verified production success.

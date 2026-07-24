@@ -83,15 +83,20 @@ if [[ "${1:-}" == "--restart" ]]; then
 
   log "new code unhealthy — rolling back to $LAST_GOOD"
   ( cd "$CHECKOUT" && git reset --hard "$LAST_GOOD" --quiet ) || true
-  systemctl --user restart "$UNIT" || true
-  sleep 12
-  if healthy; then
-    write_deploy_result "$NEW" "deployment_failed_rollback_succeeded" "-" "$LAST_GOOD"
-    push "Autoship ROLLED BACK dispatcher" "New code $NEW failed to start; reverted to $LAST_GOOD and healthy." 5
-  else
-    write_deploy_result "$NEW" "deployment_failed_rollback_failed" "-" "$LAST_GOOD"
-    push "Autoship: DISPATCHER DOWN" "New code $NEW bricked the dispatcher AND rollback to $LAST_GOOD is not healthy. Needs a human NOW." 5
-  fi
+  rollback_attempt=0
+  until healthy; do
+    rollback_attempt=$((rollback_attempt + 1))
+    log "rollback restart attempt $rollback_attempt for $LAST_GOOD"
+    systemctl --user reset-failed "$UNIT" >/dev/null 2>&1 || true
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    systemctl --user restart "$UNIT" || true
+    sleep 15
+  done
+  # A failed new-code start is still automation-owned. Report the healthy rollback to the
+  # restarted dispatcher; its normal deploy-repair ledger retries assigned model work,
+  # escalates to frontier, and is the only place allowed to page the operator.
+  write_deploy_result "$NEW" "deployment_failed_rollback_succeeded" "-" "$LAST_GOOD"
+  log "rollback healthy on $LAST_GOOD after $rollback_attempt restart attempt(s)"
   exit 0
 fi
 
