@@ -327,6 +327,7 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
 
   return new Promise<RunRecord>((resolve) => {
     const child = spawn("bash", args, { env, stdio: ["ignore", "pipe", "pipe"] });
+    let settled = false;
 
     let sawResult = false;
     let resultExit = 0;
@@ -384,6 +385,8 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
     child.stderr.on("data", lineReader((line) => handleLine(line, "stderr")));
 
     const finish = (outcome: RunOutcome): void => {
+      if (settled) return;
+      settled = true;
       // A clean process exit with commits but no PR is not a delivery handoff. Calling
       // it provisionally shipped makes autoship skip it and leaves a false success.
       // Convert it to an agent failure so the autonomous repair ladder relaunches the
@@ -411,6 +414,7 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
         failureSummary: summary ? redact(summary) : null,
         outputSeq,
         finishedAt: now(),
+        finalizationPending: true,
       });
 
       logger.info("run finished", {
@@ -424,6 +428,8 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
     };
 
     child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
       logger.error("agent process failed to start", { runId: run.id, error: redact(err.message) });
       const finalized = store.updateRun(run.id, {
         status: "failed",
@@ -431,6 +437,7 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
         failureSummary: redact(`Could not launch the agent: ${err.message}`),
         outputSeq,
         finishedAt: now(),
+        finalizationPending: true,
       });
       resolve(finalized);
     });

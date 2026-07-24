@@ -240,9 +240,14 @@ then one automatic attempt on `DISPATCHER_CI_ESCALATION_MODEL` (default
 prompt, including conflicting file names and CI evidence.
 
 The phase budgets are independent: spending the CI ladder does not consume the merge or
-deploy ladder. Intermediate attempts and escalation do not send operator push
+deploy ladder. The original issue assignment is retained separately from the currently
+running escalation model, so a successful frontier repair in one phase does not make
+frontier the "assigned" model for later phases. Intermediate attempts and escalation do not send operator push
 notifications. Only failure after the frontier attempt stamps `autoship-held`, retains
 the issue claim, posts the exhausted evidence, and sends one high-priority page.
+
+GitHub transport/auth/read failures are parked as unknown and rechecked; they are not
+misreported as red CI, merge failure, or operator removal of an exhausted hold.
 
 Draft and review-required PRs are promoted and admin-merged. Mixed Markdown/source
 conflicts that the deterministic generated-file repair cannot resolve are handed to the
@@ -321,7 +326,16 @@ All durable state is one atomically-written JSON file plus a lock, under `--stat
   temp-file-then-rename, so a crash mid-write never corrupts it; a corrupt file is
   preserved as `.corrupt-<ts>` and replaced with empty state rather than crash-looping.
 - `dispatcher.lock` — single-instance guard. A second dispatcher against the same state
-  dir refuses to start; a lock from a dead pid is reclaimed automatically.
+  dir refuses to start. Creation is atomic, a lock from a dead process is reclaimed, and
+  process identity prevents PID reuse from turning a stale lock into a permanent block.
+
+Every runner terminal observation is checkpointed as awaiting finalization before control
+returns to the loop. After a kill/restart, the dispatcher completes that exact run's
+repair/autoship path before fresh selection; replayed telemetry uses the attempt id as an
+idempotency key. Legacy `succeeded` rows are treated as unverified PR handoffs and
+re-enter the same finalization path rather than being accepted as production success;
+legacy `shipped` rows written before the recovery ledger are likewise reverified because
+older self-restarts could persist that word before issue closure survived.
 
 No database. The embedded version's Postgres claims are replaced by the lock (one process)
 plus serial execution (one run driven to completion at a time).

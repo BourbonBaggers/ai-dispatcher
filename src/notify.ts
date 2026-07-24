@@ -14,11 +14,14 @@ export interface Notifier {
 export interface NotifyConfig {
   ntfyUrl: string | null;
   ntfyTopic: string | null;
+  /** Bounded because a best-effort side channel must never freeze delivery. */
+  timeoutMs?: number;
 }
 
 /** A notifier that POSTs to ntfy, or silently no-ops when unconfigured. */
 export function createNotifier(config: NotifyConfig): Notifier {
   const { ntfyUrl, ntfyTopic } = config;
+  const timeoutMs = Math.max(1, config.timeoutMs ?? 10_000);
   if (!ntfyUrl || !ntfyTopic) {
     return { send: async () => undefined };
   }
@@ -30,6 +33,7 @@ export function createNotifier(config: NotifyConfig): Notifier {
           method: "POST",
           headers: { Title: title, Priority: String(priority) },
           body,
+          signal: AbortSignal.timeout(timeoutMs),
         });
       } catch {
         // best-effort; delivery is not load-bearing

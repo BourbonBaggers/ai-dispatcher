@@ -131,7 +131,13 @@ export function run(file: string, args: string[], options: ExecOptions = {}): Pr
       if (settled) return;
       settled = true;
       if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (forceTimer) clearTimeout(forceTimer);
+      if (forceTimer) {
+        clearTimeout(forceTimer);
+        // The wrapper may honor SIGTERM and close while a detached/background
+        // descendant ignores it. Clearing the grace timer without this final sweep
+        // leaked exactly those processes after a timed-out deploy.
+        signalProcessTree(child.pid!, timedOutDescendants, "SIGKILL");
+      }
       const finalCode = timedOut ? 124 : spawnError ? 1 : code;
       resolve({ ok: finalCode === 0, stdout, stderr, code: finalCode });
     });
