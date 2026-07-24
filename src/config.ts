@@ -141,6 +141,9 @@ Usage:
   ai-dispatcher status [--state-dir <path>] [--json] [--follow]
   ai-dispatcher history [--state-dir <path>] [--json] [--limit <count>]
   ai-dispatcher report [--state-dir <path>]   Print the routing analytics report.
+  ai-dispatcher ship --repo <owner/repo> --pr <n> [--issue <n>]
+                             Merge, deploy, and verify one ad hoc pull request without a
+                             dispatcher issue or agent run. See "ai-dispatcher ship --help".
 
 Required:
   --repo <owner/repo>        Target GitHub repository (canonical owner/repository).
@@ -322,6 +325,157 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
     ntfyTopic: ntfyTopic && ntfyTopic.trim() !== "" ? ntfyTopic : null,
     once: Boolean(values.once),
     dryRun: Boolean(values["dry-run"]),
+  };
+
+  return { ok: true, config };
+}
+
+// ── `ai-dispatcher ship` — one-shot autoship for an ad hoc PR (issue #27) ──────────────
+
+export interface ShipCliConfig {
+  repo: RepoSlug;
+  pr: number;
+  /** Optional issue to close after verified delivery; null when none was supplied. */
+  issue: number | null;
+  autoshipCmd: string;
+  autoshipTimeoutMinutes: number;
+  autoshipDeploymentDir: string;
+  logLevel: LogLevel;
+}
+
+export interface ShipCliParseResult {
+  ok: boolean;
+  config?: ShipCliConfig;
+  message?: string;
+  help?: boolean;
+}
+
+export const SHIP_USAGE = `ai-dispatcher ship — merge, deploy, and verify one already-open pull request using
+the dispatcher's existing autoship machinery, without a dispatcher issue or agent run.
+
+Usage:
+  ai-dispatcher ship --repo <owner/repository> --pr <number> [--issue <number>]
+
+Required:
+  --repo <owner/repo>   Target GitHub repository (canonical owner/repository).
+                        May also be supplied via DISPATCHER_REPO; the flag wins.
+  --pr <number>         The pull request to ship.
+
+Options:
+  --issue <number>      Close this issue after verified production delivery.
+                        Omit to perform no issue operation at all.
+  --autoship-deploy-dir <path>
+                        Dedicated autoship deployment checkout (default:
+                        DISPATCHER_AUTOSHIP_DEPLOYMENT_DIR or
+                        <state-dir>/autoship-deployments/<owner>-<repo>).
+  --autoship-timeout-minutes <minutes>
+                        Merge/deploy/verify/rollback ceiling (default:
+                        DISPATCHER_AUTOSHIP_TIMEOUT_MINUTES or 120).
+  --state-dir <path>    Used only to compute the default deployment checkout above
+                        (default: DISPATCHER_STATE_DIR or ./state).
+  --log-level <level>   debug | info | warn | error (default: DISPATCHER_LOG_LEVEL or info).
+  --help                Show this message.
+
+Requires DISPATCHER_AUTOSHIP_CMD to be configured -- ship has nothing to run otherwise.
+
+Example:
+  ai-dispatcher ship --repo BourbonBaggers/internal-tools --pr 123 --issue 456
+`;
+
+function requiredPositiveInt(raw: string | undefined, flag: string): { ok: true; value: number } | { ok: false; reason: string } {
+  if (raw === undefined || raw.trim() === "") {
+    return { ok: false, reason: `${flag} is required` };
+  }
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isInteger(n) || n <= 0 || String(n) !== raw.trim()) {
+    return { ok: false, reason: `${flag} must be a positive integer, got "${raw}"` };
+  }
+  return { ok: true, value: n };
+}
+
+/** Parses `ai-dispatcher ship ...` args, independent of the polling-loop config. */
+export function parseShipCliConfig(argv: string[], env: EnvLike): ShipCliParseResult {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: argv,
+      allowPositionals: false,
+      options: {
+        repo: { type: "string" },
+        pr: { type: "string" },
+        issue: { type: "string" },
+        "state-dir": { type: "string" },
+        "autoship-deploy-dir": { type: "string" },
+        "autoship-timeout-minutes": { type: "string" },
+        "log-level": { type: "string" },
+        help: { type: "boolean", default: false },
+      },
+    });
+  } catch (err) {
+    return { ok: false, message: `${(err as Error).message}\n\n${SHIP_USAGE}` };
+  }
+
+  const values = parsed.values;
+  if (values.help) return { ok: true, help: true, message: SHIP_USAGE };
+
+  const repoResult = parseRepoSlug((values.repo as string | undefined) ?? env.DISPATCHER_REPO);
+  if (!repoResult.ok) {
+    return { ok: false, message: `Invalid repository: ${repoResult.reason}\n\n${SHIP_USAGE}` };
+  }
+
+  const prResult = requiredPositiveInt(values.pr as string | undefined, "--pr");
+  if (!prResult.ok) {
+    return { ok: false, message: `${prResult.reason}\n\n${SHIP_USAGE}` };
+  }
+
+  let issue: number | null = null;
+  if (values.issue !== undefined) {
+    const issueResult = requiredPositiveInt(values.issue as string, "--issue");
+    if (!issueResult.ok) {
+      return { ok: false, message: `${issueResult.reason}\n\n${SHIP_USAGE}` };
+    }
+    issue = issueResult.value;
+  }
+
+  const autoshipCmd = env.DISPATCHER_AUTOSHIP_CMD;
+  if (!autoshipCmd || autoshipCmd.trim() === "") {
+    return {
+      ok: false,
+      message: `DISPATCHER_AUTOSHIP_CMD must be configured to ship anything.\n\n${SHIP_USAGE}`,
+    };
+  }
+
+  const logLevelRaw =
+    (values["log-level"] as string | undefined) ?? env.DISPATCHER_LOG_LEVEL ?? "info";
+  if (!isLogLevel(logLevelRaw)) {
+    return {
+      ok: false,
+      message: `Invalid --log-level "${logLevelRaw}" (debug|info|warn|error).\n\n${SHIP_USAGE}`,
+    };
+  }
+
+  const stateDir = expandHome(
+    (values["state-dir"] as string | undefined) ?? env.DISPATCHER_STATE_DIR ?? "./state",
+  );
+  const autoshipDeploymentDir =
+    (values["autoship-deploy-dir"] as string | undefined) ??
+    env.DISPATCHER_AUTOSHIP_DEPLOYMENT_DIR;
+
+  const config: ShipCliConfig = {
+    repo: repoResult.value,
+    pr: prResult.value,
+    issue,
+    autoshipCmd,
+    autoshipTimeoutMinutes: positiveInt(
+      (values["autoship-timeout-minutes"] as string | undefined) ??
+        env.DISPATCHER_AUTOSHIP_TIMEOUT_MINUTES,
+      120,
+    ),
+    autoshipDeploymentDir:
+      autoshipDeploymentDir && autoshipDeploymentDir.trim() !== ""
+        ? expandHome(autoshipDeploymentDir)
+        : join(stateDir, "autoship-deployments", `${repoResult.value.owner}-${repoResult.value.repo}`),
+    logLevel: logLevelRaw,
   };
 
   return { ok: true, config };

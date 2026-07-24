@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseRepoSlug, parseCliConfig } from "../src/config.ts";
+import { parseRepoSlug, parseCliConfig, parseShipCliConfig } from "../src/config.ts";
 
 test("parseRepoSlug accepts a canonical owner/repository", () => {
   const result = parseRepoSlug("BourbonBaggers/internal-tools");
@@ -266,6 +266,87 @@ test("parseCliConfig rejects an invalid log level", () => {
 
 test("parseCliConfig --help returns usage", () => {
   const result = parseCliConfig(["--help"], {});
+  assert.equal(result.ok, true);
+  assert.equal(result.help, true);
+  assert.match(result.message ?? "", /Usage:/);
+});
+
+// ── parseShipCliConfig ──────────────────────────────────────────────────────────────
+
+test("parseShipCliConfig requires --repo", () => {
+  const result = parseShipCliConfig(["--pr", "1"], { DISPATCHER_AUTOSHIP_CMD: "ship.sh" });
+  assert.equal(result.ok, false);
+  assert.match(result.message ?? "", /repository is required|Invalid repository/);
+});
+
+test("parseShipCliConfig requires --pr as a positive integer", () => {
+  const missing = parseShipCliConfig(["--repo", "acme/widgets"], {
+    DISPATCHER_AUTOSHIP_CMD: "ship.sh",
+  });
+  assert.equal(missing.ok, false);
+  assert.match(missing.message ?? "", /--pr is required/);
+
+  const malformed = parseShipCliConfig(["--repo", "acme/widgets", "--pr", "abc"], {
+    DISPATCHER_AUTOSHIP_CMD: "ship.sh",
+  });
+  assert.equal(malformed.ok, false);
+  assert.match(malformed.message ?? "", /--pr must be a positive integer/);
+
+  const zero = parseShipCliConfig(["--repo", "acme/widgets", "--pr", "0"], {
+    DISPATCHER_AUTOSHIP_CMD: "ship.sh",
+  });
+  assert.equal(zero.ok, false);
+});
+
+test("parseShipCliConfig accepts an optional --issue and defaults it to null", () => {
+  const withoutIssue = parseShipCliConfig(["--repo", "acme/widgets", "--pr", "42"], {
+    DISPATCHER_AUTOSHIP_CMD: "ship.sh",
+  });
+  assert.equal(withoutIssue.ok, true);
+  assert.equal(withoutIssue.config?.issue, null);
+
+  const withIssue = parseShipCliConfig(["--repo", "acme/widgets", "--pr", "42", "--issue", "7"], {
+    DISPATCHER_AUTOSHIP_CMD: "ship.sh",
+  });
+  assert.equal(withIssue.ok, true);
+  assert.equal(withIssue.config?.issue, 7);
+});
+
+test("parseShipCliConfig rejects a malformed --issue", () => {
+  const result = parseShipCliConfig(
+    ["--repo", "acme/widgets", "--pr", "42", "--issue", "nope"],
+    { DISPATCHER_AUTOSHIP_CMD: "ship.sh" },
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.message ?? "", /--issue must be a positive integer/);
+});
+
+test("parseShipCliConfig requires DISPATCHER_AUTOSHIP_CMD -- there is nothing to ship with otherwise", () => {
+  const result = parseShipCliConfig(["--repo", "acme/widgets", "--pr", "42"], {});
+  assert.equal(result.ok, false);
+  assert.match(result.message ?? "", /DISPATCHER_AUTOSHIP_CMD must be configured/);
+});
+
+test("parseShipCliConfig defaults the deployment checkout the same way the loop config does", () => {
+  const result = parseShipCliConfig(["--repo", "acme/widgets", "--pr", "42"], {
+    DISPATCHER_AUTOSHIP_CMD: "ship.sh",
+    DISPATCHER_STATE_DIR: "/state",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.config?.autoshipDeploymentDir, "/state/autoship-deployments/acme-widgets");
+});
+
+test("parseShipCliConfig --autoship-deploy-dir overrides the computed default", () => {
+  const result = parseShipCliConfig(
+    ["--repo", "acme/widgets", "--pr", "42", "--autoship-deploy-dir", "/custom/deploy"],
+    { DISPATCHER_AUTOSHIP_CMD: "ship.sh" },
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.config?.autoshipDeploymentDir, "/custom/deploy");
+});
+
+test("parseShipCliConfig --help returns usage without requiring --repo/--pr", () => {
+  const result = parseShipCliConfig(["--help"], {});
   assert.equal(result.ok, true);
   assert.equal(result.help, true);
   assert.match(result.message ?? "", /Usage:/);
