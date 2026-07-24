@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
+  readdirSync,
   linkSync,
   openSync,
   mkdirSync,
@@ -38,6 +39,21 @@ import type { RecoveryKind, RecoveryLedger } from "./recovery-policy.ts";
 
 export type RunTrigger = "poll" | "manual" | "resume";
 
+export const RUN_PHASES = [
+  "claimed",
+  "preparing",
+  "agent_working",
+  "publishing",
+  "waiting_ci",
+  "autoshipping",
+  "deploying",
+  "verifying",
+  "recovering",
+  "held",
+] as const;
+
+export type RunPhase = (typeof RUN_PHASES)[number];
+
 export interface RunRecord {
   id: string;
   issueNumber: number;
@@ -58,6 +74,7 @@ export interface RunRecord {
   checkoutPath: string;
   planPath: string | null;
   status: DispatcherStatus;
+  phase?: RunPhase;
   trigger: RunTrigger;
   lastCommit: string | null;
   prUrl: string | null;
@@ -106,7 +123,7 @@ export interface SettingsRecord {
   codexSuppressedUntil: number | null;
 }
 
-interface PersistedState {
+export interface PersistedState {
   version: 1;
   settings: SettingsRecord;
   runs: RunRecord[];
@@ -115,6 +132,7 @@ interface PersistedState {
 const STATE_FILE = "state.json";
 const STATE_BACKUP_FILE = "state.json.backup";
 const LOCK_FILE = "dispatcher.lock";
+export const RUN_OUTPUT_DIR = "run-output";
 
 function emptyState(): PersistedState {
   return {
@@ -144,6 +162,7 @@ function normalizeRunRecovery(run: RunRecord): RunRecord {
     assignedEffortLabel: run.assignedEffortLabel ?? run.effortLabel,
     assignedCliEffort: run.assignedCliEffort ?? run.cliEffort,
     attemptNumber: Math.max(1, run.attemptNumber ?? 1),
+    phase: normalizeRunPhase(run),
   };
   if (run.status === ("succeeded" as DispatcherStatus)) {
     // Old releases used `succeeded` for a PR handoff. It is not proof of deployment.
@@ -177,6 +196,32 @@ function normalizeRunRecovery(run: RunRecord): RunRecord {
   };
 }
 
+export function phaseForStatus(status: DispatcherStatus): RunPhase {
+  if (status === "claimed") return "claimed";
+  if (status === "running") return "agent_working";
+  if (status === "ci_pending") return "waiting_ci";
+  if (status === "held") return "held";
+  if (
+    status === "failed" ||
+    status === "timed_out" ||
+    status === "interrupted" ||
+    status === "token_exhausted" ||
+    status === "ci_failed"
+  ) {
+    return "recovering";
+  }
+  return "publishing";
+}
+
+function isRunPhase(value: unknown): value is RunPhase {
+  return typeof value === "string" && (RUN_PHASES as readonly string[]).includes(value);
+}
+
+function normalizeRunPhase(run: RunRecord): RunPhase {
+  if (isRunPhase(run.phase)) return run.phase;
+  return phaseForStatus(run.status);
+}
+
 function collapseLegacyFinalizations(runs: RunRecord[]): RunRecord[] {
   const newestByIssue = new Map<number, RunRecord>();
   for (const run of runs) {
@@ -196,6 +241,24 @@ function collapseLegacyFinalizations(runs: RunRecord[]): RunRecord[] {
       legacyFinalization: false,
     };
   });
+}
+
+function readPersistedState(path: string): PersistedState {
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<PersistedState> | null;
+  // Syntactically valid JSON such as `{}` is still corrupt state. Treating missing
+  // runs as an empty array would silently discard every claim just as surely as a
+  // parse error.
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.runs)) {
+    throw new StateCorruptionError();
+  }
+  return {
+    version: 1,
+    settings: {
+      claudeSuppressedUntil: parsed.settings?.claudeSuppressedUntil ?? null,
+      codexSuppressedUntil: parsed.settings?.codexSuppressedUntil ?? null,
+    },
+    runs: collapseLegacyFinalizations(parsed.runs.map((run) => normalizeRunRecovery(run))),
+  };
 }
 
 /** A live process holds this lock. */
@@ -233,6 +296,83 @@ function processIdentity(pid: number): string | null {
     }).trim() || null;
   } catch {
     return null;
+  }
+}
+
+export type DispatcherLiveness =
+  | { state: "online"; pid: number }
+  | { state: "offline"; pid: number | null; reason: "missing" | "stale" | "corrupt" };
+
+export interface ReadOnlyStateSnapshot {
+  state: PersistedState;
+  source: "primary" | "backup" | "empty";
+  liveness: DispatcherLiveness;
+}
+
+export function runOutputPath(stateDir: string, runId: string): string {
+  return join(stateDir, RUN_OUTPUT_DIR, `${runId}.jsonl`);
+}
+
+export function readOnlyStateSnapshot(dir: string): ReadOnlyStateSnapshot {
+  const stateFilePath = join(dir, STATE_FILE);
+  const stateBackupFilePath = join(dir, STATE_BACKUP_FILE);
+  const lockFilePath = join(dir, LOCK_FILE);
+  const primaryExists = existsSync(stateFilePath);
+  const backupExists = existsSync(stateBackupFilePath);
+  let state = emptyState();
+  let source: ReadOnlyStateSnapshot["source"] = "empty";
+
+  if (primaryExists) {
+    try {
+      state = readPersistedState(stateFilePath);
+      source = "primary";
+    } catch {
+      if (!backupExists) throw new StateCorruptionError();
+      try {
+        state = readPersistedState(stateBackupFilePath);
+        source = "backup";
+      } catch {
+        throw new StateCorruptionError();
+      }
+    }
+  } else if (backupExists) {
+    try {
+      state = readPersistedState(stateBackupFilePath);
+      source = "backup";
+    } catch {
+      throw new StateCorruptionError();
+    }
+  }
+
+  return {
+    state: {
+      version: 1,
+      settings: { ...state.settings },
+      runs: state.runs.map((run) => ({ ...run })),
+    },
+    source,
+    liveness: readDispatcherLiveness(lockFilePath),
+  };
+}
+
+export function readDispatcherLiveness(lockFilePath: string): DispatcherLiveness {
+  if (!existsSync(lockFilePath)) return { state: "offline", pid: null, reason: "missing" };
+  try {
+    const raw = JSON.parse(readFileSync(lockFilePath, "utf8")) as {
+      pid?: number;
+      processIdentity?: string | null;
+    };
+    const pid = typeof raw.pid === "number" ? raw.pid : null;
+    if (pid === null) return { state: "offline", pid: null, reason: "corrupt" };
+    if (!processAlive(pid)) return { state: "offline", pid, reason: "stale" };
+    const expected = typeof raw.processIdentity === "string" ? raw.processIdentity : null;
+    const actual = processIdentity(pid);
+    if (expected && actual !== null && actual !== expected) {
+      return { state: "offline", pid, reason: "stale" };
+    }
+    return { state: "online", pid };
+  } catch {
+    return { state: "offline", pid: null, reason: "corrupt" };
   }
 }
 
@@ -435,23 +575,7 @@ export class StateStore {
   }
 
   private readState(path: string): PersistedState {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<PersistedState> | null;
-    // Syntactically valid JSON such as `{}` is still corrupt state. Treating missing
-    // runs as an empty array would silently discard every claim just as surely as a
-    // parse error.
-    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.runs)) {
-      throw new StateCorruptionError();
-    }
-    return {
-      version: 1,
-      settings: {
-        claudeSuppressedUntil: parsed.settings?.claudeSuppressedUntil ?? null,
-        codexSuppressedUntil: parsed.settings?.codexSuppressedUntil ?? null,
-      },
-      runs: Array.isArray(parsed.runs)
-        ? collapseLegacyFinalizations(parsed.runs.map((run) => normalizeRunRecovery(run)))
-        : [],
-    };
+    return readPersistedState(path);
   }
 
   private persistBackup(): void {
@@ -571,6 +695,7 @@ export class StateStore {
       | "assignedEffortLabel"
       | "assignedCliEffort"
       | "finalizationPending"
+      | "phase"
     >,
   ): RunRecord {
     if (this.activeRun()) throw new Error("a run is already active — the dispatcher is serial");
@@ -599,6 +724,7 @@ export class StateStore {
       finalizationPending: false,
       recovery: {},
       remotePid: null,
+      phase: "claimed",
       createdAt: now,
       startedAt: now,
       finishedAt: null,
@@ -620,6 +746,24 @@ export class StateStore {
   pruneRuns(keep: Set<string>): void {
     const before = this.state.runs.length;
     this.state.runs = this.state.runs.filter((r) => keep.has(r.id));
-    if (this.state.runs.length !== before) this.persist();
+    if (this.state.runs.length !== before) {
+      this.persist();
+      this.pruneRunOutput(keep);
+    }
+  }
+
+  private pruneRunOutput(keep: Set<string>): void {
+    const dir = join(this.dir, RUN_OUTPUT_DIR);
+    if (!existsSync(dir)) return;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+      const runId = entry.name.slice(0, -".jsonl".length);
+      if (keep.has(runId)) continue;
+      try {
+        unlinkSync(join(dir, entry.name));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      }
+    }
   }
 }

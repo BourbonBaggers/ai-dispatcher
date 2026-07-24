@@ -35,7 +35,9 @@ import { UNAVAILABLE_TOKENS, type AttemptRecord, type TelemetryStore } from "./t
 import type { GithubClient, GithubIssue } from "./github.ts";
 import type { DispatcherConfig } from "./config.ts";
 import type { Logger } from "./logger.ts";
-import type { StateStore, RunRecord } from "./state.ts";
+import { phaseForStatus, type StateStore, type RunPhase, type RunRecord } from "./state.ts";
+import { appendRunOutputEntry } from "./run-output.ts";
+import { redact } from "./sanitize.ts";
 import {
   decideRecovery,
   updateRecovery,
@@ -161,7 +163,37 @@ export function nextRecoveryLaunch(
 }
 
 export function checkpointLadderRun(store: StateStore, run: RunRecord): RunRecord {
-  return store.updateRun(run.id, { status: "ci_failed", finalizationPending: true });
+  return store.updateRun(run.id, {
+    status: "ci_failed",
+    phase: "recovering",
+    finalizationPending: true,
+  });
+}
+
+function recordRunPhase(
+  deps: Pick<DispatcherDeps, "config" | "store" | "now">,
+  run: RunRecord,
+  phase: RunPhase,
+  message: string,
+  patch: Partial<RunRecord> = {},
+): RunRecord {
+  const now = deps.now ?? (() => Date.now());
+  const current = deps.store.getRun(run.id) ?? run;
+  const outputSeq = current.outputSeq + 1;
+  if (deps.config.stateDir) {
+    appendRunOutputEntry(deps.config.stateDir, {
+      version: 1,
+      runId: run.id,
+      seq: outputSeq,
+      timestamp: now(),
+      type: "phase",
+      stream: "control",
+      phase,
+      message: redact(message),
+    });
+    return deps.store.updateRun(run.id, { ...patch, phase, outputSeq });
+  }
+  return deps.store.updateRun(run.id, { ...patch, phase });
 }
 
 export function isOwnedLauncherCommand(command: string | null, run: RunRecord): boolean {
@@ -438,6 +470,7 @@ export async function resumeRun(deps: DispatcherDeps, run: RunRecord): Promise<R
 
   const reentered = store.updateRun(run.id, {
     status: "claimed",
+    phase: "recovering",
     trigger: "resume",
     resumeCount: nextResumeCount(run),
     attemptNumber: run.attemptNumber + 1,
@@ -482,6 +515,7 @@ async function repairRun(
 
   const reentered = store.updateRun(run.id, {
     status: "claimed",
+    phase: "recovering",
     trigger: "resume",
     ...assignedIdentity(run),
     recovery: updateRecovery(run.recovery, kind, { attempts: attempt }),
@@ -539,6 +573,7 @@ async function escalateRun(
 
   const reentered = store.updateRun(run.id, {
     status: "claimed",
+    phase: "recovering",
     trigger: "resume",
     agent,
     modelLabel,
@@ -580,7 +615,7 @@ async function exhaustRun(
   reason: string,
 ): Promise<void> {
   const exhaustedAt = (deps.now ?? (() => Date.now()))();
-  let finalRun = deps.store.updateRun(run.id, {
+  let finalRun = recordRunPhase(deps, run, "held", `${kind} recovery exhausted.`, {
     status: "held",
     failureSummary: `${kind} recovery exhausted: ${reason}`,
     exhaustion: {
@@ -642,7 +677,7 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
 
   if (run.status === "abandoned") {
     await github.removeLabel(run.issueNumber, WORKING_LABEL);
-    store.updateRun(run.id, { finalizationPending: false });
+    store.updateRun(run.id, { phase: phaseForStatus("abandoned"), finalizationPending: false });
     return;
   }
 
@@ -759,6 +794,9 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
   }
 
   try {
+    if (run.exitCode === 0 && run.prNumber !== null) {
+      recordRunPhase(deps, run, "autoshipping", "Evaluating autoship readiness.");
+    }
     const outcome = await autoshipRun(
       {
         github,
@@ -775,7 +813,7 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
         ciSelfHealMaxAttempts: deps.config.ciSelfHealMaxAttempts,
         ciEscalationModel: deps.config.ciEscalationModel,
         beforeShip: ({ pr, mergedSha }) => {
-          store.updateRun(run.id, {
+          recordRunPhase(deps, run, "deploying", "Autoship deployment started.", {
             status: "ci_pending",
             failureSummary:
               `Deployment started for PR #${pr}` +
@@ -790,7 +828,9 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
 
     switch (outcome.action) {
       case "shipped":
-        store.updateRun(run.id, { status: "shipped" });
+        recordRunPhase(deps, run, "verifying", "Autoship verified production health.", {
+          status: "shipped",
+        });
         try {
           deps.telemetry?.setIssueOutcome(run.issueNumber, {
             prStatus: "merged",
@@ -812,14 +852,20 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
         // Self-deployment restarts this service from a detached systemd unit. Persist a
         // parked claim before that restart can kill us; the new process rechecks the
         // already-merged SHA and closes only after the detached verifier records health.
-        store.updateRun(run.id, { status: "ci_pending" });
+        recordRunPhase(deps, run, "verifying", "Detached deployment verification is pending.", {
+          status: "ci_pending",
+        });
         return { relaunched: false };
       case "ci_not_green":
         if (outcome.state === "pending" || outcome.state === "unknown") {
           // Only touch the record on the TRANSITION into parked -- a recheck that finds
           // it still pending must stay silent and cheap, not re-write every ~15 minutes
           // while nothing has actually changed.
-          if (run.status !== "ci_pending") store.updateRun(run.id, { status: "ci_pending" });
+          if (run.status !== "ci_pending") {
+            recordRunPhase(deps, run, "waiting_ci", "Waiting for PR checks to resolve.", {
+              status: "ci_pending",
+            });
+          }
           return { relaunched: false };
         }
         // Defensive fallback: autoship normally maps red CI directly to a recovery
@@ -893,6 +939,7 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
  */
 export async function recheckParkedRun(deps: DispatcherDeps, run: RunRecord): Promise<void> {
   deps.logger.info("rechecking parked run's CI", { runId: run.id, issue: run.issueNumber });
+  recordRunPhase(deps, run, "waiting_ci", "Rechecking parked PR checks.");
   await evaluateAutoship(deps, run);
 }
 
@@ -940,6 +987,7 @@ export async function recheckHeldRun(deps: DispatcherDeps, run: RunRecord): Prom
     if (applied) {
       deps.store.updateRun(run.id, {
         exhaustion: { ...run.exhaustion, labelApplied: true },
+        phase: "held",
       });
     }
     return { rechecked: false };
@@ -1083,6 +1131,7 @@ export function reconcile(deps: DispatcherDeps): void {
     }
     store.updateRun(run.id, {
       status: "interrupted",
+      phase: phaseForStatus("interrupted"),
       exitCode: null,
       failureSummary:
         "The dispatcher restarted while this run was in flight. Its branch and checkout are preserved — it will resume on the next scan.",
