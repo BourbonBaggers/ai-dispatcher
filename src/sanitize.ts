@@ -4,8 +4,8 @@
  * Everything an agent process prints passes through here before it is logged:
  *   1. redact() — strip anything that looks like a credential, because an agent can
  *      `cat` a file or echo an env var.
- *   2. toTerminalLines() — Claude streams stream-json; render its events back into
- *      readable lines. Codex already prints text and passes through.
+ *   2. toTerminalLines() — both providers stream structured JSON; render their events
+ *      back into readable lines while retaining event provenance for capacity detection.
  *   3. parseControlLine() — recognize the runner's out-of-band ::pid/event/result:: lines.
  */
 
@@ -71,8 +71,6 @@ function toolResultPreview(content: unknown): string {
 
 /** Renders one line of raw agent stdout into zero or more terminal lines. */
 export function toTerminalLines(line: string, agent: "codex" | "claude"): string[] {
-  if (agent === "codex") return [line];
-
   const trimmed = line.trim();
   if (!trimmed.startsWith("{")) return [line];
 
@@ -82,6 +80,8 @@ export function toTerminalLines(line: string, agent: "codex" | "claude"): string
   } catch {
     return [line];
   }
+
+  if (agent === "codex") return renderCodexEvent(event);
 
   switch (event["type"]) {
     case "system": {
@@ -124,6 +124,75 @@ export function toTerminalLines(line: string, agent: "codex" | "claude"): string
       const turns = event["num_turns"] ?? "?";
       return [`● ${ok ? "completed" : `ended (${String(event["subtype"])})`} — ${seconds}s, ${String(turns)} turns`];
     }
+    default:
+      return [];
+  }
+}
+
+function nestedMessage(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  const record = value as Record<string, unknown>;
+  return typeof record["message"] === "string" ? record["message"] : "";
+}
+
+function renderCodexEvent(event: Record<string, unknown>): string[] {
+  const type = String(event["type"] ?? "");
+  if (type === "thread.started") {
+    return [`● session started (${String(event["thread_id"] ?? "unknown")})`];
+  }
+  if (type === "turn.started" || type === "item.started") return [];
+  if (type === "turn.completed") {
+    const usage =
+      event["usage"] && typeof event["usage"] === "object"
+        ? (event["usage"] as Record<string, unknown>)
+        : null;
+    const input = usage?.["input_tokens"];
+    const output = usage?.["output_tokens"];
+    return [
+      `● completed${typeof input === "number" && typeof output === "number" ? ` — ${input} input, ${output} output tokens` : ""}`,
+    ];
+  }
+  if (type === "turn.failed" || type === "error") {
+    const message =
+      nestedMessage(event["error"]) ||
+      nestedMessage(event["message"]) ||
+      "provider reported an unspecified error";
+    return [`● failed: ${message}`];
+  }
+  if (type !== "item.completed") return [];
+
+  const item =
+    event["item"] && typeof event["item"] === "object"
+      ? (event["item"] as Record<string, unknown>)
+      : null;
+  if (!item) return [];
+
+  switch (item["type"]) {
+    case "agent_message":
+    case "reasoning": {
+      return typeof item["text"] === "string" && item["text"].trim() ? [item["text"]] : [];
+    }
+    case "command_execution": {
+      const command = typeof item["command"] === "string" ? item["command"] : "command";
+      const status = typeof item["status"] === "string" ? ` (${item["status"]})` : "";
+      const lines = [`● exec${status}: ${command}`];
+      if (typeof item["aggregated_output"] === "string") {
+        lines.push(...item["aggregated_output"].split(/\r?\n/).filter(Boolean));
+      }
+      return lines;
+    }
+    case "file_change":
+      return [`● file change${typeof item["status"] === "string" ? ` (${item["status"]})` : ""}`];
+    case "mcp_tool_call": {
+      const server = typeof item["server"] === "string" ? `${item["server"]}.` : "";
+      const tool = typeof item["tool"] === "string" ? item["tool"] : "tool";
+      return [`● MCP: ${server}${tool}`];
+    }
+    case "web_search":
+      return [`● web search: ${String(item["query"] ?? "")}`.trim()];
+    case "plan_update":
+      return ["● plan updated"];
     default:
       return [];
   }

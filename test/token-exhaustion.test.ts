@@ -69,6 +69,13 @@ test("issue text echoed as a tool_result never trips detection", () => {
     message: { content: [{ type: "text", text: "The issue is about insufficient credits handling." }] },
   });
   assert.equal(detectClaudeTokenExhaustion(billingProse, "stdout"), null);
+  const canonicalLookingToolResult = JSON.stringify({
+    type: "user",
+    message: {
+      content: [{ type: "tool_result", content: "Claude AI usage limit reached|2000000000" }],
+    },
+  });
+  assert.equal(detectClaudeTokenExhaustion(canonicalLookingToolResult, "stdout"), null);
 });
 
 test("broad exhaustion phrase is trusted on stderr and in is_error results", () => {
@@ -94,6 +101,33 @@ test("codex quota error via a structured error event is detected, prose is not",
     message: { content: [{ type: "text", text: "out of tokens is what the issue mentions" }] },
   });
   assert.equal(detectCodexTokenExhaustion(prose, "stdout"), null);
+  const failedTurn = JSON.stringify({
+    type: "turn.failed",
+    error: { message: "usage limit reached for this account" },
+  });
+  const signal = detectCodexTokenExhaustion(failedTurn, "stdout");
+  assert.equal(signal?.source, "structured-error");
+});
+
+test("Codex repository output on stderr or in JSONL item events cannot manufacture capacity", () => {
+  // Incident #38: Codex printed a source fixture containing this exact line on stderr.
+  assert.equal(
+    detectCodexTokenExhaustion('  excerpt: "usage limit reached",', "stderr"),
+    null,
+  );
+  assert.equal(
+    detectCodexTokenExhaustion(
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          type: "command_execution",
+          aggregated_output: 'fixture = { excerpt: "usage limit reached" }',
+        },
+      }),
+      "stdout",
+    ),
+    null,
+  );
 });
 
 test("detectProviderTokenExhaustion routes by agent", () => {
