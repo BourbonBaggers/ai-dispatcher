@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { promisify } from "node:util";
 import {
   CANONICAL_TARGET_POLICY,
   DISPATCHER_TARGET_POLICY_ENV,
@@ -13,6 +15,10 @@ import {
   shouldReconcileTargetPolicy,
   targetPolicyPaths,
 } from "../src/target-policy.ts";
+
+const execFileAsync = promisify(execFile);
+const repoRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
+const reconcileScript = join(repoRoot, "scripts", "reconcile-target-policy.mjs");
 
 async function fixture(): Promise<{ checkout: string; cleanup: () => Promise<void> }> {
   const checkout = await mkdtemp(join(tmpdir(), "target-policy-test-"));
@@ -107,4 +113,37 @@ test("targetPolicyPaths returns checkout-local managed paths", () => {
     policyPath: join("/tmp/checkout", TARGET_POLICY_FILE),
     promptPath: join("/tmp/checkout", TARGET_PROMPT_FILE),
   });
+});
+
+test("reconcile-target-policy command refuses untrusted launch context", async () => {
+  const { checkout, cleanup } = await fixture();
+  try {
+    await assert.rejects(
+      execFileAsync("node", [reconcileScript, checkout], { env: { ...process.env } }),
+      (error: { code?: number; stderr?: string }) => {
+        assert.equal(error.code, 65);
+        assert.match(error.stderr ?? "", /trusted launch context/);
+        return true;
+      },
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("reconcile-target-policy command repairs drift and prints the verified path", async () => {
+  const { checkout, cleanup } = await fixture();
+  try {
+    await mkdir(join(checkout, ".dispatcher"), { recursive: true });
+    await writeFile(join(checkout, TARGET_POLICY_FILE), "drift\n");
+
+    const result = await execFileAsync("node", [reconcileScript, checkout], {
+      env: { ...process.env, [DISPATCHER_TARGET_POLICY_ENV]: "1" },
+    });
+
+    assert.equal(result.stdout.trim(), join(checkout, TARGET_POLICY_FILE));
+    assert.equal(await readFile(join(checkout, TARGET_POLICY_FILE), "utf8"), CANONICAL_TARGET_POLICY);
+  } finally {
+    await cleanup();
+  }
 });

@@ -18,7 +18,7 @@
 Create the canonical target-policy module, export deterministic reconciliation helpers,
 and cover missing/drift/extra managed-content cases with unit tests.
 
-## Milestone 2: launcher integration
+## [DONE] Milestone 2: launcher integration
 
 Call reconciliation from the dispatcher launcher before every start/resume invocation,
 thread policy paths into the generated prompt, and make launch fail before provider
