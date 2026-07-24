@@ -31,7 +31,7 @@
 - Update README usage and document the versioned status/history/follow schemas.
 - Run `npm test`, `npm run typecheck`, and relevant ShellCheck validation.
 
-## Milestone 5: Pull Request
+## [DONE] Milestone 5: Pull Request
 
 - Commit each completed milestone with `milestone(N): ...`.
 - Push `issue-30-add-deterministic-status-history-and-agent-output`.
