@@ -17,16 +17,23 @@ Success means merged, deployed, healthy, and requiring no material human repair.
 first miss is acceptable when deterministic verification and automatic recovery make it
 useful evidence.
 
-## 1. Describe residual work
+## 1. Optimize for this operating environment
 
-Apply the labels that materially describe the work. Missing or unknown dimensions use
-conservative middle defaults and never wedge an issue.
+This is a small, trusted, automation-heavy operation—not an enterprise change-control
+board. Most mistakes happen on a Git branch, are caught by tests or CI, and can be retried.
+Production changes are health-checked and rollback is the safety net. The number of users,
+organizational approval layers, and enterprise governance overhead are not routing inputs.
+
+Judge the residual work left for the coding agent after reading the issue. Apply only
+labels that materially differ from the middle defaults; an omitted dimension uses its
+middle value and never wedges an issue. When choosing between adjacent values, use the
+lower one unless the issue contains concrete evidence for the higher value.
 
 | Dimension | Label | Values |
 | --- | --- | --- |
 | Task type | `task:<type>` | e.g. `feature`, `bugfix`, `refactor`, `docs`, `test`, `infra` |
 | Complexity | `complexity:<v>` | `trivial`, `simple`, `moderate`, `complex` |
-| Blast radius | `risk:<v>` | `low`, `medium`, `high` |
+| Residual blast radius | `risk:<v>` | `low`, `medium`, `high` |
 | Context size | `context:<v>` | `small`, `medium`, `large` |
 | Ambiguity | `ambiguity:<v>` | `clear`, `some`, `high` |
 | Requirements quality | `requirements:<v>` | `good`, `adequate`, `poor` |
@@ -38,8 +45,41 @@ Use `requirements:good` only when the issue gives a bounded execution package: o
 scope and exclusions, acceptance criteria, business/data rules, dependencies, verification,
 and relevant rollback guidance.
 
-Route by uncertainty remaining after those requirements. Importance, file count, and
-state-machine vocabulary do not independently justify a stronger model.
+Use these operational definitions:
+
+- **Complexity** measures unsettled implementation structure, not workflow importance or
+  file count. `trivial` is mechanical; `simple` follows one obvious local pattern;
+  `moderate` is bounded cross-file or stateful work with a settled approach; `complex`
+  means the worker must choose among materially different architectures, algorithms, or
+  integration strategies. Several explicit states and negative cases are usually
+  `moderate`, not `complex`.
+- **Risk** is harm that can escape the safeguards actually present. `low` is isolated;
+  `medium` can temporarily break a workflow but is detectable and reversible; `high`
+  can silently corrupt or disclose data, cause irreversible external effects, or evade
+  tests, health checks, and rollback. Merely touching merge, deployment, authentication,
+  or production code is not `high`.
+- **Context** is the material that must be held simultaneously to choose the solution,
+  not the number of relevant files or concepts. `small` is localized; `medium` is normal
+  repository orientation plus several files; `large` asserts that the task probably
+  exceeds a normal 200k-token context and cannot reasonably be partitioned. Use `large`
+  rarely: it is a hard model-capability constraint, not an effort adjective.
+- **Ambiguity** measures unresolved outcome or policy. Ordinary factoring, naming, and
+  integration-point choices do not make a well-specified issue `some`; use `clear` when
+  acceptance criteria settle externally observable behavior.
+- **Residual reasoning** measures approach selection left to the worker. `shallow` is
+  mechanical execution; `moderate` is normal coding judgment and careful edge cases;
+  `deep` requires novel diagnosis, competing invariants, or unresolved tradeoffs.
+  Implementing explicit safety rules is normally `moderate`.
+- **Verification** is `strong` when deterministic tests, CI, structured health evidence,
+  or equivalent checks give a reliable oracle; `standard` is normal test/review feedback;
+  `weak` means correctness is subjective or failures are hard to observe.
+- **Recoverability** is `high` when a miss is confined to a branch or can be automatically
+  retried/rolled back; `medium` needs some cleanup; `low` is irreversible or difficult to
+  restore. Self-healing and rollback count.
+
+Route by uncertainty remaining after requirements and safeguards. Importance, codebase
+breadth, state-machine vocabulary, and “production-adjacent” language do not independently
+justify a stronger model.
 
 ## 2. Derive the minimum model tier
 
@@ -48,13 +88,33 @@ The capability ladder is `fast → general → complex → frontier`. General is
 | Tier | Initial use |
 | --- | --- |
 | **fast** | Trivial/simple, low-risk, clear work with good requirements, shallow reasoning, and strong deterministic verification. |
-| **general** | Most bounded work with a known approach; also complex raw scope whose design is settled and whose failures are strongly verified and cheaply recoverable. |
-| **complex** | Meaningful implementation judgment remains: complex scope, high ambiguity, poor requirements, deep reasoning, or material residual risk. |
+| **general** | Most bounded work with a known approach, including cross-file stateful work with explicit invariants; also complex raw scope whose design is settled and whose failures are strongly verified and cheaply recoverable. |
+| **complex** | Meaningful approach selection remains: genuinely complex implementation structure, high ambiguity, poor requirements, or deep residual reasoning. Risk alone does not select this tier. |
 | **frontier** | Exceptional first attempts only: complex and high-risk work with deep uncertainty plus weak verification or low recoverability. |
 
 Raw complex scope receives a one-tier recoverability discount when requirements are good,
-ambiguity is not high, reasoning and risk are not high, verification is strong, and
-recovery is cheap. Frontier otherwise remains the final automatic recovery rung.
+ambiguity is not high, reasoning is not deep, verification is strong, and recovery is
+cheap. High risk does not cancel real verification and recoverability. Frontier otherwise
+remains the final automatic recovery rung.
+
+The human-readable decision rule is:
+
+> Start at general + medium. Move down for deterministic mechanical work. Move effort up
+> for execution breadth or persistence. Move the model up only when the worker must choose
+> the right approach under unresolved uncertainty.
+
+Current catalog warning: `context:large` requires large-context capability, while
+`complexity:complex` requires the complex lane. No current live model satisfies both.
+That combination is intentionally unroutable and should be used only when both assertions
+are literally true—not as a way to say “this is an important broad change.”
+
+### Calibration examples from this repository
+
+| Work item | Appropriate characteristics | Initial route |
+| --- | --- | --- |
+| Reconcile target policy before each launch (#26) | `complexity:moderate`, `risk:medium`, `context:medium`, `ambiguity:clear`, `requirements:good`, `reasoning:moderate`, `verification:strong`, `recoverability:high` | general + medium |
+| Compose existing autoship machinery into a one-shot command (#27) | `complexity:moderate`, `risk:medium`, `context:medium`, `ambiguity:clear`, `requirements:good`, `reasoning:moderate`, `verification:strong`, `recoverability:high` | general + medium |
+| Add blocked, on-demand semantic policy cleanup (#28) | `complexity:moderate`, `risk:medium`, `context:medium`, `ambiguity:some`, `requirements:good`, `reasoning:moderate`, `verification:standard`, `recoverability:high` | blocked; general + medium when admitted |
 
 ## 3. Derive effort independently
 

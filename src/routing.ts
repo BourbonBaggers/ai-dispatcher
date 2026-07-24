@@ -33,7 +33,7 @@ import {
 export const COMPLEXITY = ["trivial", "simple", "moderate", "complex"] as const;
 export type Complexity = (typeof COMPLEXITY)[number];
 
-export const RISK = ["low", "medium", "high"] as const; // blast radius
+export const RISK = ["low", "medium", "high"] as const; // residual blast radius after safeguards
 export type Risk = (typeof RISK)[number];
 
 export const CONTEXT_SIZE = ["small", "medium", "large"] as const;
@@ -176,7 +176,10 @@ function deriveBaselineTier(c: IssueCharacteristics): ModelTier {
   }
 
   let rank = c.complexity === "complex" ? 2 : 1;
-  if (c.risk === "high") rank = Math.max(rank, 2); // complex
+  // Risk changes how much verification and recovery matter; it does not give a model
+  // additional reasoning ability. Only unresolved implementation judgment raises the
+  // capability floor. This prevents safety-critical but well-specified work from being
+  // priced as architecture merely because its subject is important.
   if (c.reasoningDepth === "deep") rank = Math.max(rank, 2); // complex
   if (c.ambiguity === "high" || c.requirementsQuality === "poor") {
     rank = Math.max(rank, 2); // unresolved approach selection needs the complex lane
@@ -201,13 +204,13 @@ function deriveBaselineTier(c: IssueCharacteristics): ModelTier {
 /**
  * Strong deterministic feedback and cheap automatic recovery make a cheaper first
  * attempt rational: a miss produces useful evidence and the recovery ladder escalates
- * automatically. All four conditions are required so one optimistic label cannot
- * discount work whose requirements are unclear or whose failure is expensive.
+ * automatically. High stated risk does not veto this discount: if deterministic
+ * verification catches a miss and recovery is genuinely cheap, that risk is already
+ * contained. Unclear requirements or residual deep reasoning still prevent it.
  */
 export function hasRecoverabilityDiscount(c: IssueCharacteristics): boolean {
   return (
     deriveBaselineTier(c) === "complex" &&
-    c.risk !== "high" &&
     c.reasoningDepth !== "deep" &&
     c.requirementsQuality === "good" &&
     c.ambiguity !== "high" &&
@@ -218,8 +221,8 @@ export function hasRecoverabilityDiscount(c: IssueCharacteristics): boolean {
 
 /**
  * The lowest plausible tier for the initial attempt, not the tier most likely to finish
- * without a retry. Complexity, escaped blast radius, and irreducible reasoning establish
- * a baseline. A complete execution package can route simple work to fast directly;
+ * without a retry. Residual implementation judgment establishes the capability baseline;
+ * risk alone does not. A complete execution package can route simple work to fast directly;
  * strong verification plus cheap recovery lowers raw complex scope to general because
  * bounded repair and frontier escalation are already part of the operating contract.
  * Frontier requires severe residual uncertainty plus weak safeguards, so importance or

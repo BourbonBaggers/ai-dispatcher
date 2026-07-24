@@ -126,6 +126,11 @@ optional effort authoritative for the initial launch.
   live capacity. A bounded adapter failure is `unknown`, never fabricated headroom.
   Telemetry token counts remain `unavailable` (the launcher emits none), and success
   requires merged + deployed + no human repair — a clean exit or PR is not success.
+- **Route residual work, not institutional importance.** This service runs for a small,
+  trusted operation with CI, health verification, rollback, and automatic recovery.
+  Production adjacency, file count, and explicit safety states do not by themselves raise
+  model tier. Model tier tracks unresolved approach selection; execution breadth belongs
+  in effort, and risk is the harm that can escape the safeguards actually present.
 - **Frontier is the final automatic recovery rung.** Initial routing still withholds
   frontier models unless task characteristics justify them. After bounded assigned-model
   repairs fail, escalation to the configured frontier model is automatic; only failure
