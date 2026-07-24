@@ -16,7 +16,7 @@ import type { DispatcherConfig } from "../src/config.ts";
 import { resolveAuthorAuthConfig } from "../src/author-auth.ts";
 import { resolveCapacitySuppression, type ProviderCapacitySignal } from "../src/token-exhaustion.ts";
 import { DISPATCHER_TARGET_POLICY_ENV } from "../src/target-policy.ts";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 const SPEC: AgentLaunchSpec = {
   issueNumber: 42,
@@ -54,6 +54,11 @@ test("the issue number and budget are strings, so they cannot be mistaken for fl
 test("the bundled script resolves to a real file next to the package", () => {
   assert.ok(DISPATCH_AGENT_SCRIPT.endsWith("scripts/dispatch-agent.sh"));
   assert.ok(existsSync(DISPATCH_AGENT_SCRIPT), "dispatch-agent.sh must ship with the service");
+});
+
+test("the Codex launcher uses JSONL so provider errors stay distinct from tool output", () => {
+  const script = readFileSync(DISPATCH_AGENT_SCRIPT, "utf8");
+  assert.match(script, /codex exec \\\n\s+--json \\/);
 });
 
 test("launcher bootstrap and wrap-up have a finite outer timeout", () => {

@@ -197,6 +197,10 @@ test("provider-capacity suppression evidence round-trips", () => {
       authoritative: false,
       detectedAt: 100,
       reportedResetLabel: null,
+      source: "structured-error",
+      stream: "stdout",
+      outputSeq: 42,
+      providerExitCode: 75,
       excerpt: "usage limit reached",
     });
     assert.equal(store.getProviderSuppression("claude")?.until, 12345);
@@ -207,6 +211,9 @@ test("provider-capacity suppression evidence round-trips", () => {
     const reopened = StateStore.open(dir);
     assert.equal(reopened.getProviderSuppression("claude")?.until, 12345);
     assert.equal(reopened.getProviderSuppression("claude")?.authoritative, false);
+    assert.equal(reopened.getProviderSuppression("claude")?.source, "structured-error");
+    assert.equal(reopened.getProviderSuppression("claude")?.outputSeq, 42);
+    assert.equal(reopened.getProviderSuppression("claude")?.providerExitCode, 75);
     reopened.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -334,6 +341,7 @@ test("pr_ready retains its issue claim without becoming resumable or parked", ()
     assert.equal(store.claimingRunsByIssue().get(7), "pr_ready");
     assert.deepEqual(store.resumableRuns(), []);
     assert.deepEqual(store.parkedRuns(), []);
+    assert.deepEqual(store.prReadyRuns().map((candidate) => candidate.issueNumber), [7]);
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });

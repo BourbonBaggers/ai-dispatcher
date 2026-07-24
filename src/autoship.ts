@@ -9,10 +9,10 @@
  * The order of checks is the whole point, and every one of them was paid for in the
  * internal-tools incident that took production down for 40 hours:
  *
- *   1. Only a clean agent exit (exitCode 0) that opened a PR is a candidate --
- *      regardless of which of pr_ready/ci_pending/ci_failed status it currently wears,
- *      since this function is the sole authority that decides among those. Nothing
- *      else (an agent that gave up or crashed) ships.
+ *   1. A clean agent exit (exitCode 0) that opened a PR is a candidate. So is a
+ *      `pr_ready` run reconciled from a later provider-capacity exit: its trusted
+ *      commits + PR + green-CI evidence already proves the provider is no longer needed.
+ *      Nothing else (an agent that gave up or crashed) ships.
  *   2. Re-confirm CI is green NOW, from `gh pr checks` exit status — never a verdict
  *      observed earlier, never the agent's self-report.
  *   3. Promote drafts and repair merge conflicts; unresolved merge state enters the
@@ -130,11 +130,13 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   // status label it currently wears -- this function is the SOLE authority that decides
   // among those, called both right after a fresh run and again on every parked recheck
   // (dispatcher.ts's evaluateAutoship), so it must not gate on a status it might itself
-  // be about to overwrite. A clean agent exit (0) with a PR is always worth evaluating;
-  // a non-zero exit or zero commits (both land as `run.status === "failed"`) never is --
-  // there is nothing to ship or fix.
-  if (run.exitCode !== 0 || run.prNumber === null) {
-    return { action: "skipped", reason: "run is not a PR-producing clean exit" };
+  // be about to overwrite. `pr_ready` is also authoritative delivery evidence when the
+  // provider later exits on capacity: the runner assigns that status only after trusted
+  // commits + PR + green-CI control records. Requiring the raw provider exit to be zero
+  // contradicted that reconciliation and stranded an otherwise complete PR (#38).
+  const deliveryReadyCapacityExit = run.status === "pr_ready" && run.exitCode !== null;
+  if ((run.exitCode !== 0 && !deliveryReadyCapacityExit) || run.prNumber === null) {
+    return { action: "skipped", reason: "run has no trusted PR-ready delivery evidence" };
   }
   const pr = run.prNumber;
 

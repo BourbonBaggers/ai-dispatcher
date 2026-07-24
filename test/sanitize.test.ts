@@ -72,8 +72,56 @@ test("redact leaves ordinary text untouched", () => {
 
 // ── stream-json → terminal lines ──────────────────────────────────────────────
 
-test("codex output passes through verbatim", () => {
+test("non-JSON codex diagnostics pass through verbatim", () => {
   assert.deepEqual(toTerminalLines("plain codex line", "codex"), ["plain codex line"]);
+});
+
+test("Codex JSONL agent and command events render readably", () => {
+  assert.deepEqual(
+    toTerminalLines(
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "Implemented the fix." },
+      }),
+      "codex",
+    ),
+    ["Implemented the fix."],
+  );
+  assert.deepEqual(
+    toTerminalLines(
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          type: "command_execution",
+          command: "npm test",
+          status: "completed",
+          aggregated_output: "pass 1\npass 2\n",
+        },
+      }),
+      "codex",
+    ),
+    ["● exec (completed): npm test", "pass 1", "pass 2"],
+  );
+});
+
+test("Codex JSONL provider failures and completion usage render readably", () => {
+  assert.deepEqual(
+    toTerminalLines(
+      JSON.stringify({ type: "turn.failed", error: { message: "usage limit reached" } }),
+      "codex",
+    ),
+    ["● failed: usage limit reached"],
+  );
+  assert.deepEqual(
+    toTerminalLines(
+      JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 100, output_tokens: 20 },
+      }),
+      "codex",
+    ),
+    ["● completed — 100 input, 20 output tokens"],
+  );
 });
 
 test("a non-JSON claude line passes through unchanged", () => {
