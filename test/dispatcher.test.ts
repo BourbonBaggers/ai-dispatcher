@@ -20,14 +20,15 @@ import {
   nextRecoveryLaunch,
   isOwnedLauncherCommand,
   checkpointLadderRun,
+  planQuotaHandoff,
   MAX_AUTO_RESUMES,
   type DispatcherDeps,
 } from "../src/dispatcher.ts";
 import { StateStore } from "../src/state.ts";
 import { createLogger } from "../src/logger.ts";
 import type { RunRecord } from "../src/state.ts";
-import type { DispatcherAgent } from "../src/labels.ts";
 import type { DispatcherConfig } from "../src/config.ts";
+import { assessCapacity } from "../src/capacity.ts";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "ai-dispatcher-loop-"));
@@ -83,6 +84,26 @@ test("attemptRecordFromRun maps a terminal run honestly", () => {
     prUrl: "https://x/pull/9",
     startedAt: 1000,
     finishedAt: 4000,
+    routing: {
+      source: "human-override",
+      minimumTier: "frontier",
+      characteristicLabels: ["complexity:complex"],
+      rationaleLabels: ["route:human-override"],
+      confidence: "high",
+      capacitySelection: "human-override",
+      selectedPool: "claude-subscription",
+      effortReason: "explicit human override effort:high",
+      capacity: [{
+        pool: "claude-subscription",
+        state: "available",
+        confidence: "provider-reported",
+        observedAt: 900,
+        resetAt: null,
+        headroomPercent: 50,
+        reason: "test",
+      }],
+      assignedAt: 900,
+    },
   });
   const rec = attemptRecordFromRun(r, 5000);
   assert.equal(rec.issueNumber, 1);
@@ -97,7 +118,10 @@ test("attemptRecordFromRun maps a terminal run honestly", () => {
   // Honest about what the launcher does not emit.
   assert.equal(rec.tokens.source, "unavailable");
   assert.equal(rec.tokens.inputTokens, null);
-  assert.equal(rec.manualOverride, false);
+  assert.equal(rec.manualOverride, true);
+  assert.equal(rec.effortLabel, "effort:high");
+  assert.equal(rec.capacityStateAtAssignment, "available");
+  assert.deepEqual(rec.issueCharacteristicLabels, ["complexity:complex"]);
 });
 
 test("attemptRecordFromRun disambiguates resumes and marks the retry reason", () => {
@@ -139,6 +163,33 @@ test("later-phase repairs restore the immutable assigned model after frontier us
   });
 });
 
+test("quota handoff changes provider without consuming frontier or changing assigned effort", () => {
+  const blocked = run({
+    status: "token_exhausted",
+    agent: "claude",
+    modelLabel: "model:claude-sonnet-5",
+    cliModel: "claude-sonnet-5",
+    effortLabel: "effort:high",
+    cliEffort: "high",
+    assignedAgent: "claude",
+    assignedModelLabel: "model:claude-sonnet-5",
+    assignedCliModel: "claude-sonnet-5",
+    assignedEffortLabel: "effort:high",
+    assignedCliEffort: "high",
+  });
+  const capacities = new Map([
+    ["claude-subscription", assessCapacity("claude-subscription", 10_000, 5_000)],
+    ["codex-subscription", assessCapacity("codex-subscription", null, 5_000)],
+  ]);
+  const handoff = planQuotaHandoff(blocked, capacities);
+  assert.equal(handoff.ok, true);
+  if (handoff.ok) {
+    assert.equal(handoff.value.modelLabel, "model:gpt-5.5");
+    assert.equal(handoff.value.effortLabel, "effort:high");
+    assert.notEqual(handoff.value.modelLabel, "model:claude-opus-4.8");
+  }
+});
+
 // ── resume selection ──────────────────────────────────────────────────────────
 
 test("selectResumable returns the oldest eligible resumable run", () => {
@@ -148,7 +199,7 @@ test("selectResumable returns the oldest eligible resumable run", () => {
 });
 
 test("selectResumable skips a run whose provider is in a token cooldown", () => {
-  const claudeDown = (agent: DispatcherAgent) => agent === "claude";
+  const claudeDown = (candidate: RunRecord) => candidate.agent === "claude";
   const runs = [
     run({ id: "claude", agent: "claude" }),
     run({ id: "codex", agent: "codex", modelLabel: "model:gpt-5.5", cliModel: "gpt-5.5" }),
@@ -877,6 +928,102 @@ test("runScanOnce completes a crash-interrupted PR finalization before fresh wor
     assert.equal(store.getRun(pending.id)?.status, "shipped");
     assert.equal(store.getRun(pending.id)?.finalizationPending, false);
     assert.equal(harness.ships.count, 1);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runScanOnce derives model and effort from an unassigned issue after reading live capacity", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    store.setProviderSuppression("codex", {
+      kind: "unconfirmed-quota",
+      until: 20_000,
+      authoritative: false,
+      detectedAt: 1_000,
+      reportedResetLabel: null,
+      excerpt: "quota-like test signal",
+    });
+    const added: string[] = [];
+    let capacityReads = 0;
+    const config = {
+      ...autoshipConfig({ autoshipCmd: null }),
+      dryRun: false,
+      worktreeDir: "/worktrees",
+      authorAuth: { ok: true, mode: "none", trustedAuthors: new Set() },
+    } as DispatcherConfig;
+    const deps: DispatcherDeps = {
+      config,
+      store,
+      logger: createLogger("error", () => undefined),
+      notifier: { send: async () => undefined },
+      github: {
+        listOpenIssues: async () => ({
+          ok: true,
+          issues: [{
+            number: 34,
+            title: "claim-time routing",
+            url: "https://x/34",
+            labels: ["dispatch:ready"],
+            authorLogin: "BourbonBaggers",
+          }],
+        }),
+        addLabel: async (_issue: number, label: string) => {
+          added.push(label);
+          return true;
+        },
+        removeLabel: async () => true,
+        issueState: async () => "OPEN",
+        comment: async () => true,
+      } as unknown as DispatcherDeps["github"],
+      readCapacity: async (nowMs) => {
+        capacityReads += 1;
+        return {
+          errors: new Map(),
+          snapshots: new Map([
+            ["claude-subscription", {
+              pool: "claude-subscription",
+              confidence: "provider-reported",
+              observedAt: nowMs,
+              windows: [{ name: "five-hour", usedPercent: 90, resetAt: nowMs + 60_000 }],
+              reason: "test Claude capacity",
+            }],
+            ["codex-subscription", {
+              pool: "codex-subscription",
+              confidence: "cli-reported",
+              observedAt: nowMs,
+              windows: [{ name: "five-hour", usedPercent: 10, resetAt: nowMs + 60_000 }],
+              reason: "test Codex capacity",
+            }],
+          ]),
+        };
+      },
+      launch: async (claimed) =>
+        store.updateRun(claimed.id, {
+          status: "interrupted",
+          exitCode: 130,
+          finishedAt: 6_000,
+          failureSummary: "test interruption",
+        }),
+      now: () => 5_000,
+    };
+
+    const result = await runScanOnce(deps);
+    const claimed = store.allRuns()[0]!;
+    assert.match(result.message, /Ran codex/);
+    assert.equal(capacityReads, 1);
+    assert.equal(claimed.assignedModelLabel, "model:gpt-5.5");
+    assert.equal(claimed.assignedEffortLabel, "effort:medium");
+    assert.equal(claimed.routing?.source, "automatic");
+    assert.equal(claimed.routing?.capacitySelection, "live-headroom");
+    assert.equal(claimed.routing?.selectedPool, "codex-subscription");
+    assert.equal(store.getSettings().lastInitialCapacityPool, "codex-subscription");
+    assert.equal(store.getProviderSuppression("codex"), null);
+    assert.ok(added.includes("agent:codex"));
+    assert.ok(added.includes("model:gpt-5.5"));
+    assert.ok(added.includes("effort:medium"));
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });

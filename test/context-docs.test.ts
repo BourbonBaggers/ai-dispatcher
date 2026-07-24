@@ -75,12 +75,25 @@ test(".env.example covers exactly the environment read by config", () => {
   assert.deepEqual([...documented].sort(), [...used].sort());
 });
 
-test("ROUTING.md lists every live model with its explicit CLI identifier", () => {
+test("ROUTING.md live-lanes snapshot exactly matches the dispatchable registry", () => {
   const routing = readFileSync(resolve(root, "ROUTING.md"), "utf8");
-  for (const model of dispatchableModels()) {
-    assert.match(routing, new RegExp(`\\\`${model.modelLabel}\\\``));
-    assert.match(routing, new RegExp(`\\\`${model.cliModel}\\\``));
-  }
+  const begin = "<!-- BEGIN GENERATED LIVE MODEL LANES -->";
+  const end = "<!-- END GENERATED LIVE MODEL LANES -->";
+  const rows = dispatchableModels().map((model) => {
+    const frontier = model.frontier ? "**yes**" : "no";
+    return `| ${model.tier} | ${model.role} | \`agent:${model.cli}\` | \`${model.modelLabel}\` | \`${model.cliModel}\` | \`${model.capacityPool}\` | ${frontier} |`;
+  });
+  const expected = [
+    begin,
+    "| Tier | Role | `agent:*` label | `model:*` label | CLI model | Pool | Frontier |",
+    "| --- | --- | --- | --- | --- | --- | --- |",
+    ...rows,
+    end,
+  ].join("\n");
+
+  assert.equal(routing.split(begin).length, 2, "ROUTING.md must contain one live-lanes snapshot");
+  assert.equal(routing.split(end).length, 2, "ROUTING.md must contain one live-lanes snapshot");
+  assert.equal(routing.slice(routing.indexOf(begin), routing.indexOf(end) + end.length), expected);
 });
 
 test("self-ship does not bypass durable exhaustion with an operator page", () => {

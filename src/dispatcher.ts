@@ -20,22 +20,44 @@ import {
   CLAIMING_STATUSES,
   WORKING_LABEL,
   branchNameFor,
+  assignmentForModel,
+  resolveRoutingOverride,
   type DispatcherAgent,
 } from "./labels.ts";
 import { selectEligibleIssue } from "./selection.ts";
 import { untrustedAuthorComment, UNTRUSTED_AUTHOR_LABEL } from "./author-auth.ts";
-import { isProviderSuppressed, formatResetTime } from "./token-exhaustion.ts";
+import { isProviderSuppressed } from "./token-exhaustion.ts";
 import { launchRun } from "./runner.ts";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { NOTIFY_PRIORITY_HIGH, type Notifier } from "./notify.ts";
 import { autoshipRun, AUTOSHIP_HELD_LABEL, type ShipRunner } from "./autoship.ts";
-import { modelByCliModel } from "./models.ts";
+import { dispatchableModels, modelByCliModel } from "./models.ts";
+import {
+  deriveEffort,
+  parseCharacteristics,
+  routeIssue,
+  CHARACTERISTIC_LABEL_PREFIXES,
+} from "./routing.ts";
+import {
+  assessPools,
+  isModelCapacityExhausted,
+  type CapacityAssessment,
+  type PoolUsageObservation,
+} from "./capacity.ts";
+import {
+  readLiveCapacity,
+  type CapacityReadResult,
+} from "./capacity-adapters.ts";
 import { UNAVAILABLE_TOKENS, type AttemptRecord, type TelemetryStore } from "./telemetry.ts";
 import type { GithubClient, GithubIssue } from "./github.ts";
 import type { DispatcherConfig } from "./config.ts";
 import type { Logger } from "./logger.ts";
-import type { StateStore, RunRecord } from "./state.ts";
+import type {
+  StateStore,
+  RunRecord,
+  RoutingAssignmentEvidence,
+} from "./state.ts";
 import {
   decideRecovery,
   updateRecovery,
@@ -65,6 +87,8 @@ export interface DispatcherDeps {
   telemetry?: TelemetryStore;
   /** Injectable clock for deterministic tests. */
   now?: () => number;
+  /** Injectable live-capacity reader; production defaults to both provider adapters. */
+  readCapacity?: (nowMs: number) => Promise<CapacityReadResult>;
   /** Injectable orphan inspection/termination for startup reconciliation tests. */
   processCommand?: (pid: number) => string | null;
   terminateOrphan?: (pid: number) => void;
@@ -107,10 +131,10 @@ async function markUntrustedAuthorIssuesOnce(
  */
 export function selectResumable(
   resumables: RunRecord[],
-  isSuppressed: (agent: DispatcherAgent) => boolean,
+  isSuppressed: (run: RunRecord) => boolean,
   maxResumes: number,
 ): RunRecord | null {
-  return resumables.find((run) => !isSuppressed(run.agent) && run.resumeCount < maxResumes) ?? null;
+  return resumables.find((run) => !isSuppressed(run) && run.resumeCount < maxResumes) ?? null;
 }
 
 /**
@@ -207,6 +231,125 @@ export function assignedIdentity(run: RunRecord): Pick<
   };
 }
 
+function characteristicLabels(labels: string[]): string[] {
+  const prefixes = Object.values(CHARACTERISTIC_LABEL_PREFIXES).map((prefix) => `${prefix}:`);
+  return labels.filter((label) => prefixes.some((prefix) => label.startsWith(prefix)));
+}
+
+function usageByPool(store: StateStore): Map<string, PoolUsageObservation> {
+  const usage = new Map<string, PoolUsageObservation>();
+  for (const model of dispatchableModels()) {
+    if (!usage.has(model.capacityPool)) {
+      usage.set(model.capacityPool, { lastActivityAt: null, activeRuns: 0 });
+    }
+  }
+  for (const run of store.allRuns()) {
+    const model = modelByCliModel(run.cliModel);
+    if (!model) continue;
+    const current = usage.get(model.capacityPool) ?? {
+      lastActivityAt: null,
+      activeRuns: 0,
+    };
+    current.lastActivityAt = Math.max(current.lastActivityAt ?? 0, run.startedAt);
+    if (run.status === "claimed" || run.status === "running") current.activeRuns += 1;
+    usage.set(model.capacityPool, current);
+  }
+  return usage;
+}
+
+async function pickupCapacity(
+  deps: DispatcherDeps,
+  nowMs: number,
+): Promise<Map<string, CapacityAssessment>> {
+  let read: CapacityReadResult;
+  try {
+    read = await (deps.readCapacity ?? readLiveCapacity)(nowMs);
+  } catch {
+    read = { snapshots: new Map(), errors: new Map([["capacity", "capacity readers failed"]]) };
+  }
+  for (const [pool, error] of read.errors) {
+    deps.logger.warn("capacity read unavailable — using deterministic fallback", {
+      pool,
+      reason: error,
+    });
+  }
+
+  const models = dispatchableModels();
+  const pools = [...new Set(models.map((model) => model.capacityPool))];
+  const cooldowns = new Map<string, number | null>();
+  const authoritative = new Map<string, boolean>();
+  for (const agent of ["claude", "codex"] as const) {
+    const pool = agent === "claude" ? "claude-subscription" : "codex-subscription";
+    const suppression = deps.store.getProviderSuppression(agent);
+    cooldowns.set(pool, suppression?.until ?? null);
+    authoritative.set(pool, suppression?.authoritative ?? true);
+  }
+  const assessments = assessPools(
+    pools,
+    cooldowns,
+    usageByPool(deps.store),
+    nowMs,
+    authoritative,
+    read.snapshots,
+  );
+
+  // A successful affirmative live read is stronger and newer than a stale cooldown.
+  for (const agent of ["claude", "codex"] as const) {
+    const pool = agent === "claude" ? "claude-subscription" : "codex-subscription";
+    const assessment = assessments.get(pool);
+    const allProviderModelsAvailable = dispatchableModels()
+      .filter((model) => model.cli === agent)
+      .every(
+        (model) =>
+          assessment && !isModelCapacityExhausted(assessment, model.modelLabel),
+      );
+    if (
+      deps.store.getProviderSuppression(agent) &&
+      (assessment?.confidence === "provider-reported" ||
+        assessment?.confidence === "cli-reported") &&
+      allProviderModelsAvailable
+    ) {
+      deps.store.setProviderSuppression(agent, null);
+      deps.logger.info("cleared stale provider suppression from fresh capacity evidence", {
+        agent,
+        headroomPercent: assessment.headroomPercent ?? undefined,
+      });
+    }
+  }
+  return assessments;
+}
+
+function capacityEvidence(
+  assessments: Map<string, CapacityAssessment>,
+): RoutingAssignmentEvidence["capacity"] {
+  return [...assessments.values()].map((assessment) => ({
+    pool: assessment.pool,
+    state: assessment.state,
+    confidence: assessment.confidence,
+    observedAt: assessment.observedAt,
+    resetAt: assessment.resetAt,
+    headroomPercent: assessment.headroomPercent,
+    reason: assessment.reason,
+  }));
+}
+
+/**
+ * A quota exit changes capacity, not task difficulty. Re-route inside the original
+ * capability band and preserve the original effort; frontier remains unavailable unless
+ * the issue characteristics independently required it.
+ */
+export function planQuotaHandoff(
+  run: RunRecord,
+  capacityByPool: Map<string, CapacityAssessment>,
+): ReturnType<typeof assignmentForModel> {
+  const characteristics = parseCharacteristics(run.routing?.characteristicLabels ?? []);
+  const decision = routeIssue(characteristics, capacityByPool, dispatchableModels(), {
+    rotationCursor: modelByCliModel(run.cliModel)?.capacityPool ?? null,
+  });
+  if (!decision.selected) return { ok: false, reason: decision.reason };
+  return assignmentForModel(decision.selected, run.assignedEffortLabel);
+}
+
 /** Runs a single scan: resume first, else claim and launch at most one fresh issue. */
 export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   const { config, store, github, logger, notifier } = deps;
@@ -239,18 +382,64 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
     };
   }
 
+  const capacityByPool = await pickupCapacity(deps, nowMs);
   const suppressionFor = (agent: DispatcherAgent) => store.getProviderSuppression(agent);
   const suppressedUntil = (agent: DispatcherAgent): Date | null => {
     const record = suppressionFor(agent);
     return record === null ? null : new Date(record.until);
   };
-  const isSuppressed = (agent: DispatcherAgent): boolean =>
-    isProviderSuppressed(suppressedUntil(agent), nowMs);
+  const isSuppressed = (run: RunRecord): boolean => {
+    const model = modelByCliModel(run.cliModel);
+    const assessment = model ? capacityByPool.get(model.capacityPool) : undefined;
+    // Fresh provider evidence is more specific than the legacy provider-wide cooldown:
+    // it can keep a Sonnet run parked while allowing Haiku, for example. Retaining that
+    // cooldown until every model is affirmative preserves the fallback if reads fail.
+    if (
+      assessment &&
+      (assessment.confidence === "provider-reported" ||
+        assessment.confidence === "cli-reported") &&
+      model
+    ) {
+      return isModelCapacityExhausted(assessment, model.modelLabel);
+    }
+    if (isProviderSuppressed(suppressedUntil(run.agent), nowMs)) return true;
+    return Boolean(
+      model && assessment && isModelCapacityExhausted(assessment, model.modelLabel),
+    );
+  };
 
   // ── Resume first ──
   // A resumable run holds its issue's claim, so leaving it parked while we pick up fresh
   // work would quietly abandon it. Interrupted/timed-out runs get the next slot.
   const resumableRuns = store.resumableRuns();
+  for (const exhausted of resumableRuns.filter(
+    (run) => run.status === "token_exhausted" && isSuppressed(run),
+  )) {
+    const handoff = planQuotaHandoff(exhausted, capacityByPool);
+    if (!handoff.ok || handoff.value.agent === exhausted.agent) continue;
+    if (config.dryRun) {
+      return {
+        started: null,
+        message: `[dry-run] would hand off quota-blocked issue #${exhausted.issueNumber} to ${handoff.value.agent}.`,
+      };
+    }
+    const handedOff = store.updateRun(exhausted.id, {
+      ...handoff.value,
+      failureSummary: `capacity handoff from ${exhausted.agent} to ${handoff.value.agent}`,
+    });
+    logger.info("handing quota-blocked run to another provider", {
+      runId: exhausted.id,
+      issue: exhausted.issueNumber,
+      from: exhausted.agent,
+      to: handoff.value.agent,
+      model: handoff.value.cliModel,
+    });
+    const resumed = await resumeRun(deps, handedOff);
+    return {
+      started: resumed,
+      message: `Handed quota-blocked issue #${exhausted.issueNumber} to ${handoff.value.agent}.`,
+    };
+  }
   const resumable = selectResumable(resumableRuns, isSuppressed, MAX_AUTO_RESUMES);
   if (resumable) {
     if (config.dryRun) {
@@ -270,7 +459,7 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   // permanently claiming zombie. Escalate it to the frontier once; if that attempt also
   // reaches the cap, this is genuine exhaustion and the operator gets the single page.
   const capped = resumableRuns.find(
-    (run) => !isSuppressed(run.agent) && run.resumeCount >= MAX_AUTO_RESUMES,
+    (run) => !isSuppressed(run) && run.resumeCount >= MAX_AUTO_RESUMES,
   );
   if (capped) {
     if (config.dryRun) {
@@ -355,18 +544,66 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   }
 
   const claimedByIssue = store.claimingRunsByIssue();
+  const evidenceByIssue = new Map<number, RoutingAssignmentEvidence>();
+  const cursor = store.getSettings().lastInitialCapacityPool;
   const { candidates, target } = selectEligibleIssue(listing.issues, {
-    providerSuppressed: (agent) => isSuppressed(agent),
-    suppressedReason: (agent) => {
-      const record = suppressionFor(agent);
-      const provider = agent === "claude" ? "Claude" : "Codex";
-      if (!record) return `${provider} capacity is paused`;
-      const when = formatResetTime(new Date(record.until));
-      // Honesty: an unconfirmed no-reset signal must never read like proven exhaustion
-      // (#32 requirement 11) — say so, and that it self-revalidates automatically.
-      return record.authoritative
-        ? `${provider} is out of tokens — paused until ${when}`
-        : `${provider} capacity is unconfirmed (${record.kind}) — revalidating automatically at ${when}`;
+    assignmentForIssue: (issue) => {
+      const characteristics = parseCharacteristics(issue.labels);
+      const derivedEffort = deriveEffort(characteristics);
+      const override = resolveRoutingOverride(issue.labels);
+      if (!override.ok) return override;
+
+      if (override.value) {
+        const assessment = capacityByPool.get(override.value.model.capacityPool);
+        if (
+          assessment &&
+          isModelCapacityExhausted(assessment, override.value.model.modelLabel)
+        ) {
+          return {
+            ok: false,
+            reason: `${override.value.model.capacityPool} is currently exhausted; override will be retried automatically`,
+          };
+        }
+        const effortLabel = override.value.effortLabel ?? derivedEffort.effortLabel;
+        const assignment = assignmentForModel(override.value.model, effortLabel);
+        if (!assignment.ok) return assignment;
+        evidenceByIssue.set(issue.number, {
+          source: "human-override",
+          minimumTier: override.value.model.tier,
+          characteristicLabels: characteristicLabels(issue.labels),
+          rationaleLabels: ["route:human-override"],
+          confidence: "high",
+          capacitySelection: "human-override",
+          selectedPool: override.value.model.capacityPool,
+          effortReason:
+            override.value.effortLabel === null
+              ? derivedEffort.reason
+              : `explicit human override ${override.value.effortLabel}`,
+          capacity: capacityEvidence(capacityByPool),
+          assignedAt: nowMs,
+        });
+        return assignment;
+      }
+
+      const decision = routeIssue(characteristics, capacityByPool, dispatchableModels(), {
+        rotationCursor: cursor,
+      });
+      if (!decision.selected) return { ok: false, reason: decision.reason };
+      const assignment = assignmentForModel(decision.selected, derivedEffort.effortLabel);
+      if (!assignment.ok) return assignment;
+      evidenceByIssue.set(issue.number, {
+        source: "automatic",
+        minimumTier: decision.minimumTier,
+        characteristicLabels: characteristicLabels(issue.labels),
+        rationaleLabels: decision.rationaleLabels,
+        confidence: decision.confidence,
+        capacitySelection: decision.capacitySelection,
+        selectedPool: decision.selected.capacityPool,
+        effortReason: derivedEffort.reason,
+        capacity: capacityEvidence(capacityByPool),
+        assignedAt: nowMs,
+      });
+      return assignment;
     },
     claimedByIssue,
     authorAuth: config.authorAuth,
@@ -387,6 +624,7 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
 
   const { issue } = target;
   const { agent, modelLabel, cliModel, effortLabel, cliEffort } = target.assignment;
+  const routing = evidenceByIssue.get(issue.number)!;
   const branch = branchNameFor(issue.number, issue.title);
 
   if (config.dryRun) {
@@ -414,6 +652,7 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
     cliModel,
     effortLabel,
     cliEffort,
+    routing,
     branch,
     checkoutPath: join(config.worktreeDir, branch),
     planPath: null,
@@ -421,9 +660,28 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   });
 
   logger.info("claimed issue", { runId: run.id, issue: issue.number, agent, cliModel, cliEffort });
+  store.setLastInitialCapacityPool(routing.selectedPool);
 
   // Label after claiming: the state row is the authoritative lock, and a failed label
   // write must not leave us thinking the claim failed.
+  if (routing.source === "automatic") {
+    for (const label of issue.labels.filter(
+      (label) =>
+        label.startsWith("agent:") ||
+        label.startsWith("model:") ||
+        label.startsWith("effort:"),
+    )) {
+      await github.removeLabel(issue.number, label);
+    }
+    for (const label of [
+      `agent:${agent}`,
+      modelLabel,
+      effortLabel,
+      ...routing.rationaleLabels,
+    ]) {
+      await github.addLabel(issue.number, label);
+    }
+  }
   await github.addLabel(issue.number, WORKING_LABEL);
   const terminal = await (deps.launch ?? launchRun)(run, { config, store, logger, notifier, now });
   await finalizeRun(deps, terminal);
@@ -985,6 +1243,9 @@ export async function recheckHeldRun(deps: DispatcherDeps, run: RunRecord): Prom
  */
 export function attemptRecordFromRun(run: RunRecord, _nowMs: number): AttemptRecord {
   const model = modelByCliModel(run.cliModel);
+  const selectedCapacity = run.routing?.capacity.find(
+    (assessment) => assessment.pool === run.routing?.selectedPool,
+  );
   const activeDurationMs =
     run.finishedAt !== null ? Math.max(0, run.finishedAt - run.startedAt) : null;
   return {
@@ -994,10 +1255,18 @@ export function attemptRecordFromRun(run: RunRecord, _nowMs: number): AttemptRec
     modelRequested: run.cliModel,
     modelUsed: null,
     selectedModelLabel: run.modelLabel,
-    issueCharacteristicLabels: [],
-    routingRationaleLabels: [],
-    routingConfidence: null,
-    capacityStateAtAssignment: null,
+    issueCharacteristicLabels: run.routing?.characteristicLabels ?? [],
+    routingRationaleLabels: run.routing?.rationaleLabels ?? [],
+    routingConfidence: run.routing?.confidence ?? null,
+    capacityStateAtAssignment: selectedCapacity?.state ?? null,
+    effortLabel: run.effortLabel,
+    ...(run.routing
+      ? {
+          effortReason: run.routing.effortReason,
+          assignmentSource: run.routing.source,
+          capacitySelection: run.routing.capacitySelection,
+        }
+      : {}),
     startedAt: run.startedAt,
     endedAt: run.finishedAt,
     activeDurationMs,
@@ -1009,7 +1278,7 @@ export function attemptRecordFromRun(run: RunRecord, _nowMs: number): AttemptRec
     prCreated: Boolean(run.prUrl),
     humanInterventionRequired: false,
     frontierModelUsed: model?.frontier ?? false,
-    manualOverride: false,
+    manualOverride: run.routing?.source === "human-override",
     terminalStatus: run.status,
   };
 }

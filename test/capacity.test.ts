@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   assessCapacity,
   assessPools,
+  capacityHeadroomForModel,
+  isModelCapacityExhausted,
   isPoolExhausted,
   DORMANCY_IDLE_MS,
 } from "../src/capacity.ts";
@@ -15,6 +17,7 @@ test("an active cooldown reports exhausted with persisted-limit confidence", () 
   assert.equal(a.confidence, "persisted-limit");
   assert.equal(a.resetAt, NOW + 60_000);
   assert.equal(a.dormant, false);
+  assert.equal(a.lastActivityAt, null);
   assert.equal(isPoolExhausted(a), true);
 });
 
@@ -29,6 +32,7 @@ test("no signal at all is honestly unknown but dormant", () => {
   assert.equal(a.state, "unknown");
   assert.equal(a.confidence, "unknown");
   assert.equal(a.resetAt, null);
+  assert.equal(a.lastActivityAt, null);
   // Absence of a cooldown is a routing preference (dormant) but never a fabricated
   // "available" — the state stays unknown.
   assert.equal(a.dormant, true);
@@ -42,6 +46,7 @@ test("usage observation raises confidence to estimated and drives dormancy", () 
   });
   assert.equal(busy.confidence, "estimated");
   assert.equal(busy.dormant, false);
+  assert.equal(busy.lastActivityAt, NOW - 1000);
 
   // Recently used, no active runs → still active, not dormant.
   const recent = assessCapacity("claude-subscription", null, NOW, {
@@ -57,6 +62,7 @@ test("usage observation raises confidence to estimated and drives dormancy", () 
   });
   assert.equal(idle.confidence, "estimated");
   assert.equal(idle.dormant, true);
+  assert.equal(idle.lastActivityAt, NOW - (DORMANCY_IDLE_MS + 60_000));
 
   // Never used → dormant.
   const never = assessCapacity("claude-subscription", null, NOW, {
@@ -112,4 +118,46 @@ test("assessPools threads per-pool authoritative flags", () => {
   const map = assessPools(pools, cooldowns, new Map(), NOW, authoritative);
   assert.equal(map.get("claude-subscription")!.confidence, "persisted-limit");
   assert.equal(map.get("codex-subscription")!.confidence, "unconfirmed-limit");
+});
+
+test("fresh affirmative live evidence supersedes a stale unconfirmed cooldown", () => {
+  const assessment = assessCapacity(
+    "codex-subscription",
+    NOW + 5 * 60 * 60 * 1000,
+    NOW,
+    undefined,
+    false,
+    {
+      pool: "codex-subscription",
+      confidence: "cli-reported",
+      observedAt: NOW,
+      windows: [{ name: "five-hour", usedPercent: 20, resetAt: NOW + 60_000 }],
+      reason: "Codex reported current limits",
+    },
+  );
+  assert.equal(assessment.state, "available");
+  assert.equal(assessment.confidence, "cli-reported");
+  assert.equal(assessment.headroomPercent, 80);
+});
+
+test("model-specific windows constrain only their matching model", () => {
+  const assessment = assessCapacity("claude-subscription", null, NOW, undefined, true, {
+    pool: "claude-subscription",
+    confidence: "provider-reported",
+    observedAt: NOW,
+    windows: [
+      { name: "five-hour", usedPercent: 30, resetAt: NOW + 60_000 },
+      {
+        name: "opus-week",
+        usedPercent: 100,
+        resetAt: NOW + 120_000,
+        modelLabels: ["model:claude-opus-4.8"],
+      },
+    ],
+    reason: "Anthropic reported current limits",
+  });
+  assert.equal(capacityHeadroomForModel(assessment, "model:claude-sonnet-5"), 70);
+  assert.equal(capacityHeadroomForModel(assessment, "model:claude-opus-4.8"), 0);
+  assert.equal(isModelCapacityExhausted(assessment, "model:claude-sonnet-5"), false);
+  assert.equal(isModelCapacityExhausted(assessment, "model:claude-opus-4.8"), true);
 });

@@ -213,6 +213,22 @@ test("provider-capacity suppression evidence round-trips", () => {
   }
 });
 
+test("the initial-capacity rotation cursor persists across restart", () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    assert.equal(store.getSettings().lastInitialCapacityPool, null);
+    store.setLastInitialCapacityPool("codex-subscription");
+    store.releaseLock();
+
+    const reopened = StateStore.open(dir);
+    assert.equal(reopened.getSettings().lastInitialCapacityPool, "codex-subscription");
+    reopened.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a legacy pre-evidence suppression epoch migrates to a durable record on read", () => {
   const dir = tmp();
   try {
