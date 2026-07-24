@@ -21,7 +21,7 @@ anything is not ready, exit non-zero with an explanation; the user reruns it lat
 - Unit test the argv builder and the client method (parse + fail-closed on bad JSON),
   matching the existing `github.test.ts` conventions.
 
-## Milestone 2: pure auto-close-keyword detector
+## [DONE] Milestone 2: pure auto-close-keyword detector
 
 - Add `src/ship.ts` with `findAutoCloseKeyword(text): string | null`, matching GitHub's
   documented close/fix/resolve (+ -s/-d) keywords followed by `#123`, `GH-123`, or a full
@@ -31,7 +31,7 @@ anything is not ready, exit non-zero with an explanation; the user reruns it lat
 - Unit test positive/negative/edge cases (word-boundary false positives like "closest",
   multiple keyword forms, URL form).
 
-## Milestone 3: `shipRun` orchestration (pure-ish, injected deps)
+## [DONE] Milestone 3: `shipRun` orchestration (pure-ish, injected deps)
 
 - In `src/ship.ts`, add `ShipDeps` (github surface, `ship: ShipRunner` reusing
   `autoship.ts`'s type, logger) and `shipRun(deps, { pr, issueNumber })` returning a typed
