@@ -260,6 +260,24 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
     );
   }
 
+  // The deploy report must describe this PR's actual merge, not merely some healthy
+  // production SHA left in stale output. Re-read GitHub after the command because an
+  // open PR may have been merged by the ship implementation itself.
+  const deliveredMerge = await github.prMergeInfo(pr).catch(() => null);
+  if (
+    !deliveredMerge?.mergeCommitOid ||
+    deliveredMerge.mergeCommitOid !== classified.report?.mergedSha ||
+    (classified.report.prHeadSha !== null &&
+      classified.report.prHeadSha !== deliveredMerge.headRefOid)
+  ) {
+    return recoveryOutcome(
+      deps,
+      run,
+      "deploy",
+      `Ship command reported healthy production for PR #${pr}, but its merge/head SHA evidence did not match GitHub's current PR state.`,
+    );
+  }
+
   logger.info("autoship: shipped", {
     issue: run.issueNumber,
     pr,

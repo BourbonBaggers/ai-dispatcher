@@ -58,7 +58,11 @@ function processTree(rootPid: number): number[] {
   }
 }
 
-function signalProcessTree(rootPid: number, descendants: readonly number[], signal: NodeJS.Signals): void {
+export function terminateProcessTree(
+  rootPid: number,
+  signal: NodeJS.Signals,
+  descendants: readonly number[] = processTree(rootPid),
+): void {
   // Explicit descendants are required on platforms where a background shell job creates
   // another process group. Signal leaves first so they cannot outlive/reparent away from
   // the wrapper before we find them.
@@ -136,7 +140,7 @@ export function run(file: string, args: string[], options: ExecOptions = {}): Pr
         // The wrapper may honor SIGTERM and close while a detached/background
         // descendant ignores it. Clearing the grace timer without this final sweep
         // leaked exactly those processes after a timed-out deploy.
-        signalProcessTree(child.pid!, timedOutDescendants, "SIGKILL");
+        terminateProcessTree(child.pid!, "SIGKILL", timedOutDescendants);
       }
       const finalCode = timedOut ? 124 : spawnError ? 1 : code;
       resolve({ ok: finalCode === 0, stdout, stderr, code: finalCode });
@@ -151,9 +155,9 @@ export function run(file: string, args: string[], options: ExecOptions = {}): Pr
         timedOut = true;
         if (killProcessGroup) {
           timedOutDescendants = processTree(child.pid!);
-          signalProcessTree(child.pid!, timedOutDescendants, "SIGTERM");
+          terminateProcessTree(child.pid!, "SIGTERM", timedOutDescendants);
           forceTimer = setTimeout(() => {
-            signalProcessTree(child.pid!, timedOutDescendants, "SIGKILL");
+            terminateProcessTree(child.pid!, "SIGKILL", timedOutDescendants);
           }, killGraceMs);
         } else {
           child.kill("SIGTERM");

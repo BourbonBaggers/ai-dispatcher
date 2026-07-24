@@ -9,6 +9,7 @@ import {
   issueLabelsArgs,
   prReadyArgs,
   closeIssueArgs,
+  reopenIssueArgs,
   prChecksArgs,
   prMergeInfoArgs,
   prStateArgs,
@@ -29,6 +30,7 @@ test("every gh argv builder threads --repo <slug> through", () => {
     issueLabelsArgs(SLUG, 5),
     prReadyArgs(SLUG, 7),
     closeIssueArgs(SLUG, 5),
+    reopenIssueArgs(SLUG, 5),
     prChecksArgs(SLUG, 7),
     prMergeInfoArgs(SLUG, 7),
     prStateArgs(SLUG, 7),
@@ -246,4 +248,12 @@ test("closeIssue runs gh issue close and reports success/failure", async () => {
   const failing = fakeExec(() => ({ ok: false, stdout: "", stderr: "already closed", code: 1 }));
   const failClient = new GithubClient(repo.ok ? repo.value : (undefined as never), failing.fn);
   assert.equal(await failClient.closeIssue(366), false);
+});
+
+test("reopenIssue repairs premature issue closure", async () => {
+  const repo = parseRepoSlug(SLUG);
+  const succeeding = fakeExec(() => ok());
+  const client = new GithubClient(repo.ok ? repo.value : (undefined as never), succeeding.fn);
+  assert.equal(await client.reopenIssue(366), true);
+  assert.deepEqual(succeeding.calls[0]!.args, ["issue", "reopen", "366", "--repo", SLUG]);
 });

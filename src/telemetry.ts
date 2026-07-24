@@ -108,6 +108,8 @@ export interface IssueOutcomeOverlay {
   productionStatus?: ProductionStatus;
   regressionDetected?: boolean;
   humanRepairRequired?: boolean;
+  /** Exact model on the run whose autoship attempt completed verified production. */
+  finalCompletingModel?: string | null;
   estimatedApiValueUsd?: number | null;
 }
 
@@ -197,7 +199,7 @@ export function aggregateIssue(
     productionStatus === "deployed" &&
     !regressionDetected &&
     !humanRepairRequired;
-  if (success && finalCompletingModel === null) finalCompletingModel = lastPrModel;
+  if (success) finalCompletingModel = overlay.finalCompletingModel ?? finalCompletingModel ?? lastPrModel;
 
   return {
     issueNumber,
@@ -209,7 +211,7 @@ export function aggregateIssue(
     tokensByProvider,
     estimatedApiValueUsd: overlay.estimatedApiValueUsd ?? null,
     finalCompletingModel,
-    prStatus: overlay.prStatus ?? (mine.some((a) => a.prCreated) ? "draft" : "none"),
+    prStatus: overlay.prStatus ?? (mine.some((a) => a.prCreated) ? "open" : "none"),
     ciStatus: overlay.ciStatus ?? "unknown",
     mergeStatus,
     productionStatus,

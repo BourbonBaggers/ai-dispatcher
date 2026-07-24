@@ -5,7 +5,12 @@ import type { ExecResult } from "../src/exec.ts";
 import type { RunRecord } from "../src/state.ts";
 import type { GeneratedConflictRepairResult } from "../src/generated-conflict-repair.ts";
 
-const ok: ExecResult = { ok: true, stdout: "", stderr: "", code: 0 };
+const ok: ExecResult = {
+  ok: true,
+  stdout: "::autoship:: state=shipped health=pass merged=merge789 deployed=merge789\n",
+  stderr: "",
+  code: 0,
+};
 
 function succeededRun(over: Partial<RunRecord> = {}): RunRecord {
   const recovery = over.recovery ?? {
@@ -600,6 +605,23 @@ describe("autoshipRun — shipping", () => {
     const r = await autoshipRun(h.deps, succeededRun({ issueNumber: 366 } as Partial<RunRecord>));
     assert.equal(r.action, "repair");
     assert.deepEqual(h.closedIssues, [], "non-pass health never becomes shipped");
+  });
+
+  it("repairs instead of closing when a healthy deploy report names a stale merge SHA", async () => {
+    const h = harness({
+      diff: "",
+      shipResult: {
+        ok: true,
+        stdout: "::autoship:: state=shipped health=pass merged=stale deployed=stale\n",
+        stderr: "",
+        code: 0,
+      },
+    });
+
+    const result = await autoshipRun(h.deps, succeededRun());
+
+    assert.equal(result.action, "repair");
+    assert.equal(h.closedIssues.length, 0);
   });
 
   it("repairs instead of claiming success when closing the shipped issue fails", async () => {
