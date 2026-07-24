@@ -9,7 +9,7 @@
  *      never corrupts state.
  *
  * State that must survive a restart to prevent duplicate/lost work: active claims, run
- * status, resume/progress counters, provider cooldowns, and per-issue failure deferrals.
+ * status, resume/progress counters, provider cooldowns, and recovery budgets.
  */
 
 import { randomUUID } from "node:crypto";
@@ -30,7 +30,7 @@ import {
   RESUMABLE_STATUSES,
 } from "./labels.ts";
 import type { DispatcherAgent, DispatcherStatus } from "./labels.ts";
-import type { IssueFailureRecord } from "./failure-policy.ts";
+import type { RecoveryLedger } from "./recovery-policy.ts";
 
 export type RunTrigger = "poll" | "manual" | "resume";
 
@@ -59,21 +59,14 @@ export interface RunRecord {
   lastProgressSeq: number;
   /** Total output lines seen this run. */
   outputSeq: number;
-  /**
-   * How many times autoship has relaunched the agent to fix this run's red-CI PR.
-   * Distinct from `resumeCount` (which tracks crash/timeout resumes): this counts
-   * self-heal attempts specifically, and is what caps them (DISPATCHER_CI_SELF_HEAL_MAX_ATTEMPTS).
-   */
-  ciSelfHealAttempts: number;
-  /** Whether the one-shot CI escalation attempt (a different, stronger model) has run. */
-  ciEscalated: boolean;
-  /**
-   * Whether the one-shot DEPLOY escalation attempt has run. A separate budget from
-   * `ciEscalated`: a run may exhaust CI self-heal + escalation to fix red checks, ship,
-   * and only THEN hit a deploy failure — that deploy failure deserves its own fresh
-   * frontier-model attempt, and a CI escalation must never consume it (or vice-versa).
-   */
-  deployEscalated: boolean;
+  /** Independent retry + frontier-escalation budgets for every owned delivery phase. */
+  recovery?: RecoveryLedger;
+  /** @deprecated Read-only compatibility with pre-ledger state/test fixtures. */
+  ciSelfHealAttempts?: number;
+  /** @deprecated Read-only compatibility with pre-ledger state/test fixtures. */
+  ciEscalated?: boolean;
+  /** @deprecated Read-only compatibility with pre-ledger state/test fixtures. */
+  deployEscalated?: boolean;
   remotePid: number | null;
   createdAt: number;
   startedAt: number;
@@ -89,7 +82,6 @@ interface PersistedState {
   version: 1;
   settings: SettingsRecord;
   runs: RunRecord[];
-  issueFailures: IssueFailureRecord[];
 }
 
 const STATE_FILE = "state.json";
@@ -100,7 +92,33 @@ function emptyState(): PersistedState {
     version: 1,
     settings: { claudeSuppressedUntil: null, codexSuppressedUntil: null },
     runs: [],
-    issueFailures: [],
+  };
+}
+
+/**
+ * State files created before the unified recovery ledger stored only CI/deploy flags.
+ * Preserve those spent budgets during the on-read migration so a restart never grants
+ * an already-exhausted issue another frontier attempt by accident.
+ */
+function normalizeRunRecovery(run: RunRecord): RunRecord {
+  const legacy = run as RunRecord & {
+    ciSelfHealAttempts?: number;
+    ciEscalated?: boolean;
+    deployEscalated?: boolean;
+  };
+  if (legacy.recovery) return run;
+  return {
+    ...run,
+    recovery: {
+      ci: {
+        attempts: Math.max(0, legacy.ciSelfHealAttempts ?? 0),
+        escalated: legacy.ciEscalated ?? false,
+      },
+      deploy: {
+        attempts: 0,
+        escalated: legacy.deployEscalated ?? false,
+      },
+    },
   };
 }
 
@@ -197,8 +215,9 @@ export class StateStore {
           claudeSuppressedUntil: parsed.settings?.claudeSuppressedUntil ?? null,
           codexSuppressedUntil: parsed.settings?.codexSuppressedUntil ?? null,
         },
-        runs: Array.isArray(parsed.runs) ? parsed.runs : [],
-        issueFailures: Array.isArray(parsed.issueFailures) ? parsed.issueFailures : [],
+        runs: Array.isArray(parsed.runs)
+          ? parsed.runs.map((run) => normalizeRunRecovery(run))
+          : [],
       };
     } catch {
       // A corrupt state file is worse than an empty one only if it silently drops work.
@@ -302,9 +321,7 @@ export class StateStore {
       | "lastProgressSeq"
       | "outputSeq"
       | "remotePid"
-      | "ciSelfHealAttempts"
-      | "ciEscalated"
-      | "deployEscalated"
+      | "recovery"
     >,
   ): RunRecord {
     if (this.activeRun()) throw new Error("a run is already active — the dispatcher is serial");
@@ -324,9 +341,7 @@ export class StateStore {
       resumeCount: 0,
       lastProgressSeq: 0,
       outputSeq: 0,
-      ciSelfHealAttempts: 0,
-      ciEscalated: false,
-      deployEscalated: false,
+      recovery: {},
       remotePid: null,
       createdAt: now,
       startedAt: now,
@@ -350,16 +365,5 @@ export class StateStore {
     const before = this.state.runs.length;
     this.state.runs = this.state.runs.filter((r) => keep.has(r.id));
     if (this.state.runs.length !== before) this.persist();
-  }
-
-  // ── failure records ─────────────────────────────────────────────────────────
-
-  issueFailures(): IssueFailureRecord[] {
-    return this.state.issueFailures.map((r) => ({ ...r }));
-  }
-
-  setIssueFailures(records: IssueFailureRecord[]): void {
-    this.state.issueFailures = records.map((r) => ({ ...r }));
-    this.persist();
   }
 }

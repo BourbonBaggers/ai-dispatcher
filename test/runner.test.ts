@@ -4,6 +4,7 @@ import {
   dispatchAgentArgs,
   dispatchAgentEnv,
   classifyRunOutcome,
+  requirePrForDelivery,
   tokenExhaustionSummary,
   DISPATCH_AGENT_SCRIPT,
   type AgentLaunchSpec,
@@ -93,6 +94,12 @@ test("dispatchAgentEnv omits the env-source dir when none is configured, sets it
   assert.equal(env.DISPATCHER_ENV_SOURCE_DIR, "/home/dev/app");
 });
 
+test("dispatchAgentEnv passes a bounded recovery reason as data for resumed agents", () => {
+  const env = dispatchAgentEnv(config(), "merge conflict in docs/memory.md");
+  assert.equal(env.DISPATCHER_RECOVERY_REASON, "merge conflict in docs/memory.md");
+  assert.equal(dispatchAgentEnv(config()).DISPATCHER_RECOVERY_REASON, undefined);
+});
+
 // ── terminal classification ──────────────────────────────────────────────────
 
 function signals(overrides: Partial<RunSignals> = {}): RunSignals {
@@ -114,6 +121,15 @@ test("a clean exit with commits and green CI is provisionally shipped (autoship 
   const outcome = classifyRunOutcome(signals());
   assert.equal(outcome.status, "shipped");
   assert.equal(outcome.exitCode, 0);
+});
+
+test("a clean exit with commits but no PR becomes a repairable failure", () => {
+  const provisional = classifyRunOutcome(signals({ resultCommits: 2, resultCi: "none" }));
+  assert.equal(provisional.status, "shipped");
+  const outcome = requirePrForDelivery(provisional, null);
+  assert.equal(outcome.status, "failed");
+  assert.match(outcome.status === "failed" ? (outcome.summary ?? "") : "", /did not open a pull request/i);
+  assert.equal(requirePrForDelivery(provisional, 42).status, "shipped");
 });
 
 test("token exhaustion beats a generic non-zero exit and is reported as recoverable", () => {
@@ -144,6 +160,13 @@ test("exit code 124 and 137 both classify as timed_out and resumable", () => {
     const outcome = classifyRunOutcome(signals({ sawResult: false, closeCode: code }));
     assert.equal(outcome.status, "timed_out", `code ${code}`);
     assert.match(outcome.status === "timed_out" ? (outcome.summary ?? "") : "", /resume/i);
+  }
+});
+
+test("signal exits 130 and 143 are interrupted and resumable, not hard failures", () => {
+  for (const exitCode of [130, 143]) {
+    const outcome = classifyRunOutcome(signals({ resultExit: exitCode }));
+    assert.equal(outcome.status, "interrupted");
   }
 });
 

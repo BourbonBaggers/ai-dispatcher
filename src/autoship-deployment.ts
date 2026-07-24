@@ -131,9 +131,58 @@ export function parseAutoshipStatusReport(output: string): AutoshipStatusReport 
   };
 }
 
+/**
+ * Compatibility with internal-tools' deployed ship contract, which predates the
+ * `::autoship::` control line and emits newline-delimited AUTOSHIP_* fields. Parse it
+ * explicitly so rollback/unknown states are not flattened into a generic exit failure.
+ */
+export function parseLegacyAutoshipStatusReport(output: string): AutoshipStatusReport | null {
+  const fields = new Map<string, string>();
+  for (const line of output.split(/\r?\n/)) {
+    const match = /^(AUTOSHIP_[A-Z_]+)=(.*)$/.exec(line.trim());
+    if (match) fields.set(match[1]!, match[2]!);
+  }
+  const status = fields.get("AUTOSHIP_STATUS");
+  if (!status) return null;
+
+  const mapped: Record<string, { state: AutoshipShipState; health: AutoshipHealthState }> = {
+    deployed: { state: "shipped", health: "pass" },
+    deployment_failed_rollback_verified: {
+      state: "deployment_failed_rollback_succeeded",
+      health: "pass",
+    },
+    deployment_failed_rollback_failed: {
+      state: "deployment_failed_rollback_failed",
+      health: "fail",
+    },
+    deployment_state_unknown: {
+      state: "deployment_state_unknown",
+      health: "unknown",
+    },
+  };
+  const classification = mapped[status];
+  if (!classification) return null;
+
+  const value = (name: string): string | null => {
+    const raw = fields.get(name);
+    return raw && raw !== "-" ? raw : null;
+  };
+  return {
+    ...classification,
+    prHeadSha: null,
+    mergedSha: value("AUTOSHIP_REQUESTED_SHA"),
+    deployedSha: value("AUTOSHIP_DEPLOYED_SHA"),
+    rollbackSha: value("AUTOSHIP_ROLLBACK_SHA"),
+    lastKnownGoodSha: value("AUTOSHIP_LAST_GOOD_SHA"),
+    deploymentCheckoutPath: null,
+  };
+}
+
 export function classifyShipResult(result: ExecResult): ClassifiedShipResult {
   const output = `${result.stdout}\n${result.stderr}`;
-  const report = parseAutoshipStatusReport(output);
+  const report =
+    parseAutoshipStatusReport(output) ??
+    parseLegacyAutoshipStatusReport(output);
   if (report) {
     return {
       state: report.state,

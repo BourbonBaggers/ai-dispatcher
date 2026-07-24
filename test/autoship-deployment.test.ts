@@ -5,6 +5,7 @@ import {
   decideDeploymentCheckout,
   dirtyDeploymentReasons,
   parseAutoshipStatusReport,
+  parseLegacyAutoshipStatusReport,
   type DeploymentCheckoutSnapshot,
 } from "../src/autoship-deployment.ts";
 
@@ -90,6 +91,29 @@ describe("autoship status report parsing", () => {
 
   it("rejects unknown states", () => {
     assert.equal(parseAutoshipStatusReport("::autoship:: state=rolled_back health=pass"), null);
+  });
+
+  it("parses the internal-tools AUTOSHIP_STATUS contract", () => {
+    assert.deepEqual(
+      parseLegacyAutoshipStatusReport(
+        [
+          "AUTOSHIP_STATUS=deployment_failed_rollback_verified",
+          "AUTOSHIP_REQUESTED_SHA=new",
+          "AUTOSHIP_LAST_GOOD_SHA=good",
+          "AUTOSHIP_ROLLBACK_SHA=good",
+        ].join("\n"),
+      ),
+      {
+        state: "deployment_failed_rollback_succeeded",
+        health: "pass",
+        prHeadSha: null,
+        mergedSha: "new",
+        deployedSha: null,
+        rollbackSha: "good",
+        lastKnownGoodSha: "good",
+        deploymentCheckoutPath: null,
+      },
+    );
   });
 });
 

@@ -264,7 +264,7 @@ ritual if it defines one.
 You were launched by the AI Issue Dispatcher. Your job ends at a ready-for-review pull
 request: you do not merge, you do not close the issue, and you do not deploy yourself
 -- autoship (this repo's own automation, if configured) does that once your PR is
-ready, CI is green, and the diff passes its data-loss gate. If ${RULES_FILE} contains a
+ready and CI is green. If ${RULES_FILE} contains a
 section for dispatcher-launched agents, that section governs your run and takes
 precedence over the defaults below.
 
@@ -342,6 +342,15 @@ reconstruct your position from durable artifacts only:
      not rewrite or squash existing commits — they are recovery artifacts.
 ────────────────────────────────────────────────────────────────────────────
 PROMPT
+  if [[ -n "${DISPATCHER_RECOVERY_REASON:-}" ]]; then
+    {
+      printf '\nTHE DISPATCHER IS RELAUNCHING YOU TO REPAIR THIS SPECIFIC DELIVERY FAILURE:\n\n'
+      printf '%s\n\n' "$DISPATCHER_RECOVERY_REASON"
+      printf 'Resolve this failure, including branch/merge conflicts when named. Inspect both\n'
+      printf 'sides of every conflict and choose the correct combined result. Commit and push\n'
+      printf 'the repair to the existing branch; do not ask the operator to resolve it.\n'
+    } >> .dispatcher-prompt.md
+  fi
   # If the previous attempt left a red PR, the single most useful thing we can hand the
   # resumed agent is the actual failure. Without this it reconstructs from the plan,
   # sees every milestone marked [DONE], and concludes there is nothing left to do —
@@ -493,7 +502,7 @@ COMMITS_AHEAD="$LOCAL_COMMITS"
 # `git commit`). Capture it ONLY on a clean exit with no agent commits anywhere and a
 # dirty tree — a timeout/crash may have left the tree half-written, so those are left
 # resumable as before. The captured commit flows through the normal push + PR
-# path below; CI and a human still gate it, and nothing auto-merges.
+# path below; CI and autoship's repair/escalation ladder still gate it.
 if [[ "$COMMITS_AHEAD" -eq 0 ]] && capture_uncommitted_work "$ISSUE" "$EXIT_CODE" "$COMMITS_AHEAD"; then
   event "SAFETY NET: agent exited cleanly with uncommitted work — captured it as a commit"
   COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo "$COMMIT")"
@@ -578,7 +587,7 @@ if [[ -n "$PR_URL" ]]; then
   [[ "$CI_STATE" == "none" ]] && CI_STATE="pending"
 
   case "$CI_STATE" in
-    pass) event "CI PASSED — the PR is green and ready for human review" ;;
+    pass) event "CI PASSED — the PR is green and ready for autoship" ;;
     fail)
       event "CI FAILED — this run did not produce mergeable work:"
       while IFS= read -r line; do
