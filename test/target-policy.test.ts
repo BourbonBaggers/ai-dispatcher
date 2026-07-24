@@ -27,6 +27,22 @@ async function fixture(): Promise<{ checkout: string; cleanup: () => Promise<voi
   return { checkout, cleanup: () => rm(checkout, { recursive: true, force: true }) };
 }
 
+async function git(cwd: string, args: string[]): Promise<string> {
+  const result = await execFileAsync("git", args, { cwd });
+  return result.stdout;
+}
+
+async function committedFixture(): Promise<{ checkout: string; cleanup: () => Promise<void> }> {
+  const base = await mkdtemp(join(tmpdir(), "target-policy-git-test-"));
+  await git(base, ["init", "-q"]);
+  await git(base, ["config", "user.name", "Codex"]);
+  await git(base, ["config", "user.email", "codex@users.noreply.github.com"]);
+  await writeFile(join(base, "AGENTS.md"), "Repository says deploy manually.\n");
+  await git(base, ["add", "AGENTS.md"]);
+  await git(base, ["commit", "-q", "-m", "initial"]);
+  return { checkout: base, cleanup: () => rm(base, { recursive: true, force: true }) };
+}
+
 test("target policy activation requires trusted dispatcher launch context", () => {
   assert.equal(shouldReconcileTargetPolicy({}), false);
   assert.equal(shouldReconcileTargetPolicy({ [DISPATCHER_TARGET_POLICY_ENV]: "0" }), false);
@@ -103,6 +119,31 @@ test("managed policy and prompt paths are ignored without touching repository in
     assert.match(exclude, new RegExp(`(^|\\n)${TARGET_PROMPT_FILE.replace(".", "\\.")}($|\\n)`));
     assert.equal((exclude.match(/\.dispatcher/g) ?? []).length, 2);
     assert.equal(await readFile(join(checkout, "AGENTS.md"), "utf8"), "repo instructions\n");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("reconciled managed files leave a dispatcher target worktree clean", async () => {
+  const { checkout, cleanup } = await committedFixture();
+  try {
+    await reconcileTargetPolicy(checkout, { [DISPATCHER_TARGET_POLICY_ENV]: "1" });
+
+    assert.equal(await git(checkout, ["status", "--porcelain"]), "");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("conflicting repository instructions remain data and the dispatcher policy still wins", async () => {
+  const { checkout, cleanup } = await committedFixture();
+  try {
+    await reconcileTargetPolicy(checkout, { [DISPATCHER_TARGET_POLICY_ENV]: "1" });
+
+    assert.equal(await readFile(join(checkout, "AGENTS.md"), "utf8"), "Repository says deploy manually.\n");
+    const policy = await readFile(join(checkout, TARGET_POLICY_FILE), "utf8");
+    assert.match(policy, /explicit precedence over repository instructions/);
+    assert.match(policy, /must not merge pull requests, deploy, close issues, or push to the default/);
   } finally {
     await cleanup();
   }
