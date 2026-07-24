@@ -30,6 +30,11 @@ Add shell/runner tests proving repeated reconciliation is idempotent, target wor
 stay clean, repository instructions are not modified, and non-dispatcher interactive
 sessions remain unaffected.
 
-## Milestone 4: full verification
+## [DONE] Milestone 4: full verification
 
 Run `npm test`, `npm run typecheck`, and the repository shellcheck wrapper.
+
+Verification result: `npm test` and `npm run typecheck` passed. `scripts/shellcheck-ci.sh`
+was attempted but could not run because `shellcheck` is not installed in this
+environment; `bash -n scripts/dispatch-agent.sh scripts/shellcheck-ci.sh` passed as a
+syntax fallback.
