@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync } from "node:fs";
 import { StateStore, LockHeldError } from "../../src/state.ts";
 
-const [, , stateDir, readyFile, startFile, releaseFile, winnersFile] = process.argv;
+const [, , stateDir, readyFile, startFile, releaseFile, winnersFile, rejectedFile] = process.argv;
 
 const waitFor = async (path) => {
   while (!existsSync(path)) {
@@ -19,6 +19,7 @@ try {
   process.exitCode = 0;
 } catch (error) {
   if (error instanceof LockHeldError) {
+    appendFileSync(rejectedFile, `${process.pid}\n`);
     process.exitCode = 2;
   } else {
     throw error;
