@@ -118,19 +118,19 @@ function signals(overrides: Partial<RunSignals> = {}): RunSignals {
 
 const exhaustion: TokenExhaustionSignal = { resetAt: null, wallClock: null, resetLabel: null };
 
-test("a clean exit with commits and green CI is provisionally shipped (autoship confirms)", () => {
+test("a clean exit with commits and green CI is an honest PR-ready handoff", () => {
   const outcome = classifyRunOutcome(signals());
-  assert.equal(outcome.status, "shipped");
+  assert.equal(outcome.status, "pr_ready");
   assert.equal(outcome.exitCode, 0);
 });
 
 test("a clean exit with commits but no PR becomes a repairable failure", () => {
   const provisional = classifyRunOutcome(signals({ resultCommits: 2, resultCi: "none" }));
-  assert.equal(provisional.status, "shipped");
+  assert.equal(provisional.status, "pr_ready");
   const outcome = requirePrForDelivery(provisional, null);
   assert.equal(outcome.status, "failed");
   assert.match(outcome.status === "failed" ? (outcome.summary ?? "") : "", /did not open a pull request/i);
-  assert.equal(requirePrForDelivery(provisional, 42).status, "shipped");
+  assert.equal(requirePrForDelivery(provisional, 42).status, "pr_ready");
 });
 
 test("token exhaustion beats a generic non-zero exit and is reported as recoverable", () => {
@@ -146,7 +146,7 @@ test("a stray exhaustion match on a CLEAN exit does NOT trip a cooldown", () => 
   const outcome = classifyRunOutcome(
     signals({ resultExit: 0, resultCommits: 1, resultCi: "pass", tokenExhaustion: exhaustion }),
   );
-  assert.equal(outcome.status, "shipped");
+  assert.equal(outcome.status, "pr_ready");
 });
 
 test("exhaustion during a timeout stays a timeout, not a cooldown", () => {

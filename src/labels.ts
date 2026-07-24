@@ -78,13 +78,9 @@ export const WORKING_LABEL = "agent-working";
 export const HOLD_LABELS = ["needs-input", "blocked", "autoship-held"] as const;
 
 /**
- * Issue-level escape hatch for autoship's draft-promotion (post-#366 policy: agents open
- * ready-for-review PRs by default, and autoship promotes a stray draft it finds rather
- * than holding it -- see autoship.ts). A human (or an agent invoking its own narrow
- * destructive-change judgment) adds this to keep a specific draft PR from being promoted
- * and shipped without a human looking at it first. This does NOT affect issue selection
- * eligibility (that is HOLD_LABELS above) -- it only affects the draft-promotion
- * decision inside autoshipRun.
+ * Legacy label retained for compatibility with existing repositories. It is deliberately
+ * inert: autoship has no human-review gate and promotes/ships a green draft even when the
+ * label is present. Only HOLD_LABELS affect eligibility.
  */
 export const HUMAN_REVIEW_REQUIRED_LABEL = "human-review-required";
 
@@ -102,6 +98,12 @@ export const RESUMABLE_STATUSES = ["interrupted", "timed_out", "token_exhausted"
  * though nothing had changed and CI just hadn't finished yet.
  */
 export const PARKED_STATUSES = ["ci_pending"] as const;
+/**
+ * A completed PR handoff when autoship is disabled. No agent is working, but the run
+ * retains the issue claim so the still-open issue cannot be dispatched from scratch on
+ * every poll.
+ */
+export const PR_READY_STATUSES = ["pr_ready"] as const;
 /**
  * Mid-ladder statuses that hold the claim but have no automatic recovery path of their
  * own via the scan loop — resolution happens synchronously, in-process, via
@@ -124,6 +126,7 @@ export const CLAIMING_STATUSES = [
   ...ACTIVE_STATUSES,
   ...RESUMABLE_STATUSES,
   ...PARKED_STATUSES,
+  ...PR_READY_STATUSES,
   ...LADDER_STATUSES,
   ...HELD_STATUSES,
 ] as const;
@@ -135,12 +138,14 @@ export const CLAIMING_STATUSES = [
  * called "succeeded" and release the claim, letting the dispatcher re-run the same issue
  * from scratch every ~15 minutes while a PR sat open or CI was still checking.
  *
- *   - "shipped"       TRUE success: PR merged, deploy completed (or, autoship not
- *                      configured for this repo, a human has manually taken it from
- *                      here — see `held` below for that fallback).
+ *   - "shipped"       TRUE success: PR merged, deploy completed, production healthy,
+ *                      and the linked issue closed.
+ *   - "pr_ready"      Clean agent exit with a PR and green CI at handoff. If autoship is
+ *                      configured it immediately re-gates and ships; otherwise this is
+ *                      the honest terminal draft-PR handoff and retains the issue claim.
  *   - "ci_pending"     Agent finished, PR open, CI has not resolved. Parked: the claim
  *                      is held, and the next scan re-checks CI ONLY (no agent relaunch).
- *   - "ci_failed"      CI is definitively red. Drives the self-heal -> escalate -> held
+ *   - "ci_failed"      CI is definitively red. Drives the repair -> frontier -> exhausted
  *                      ladder (`evaluateAutoship`, dispatcher.ts). Always resolved
  *                      further within the same finalize pass; a run should not be found
  *                      sitting in this status across a scan boundary in normal operation.
@@ -151,12 +156,13 @@ export const CLAIMING_STATUSES = [
  *                      PR instead (`recheckHeldRun`).
  *   - "failed"         The agent itself crashed, gave up (zero commits), or exited
  *                      non-zero. Distinct from `ci_failed`: this is the agent's fault,
- *                      not the PR's content's fault. Counts toward the 3-strike
- *                      autonomous repair ladder; it is not an operator handoff by itself.
+ *                      not the PR's content's fault. Enters the per-phase assigned-model
+ *                      repair → frontier → exhausted ladder; it is not an operator handoff.
  */
 export type DispatcherStatus =
   | "claimed"
   | "running"
+  | "pr_ready"
   | "shipped"
   | "ci_pending"
   | "ci_failed"

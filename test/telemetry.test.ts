@@ -62,7 +62,7 @@ test("aggregateIssue folds attempts and stays honest about token provenance", ()
 });
 
 test("aggregateIssue: a PR alone is not success — merge + prod are required", () => {
-  const attempts = [attempt({ terminalStatus: "shipped", prCreated: true })];
+  const attempts = [attempt({ terminalStatus: "pr_ready", prCreated: true })];
   // Draft PR only: not success.
   assert.equal(aggregateIssue(1, attempts).success, false);
   assert.equal(aggregateIssue(1, attempts).prStatus, "draft");

@@ -146,9 +146,10 @@ test("shouldReleaseClaim marks a run done-working (drops agent-working, no resum
   assert.equal(shouldReleaseClaim("token_exhausted"), false);
   assert.equal(shouldReleaseClaim("ci_pending"), false);
   assert.equal(shouldReleaseClaim("ci_failed"), false);
-  // Done working (agent-working dropped, no resume message): shipped, held, failed,
+  // Done working (agent-working dropped, no resume message): pr_ready, shipped, held, failed,
   // abandoned. NB `held` still KEEPS its issue claim (see state.test.ts) even though no
   // agent is working it — the two concepts are distinct.
+  assert.equal(shouldReleaseClaim("pr_ready"), true);
   assert.equal(shouldReleaseClaim("shipped"), true);
   assert.equal(shouldReleaseClaim("held"), true);
   assert.equal(shouldReleaseClaim("failed"), true);
@@ -157,15 +158,12 @@ test("shouldReleaseClaim marks a run done-working (drops agent-working, no resum
 
 // ── issue comment ─────────────────────────────────────────────────────────────
 
-test("a provisionally-shipped run's comment reads 'complete' and lists the PR", () => {
-  // "shipped" at buildIssueComment time is the agent's own hand-off observation (CI was
-  // green when it finished), not confirmation that autoship has actually merged +
-  // deployed yet -- evaluateAutoship's own follow-up comment covers that.
+test("a PR-ready run's comment describes the autoship handoff and lists the PR", () => {
   const comment = buildIssueComment(
-    run({ status: "shipped", prUrl: "https://x/pull/9", lastCommit: "abc123" }),
+    run({ status: "pr_ready", prUrl: "https://x/pull/9", lastCommit: "abc123" }),
     false,
   );
-  assert.match(comment, /Dispatcher run complete/);
+  assert.match(comment, /Dispatcher run PR ready/);
   assert.match(comment, /https:\/\/x\/pull\/9/);
   assert.match(comment, /abc123/);
 });
@@ -226,6 +224,15 @@ test("runsToKeep also retains a parked (ci_pending) run unconditionally, like a 
   ];
   const keep = runsToKeep(runs, 1);
   assert.ok(keep.has("parked"), "a parked run must never be pruned out from under its claim");
+});
+
+test("runsToKeep retains a PR-ready handoff so an open issue is not redispatched", () => {
+  const runs = [
+    run({ id: "ready", status: "pr_ready", createdAt: 1 }),
+    run({ id: "newer", status: "failed", createdAt: 2 }),
+  ];
+  const keep = runsToKeep(runs, 1);
+  assert.ok(keep.has("ready"));
 });
 
 test("runsToKeep retains a held run unconditionally — its claim keeps the issue from being re-dispatched (#10)", () => {
@@ -352,6 +359,7 @@ function parkedDeps(store: StateStore, opts: {
   ships: { count: number };
   reads: { issueLabels: number };
   notifications: { count: number };
+  outcomes: Array<{ issue: number; productionStatus?: string }>;
 } {
   const comments: string[] = [];
   const labels: string[] = [];
@@ -359,6 +367,7 @@ function parkedDeps(store: StateStore, opts: {
   const ships = { count: 0 };
   const reads = { issueLabels: 0 };
   const notifications = { count: 0 };
+  const outcomes: Array<{ issue: number; productionStatus?: string }> = [];
   const deps: DispatcherDeps = {
     config: autoshipConfig(),
     store,
@@ -387,13 +396,22 @@ function parkedDeps(store: StateStore, opts: {
       closeIssue: async () => true,
     } as unknown as DispatcherDeps["github"],
     notifier: { send: async () => { notifications.count += 1; } },
+    telemetry: {
+      setIssueOutcome: (issue: number, outcome: { productionStatus?: string }) => {
+        outcomes.push(
+          outcome.productionStatus === undefined
+            ? { issue }
+            : { issue, productionStatus: outcome.productionStatus },
+        );
+      },
+    } as unknown as NonNullable<DispatcherDeps["telemetry"]>,
     ship: async () => {
       ships.count += 1;
       return opts.shipResult ?? { ok: true, stdout: "", stderr: "", code: 0 };
     },
     now: () => 5000,
   };
-  return { deps, comments, labels, removedLabels, ships, reads, notifications };
+  return { deps, comments, labels, removedLabels, ships, reads, notifications, outcomes };
 }
 
 function parkedRun(store: StateStore): RunRecord {
@@ -444,13 +462,14 @@ test("recheckParkedRun ships once CI has resolved to green, without relaunching 
   try {
     const store = StateStore.open(dir);
     const run1 = parkedRun(store);
-    const { deps, ships } = parkedDeps(store, { ci: "pass" });
+    const { deps, ships, outcomes } = parkedDeps(store, { ci: "pass" });
 
     await recheckParkedRun(deps, run1);
 
     const after = store.getRun(run1.id);
     assert.equal(after?.status, "shipped");
     assert.equal(ships.count, 1, "the ship command runs exactly once");
+    assert.deepEqual(outcomes, [{ issue: 1, productionStatus: "deployed" }]);
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });
