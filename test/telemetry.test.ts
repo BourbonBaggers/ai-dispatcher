@@ -124,3 +124,16 @@ test("TelemetryStore round-trips attempts and outcomes atomically", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("TelemetryStore idempotently ignores replayed finalization attempts", () => {
+  const dir = mkdtempSync(join(tmpdir(), "telem-replay-"));
+  try {
+    const store = TelemetryStore.open(dir);
+    const terminal = attempt({ issueNumber: 9, attemptId: "run#0@123" });
+    store.recordAttempt(terminal);
+    store.recordAttempt(terminal);
+    assert.equal(store.allAttempts().length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
