@@ -75,7 +75,7 @@ src/
   report.ts               pure Markdown routing analytics (`ai-dispatcher report`, #319)
   github.ts               gh CLI wrapper (argv arrays, repo threaded through)
   selection.ts            pure issue eligibility + priority-tier ordering
-  token-exhaustion.ts     provider-owned exhaustion detection + cooldown math (pure)
+  token-exhaustion.ts     provider-capacity signal classification + suppression policy (pure, #32)
   recovery-policy.ts      per-phase repair → frontier → exhausted ledger (pure)
   state.ts                atomic file-backed store + single-instance lock
   exec.ts                 bounded output + timeout-safe process-tree supervision
@@ -110,19 +110,22 @@ test/                     node:test suites, one per module
   precedence, finite resume budgets, capture only on a clean exit, one alert
   per cooldown window) are load-bearing — document the reason when you touch them.
 
-## Capacity-aware routing (#319)
+## Capacity-aware pickup routing (#319, #34)
 
-The routing layer is data-driven and pure, and it does **not** override the dispatch path:
-the dispatcher still obeys the single `model:*` label on the issue. Routing is decision
-support for *choosing* that label (the planning-repo rubric) and for *planning a retry*.
+The routing layer is data-driven and pure. A recognized workload-characteristic label
+admits new work; `dispatch:ready` explicitly admits work relying on all defaults. The
+dispatcher then derives provider, model, and effort at pickup from those characteristics
+plus bounded live capacity evidence. Legacy assignment labels remain an admission signal
+but are advisory. Only `route:human-override` makes a compatible agent/model pair and
+optional effort authoritative for the initial launch.
 
 - **`models.ts` is the one source of model config.** `labels.ts` derives the `model:*`
   allowlist from it. Add or change a model there, not in routing/label code. A disabled or
   future-provider entry is documentation and is never dispatchable (`isDispatchable`).
-- **Honesty is load-bearing.** Capacity is `unknown` unless a cooldown proves `exhausted`
-  — never a fabricated remaining-quota number. Telemetry token counts are `unavailable`
-  (the launcher emits none), and success requires merged + deployed + no human repair — a
-  clean exit or PR is not success. Do not "improve" these into optimistic fabrications.
+- **Honesty is load-bearing.** Codex app-server and Claude OAuth usage windows may provide
+  live capacity. A bounded adapter failure is `unknown`, never fabricated headroom.
+  Telemetry token counts remain `unavailable` (the launcher emits none), and success
+  requires merged + deployed + no human repair — a clean exit or PR is not success.
 - **Frontier is the final automatic recovery rung.** Initial routing still withholds
   frontier models unless task characteristics justify them. After bounded assigned-model
   repairs fail, escalation to the configured frontier model is automatic; only failure
@@ -131,17 +134,31 @@ support for *choosing* that label (the planning-repo rubric) and for *planning a
   more frontier attempts.
 - **Manual overrides** (`route:human-override`) are recorded but excluded from the learning
   dataset — keep that exclusion intact.
+- **Capacity is scheduling, not handoff.** Adapter failure, exhausted pools, stale
+  assignment labels, and temporarily unroutable issues wait, rotate, revalidate, or hand
+  off automatically. They never create `autoship-held`, spend repair budget, or page.
 - The rubric itself lives in [`ROUTING.md`](ROUTING.md); keep it in sync with the code.
 
 ## The safety invariants (do not regress)
 
-- Terminal classification precedence: token-exhaustion → timeout → signal/no-result
+- Terminal classification precedence: provider-capacity signal → timeout → signal/no-result
   (`interrupted`) → zero-commits (`failed`) → CI-red (`ci_failed`) → CI-pending
   (`ci_pending`) → clean/green (`pr_ready`) → failed. The no-result branch
   **must** precede the commit/CI branches, or a blind kill is misjudged as a hard failure
   and its resumable work is dropped.
-- Token-exhaustion requires a non-zero exit AND provider-owned output — issue text an
-  agent echoes must never manufacture a cooldown.
+- A provider-capacity signal requires a non-zero exit AND provider-owned output — issue
+  text an agent echoes must never manufacture a cooldown.
+- Provider suppression is evidence-driven and self-revalidating (#32): the signal kind
+  (authoritative reset / unconfirmed quota / throttling / context-exhaustion / billing /
+  unknown) and provider are both load-bearing — Claude's documented rolling-window
+  fallback must never apply to Codex or any other provider, and context/request-size
+  exhaustion must never suppress the whole pool. An unconfirmed no-reset signal gets a
+  short bounded revalidation, not a blind long fallback, and the durable evidence
+  (kind, confidence, detection time, reported reset, redacted excerpt) must survive
+  restart. A run whose own evidence already proves delivery-ready (commits + PR + green
+  CI) is reconciled to `pr_ready` rather than stranded behind a cooldown that no longer
+  matters for that issue — but the suppression itself is still recorded, since it can
+  still block new launches on that provider.
 - Capture uncommitted work only on `exit==0 && commitsAhead==0 && dirty`; a timeout/crash
   may have left the tree half-written.
 - A resumable run keeps both `agent-working` and its durable issue claim.

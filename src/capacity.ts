@@ -1,102 +1,142 @@
 /**
- * Capacity-awareness adapter (#319).
+ * Honest provider-capacity normalization.
  *
- * The PRD is emphatic: "The system must not pretend capacity information is precise when
- * the provider does not expose it." Neither the Claude Code CLI nor the Codex CLI exposes
- * a remaining-quota number, so this module never fabricates one. It reports the *best
- * available signal* on the PRD's descending confidence ladder and is honest — usually
- * `unknown` — about the rest.
- *
- * Confidence ladder (descending preference of signal source):
- *   1. provider-reported  — provider's own remaining/reset numbers  (not exposed today)
- *   2. cli-reported       — CLI limit-state / account status         (not exposed today)
- *   3. persisted-limit    — a persisted token-exhaustion cooldown with a known reset
- *   4. estimated          — a local estimate from observed dispatch history
- *   5. unknown            — no signal at all
- *
- * The two live signals are `persisted-limit` (from an active provider cooldown, which the
- * dispatcher already tracks in `token-exhaustion.ts`) and `estimated` (from observed
- * usage). Levels 1–2 exist in the type so a future adapter can return them without a
- * schema change.
- *
- * This module is pure: routing (`routing.ts`) consumes the assessments to prefer dormant
- * capacity, and the dispatcher supplies the cooldown/usage facts. No IO here.
+ * Live provider/CLI windows are preferred when available. Persisted exhaustion evidence
+ * remains the fallback when a live read fails; local activity is only a rotation hint,
+ * never a fabricated quota estimate.
  */
 
-/** Descending preference of signal source. Index 0 is the strongest signal. */
 export const CAPACITY_CONFIDENCE = [
   "provider-reported",
   "cli-reported",
   "persisted-limit",
+  "unconfirmed-limit",
   "estimated",
   "unknown",
 ] as const;
 export type CapacityConfidence = (typeof CAPACITY_CONFIDENCE)[number];
 
-/**
- * What we believe about a pool's ability to accept work. `exhausted` is only ever
- * asserted from hard evidence (an active cooldown); absence of evidence is `unknown`,
- * never an optimistic `available`.
- */
 export const CAPACITY_STATE = ["available", "exhausted", "unknown"] as const;
 export type CapacityState = (typeof CAPACITY_STATE)[number];
 
-/**
- * A pool is dormant when it is otherwise-idle capacity. Routing prefers dormant pools so
- * scarce, busy subscription capacity is conserved (PRD principle §3). A pool untouched for
- * this long counts as idle.
- */
-export const DORMANCY_IDLE_MS = 2 * 60 * 60 * 1000; // 2 hours
+export const DORMANCY_IDLE_MS = 2 * 60 * 60 * 1000;
 
-/** Observed local usage for a pool, used to estimate confidence and dormancy. */
 export interface PoolUsageObservation {
-  /** Epoch ms of the most recent dispatch drawing on this pool; null if never/unknown. */
   lastActivityAt: number | null;
-  /** In-flight runs currently drawing on this pool. */
   activeRuns: number;
+}
+
+/** One provider-owned rolling window. Model labels scope model-specific limits. */
+export interface CapacityWindow {
+  name: string;
+  usedPercent: number;
+  resetAt: number | null;
+  modelLabels?: readonly string[];
+}
+
+/** Sanitized output from an IO adapter. Credentials and raw responses never reach here. */
+export interface LiveCapacitySnapshot {
+  pool: string;
+  confidence: "provider-reported" | "cli-reported";
+  observedAt: number;
+  windows: CapacityWindow[];
+  reason: string;
 }
 
 export interface CapacityAssessment {
   pool: string;
   state: CapacityState;
   confidence: CapacityConfidence;
-  /** Epoch ms when an exhausted pool is expected to recover, or null. */
   resetAt: number | null;
-  /** Otherwise-idle capacity: routing prefers this among comparable options. */
   dormant: boolean;
-  /** Human-readable explanation for logs and telemetry. */
+  lastActivityAt: number | null;
+  observedAt: number | null;
+  windows: CapacityWindow[];
+  /** Minimum remaining percentage among unscoped provider windows. */
+  headroomPercent: number | null;
   reason: string;
 }
 
+function validWindow(window: CapacityWindow): boolean {
+  return (
+    typeof window.name === "string" &&
+    window.name.length > 0 &&
+    Number.isFinite(window.usedPercent) &&
+    window.usedPercent >= 0 &&
+    window.usedPercent <= 100 &&
+    (window.resetAt === null || (Number.isFinite(window.resetAt) && window.resetAt > 0))
+  );
+}
+
+function limitingReset(windows: CapacityWindow[]): number | null {
+  const limiting = windows
+    .filter((window) => window.usedPercent >= 100 && window.resetAt !== null)
+    .map((window) => window.resetAt!)
+    .sort((a, b) => a - b);
+  return limiting[0] ?? null;
+}
+
+function minimumHeadroom(windows: CapacityWindow[]): number | null {
+  if (windows.length === 0) return null;
+  return Math.min(...windows.map((window) => Math.max(0, 100 - window.usedPercent)));
+}
+
 /**
- * Assesses one capacity pool from the honest signals we actually have.
- *
- * @param pool         capacity pool id (e.g. "claude-subscription")
- * @param cooldownUntil epoch ms a persisted token-exhaustion cooldown runs until, or null
- * @param nowMs        current epoch ms
- * @param usage        observed local usage, when available (raises confidence to estimated)
+ * Builds an assessment using the strongest current evidence. A successful live read
+ * precedes an older cooldown: this is how affirmative provider evidence clears a stale
+ * no-reset suppression without pretending a failed read proved availability.
  */
 export function assessCapacity(
   pool: string,
   cooldownUntil: number | null,
   nowMs: number,
   usage?: PoolUsageObservation,
+  authoritative = true,
+  live?: LiveCapacitySnapshot,
 ): CapacityAssessment {
-  // Level 3 — persisted-limit. A cooldown that is still in the future is hard evidence the
-  // pool is exhausted, with a known reset. This is the strongest signal we can produce.
+  if (
+    live &&
+    live.pool === pool &&
+    Number.isFinite(live.observedAt) &&
+    live.observedAt <= nowMs &&
+    live.windows.length > 0 &&
+    live.windows.every(validWindow)
+  ) {
+    const general = live.windows.filter((window) => !window.modelLabels?.length);
+    const headroomPercent = minimumHeadroom(general);
+    const state =
+      headroomPercent === null ? "unknown" : headroomPercent <= 0 ? "exhausted" : "available";
+    return {
+      pool,
+      state,
+      confidence: live.confidence,
+      resetAt: state === "exhausted" ? limitingReset(general) : null,
+      dormant: usage ? usage.activeRuns === 0 : true,
+      lastActivityAt: usage?.lastActivityAt ?? null,
+      observedAt: live.observedAt,
+      windows: live.windows.map((window) => ({ ...window })),
+      headroomPercent,
+      reason: live.reason,
+    };
+  }
+
   if (cooldownUntil !== null && cooldownUntil > nowMs) {
     return {
       pool,
       state: "exhausted",
-      confidence: "persisted-limit",
+      confidence: authoritative ? "persisted-limit" : "unconfirmed-limit",
       resetAt: cooldownUntil,
       dormant: false,
-      reason: `token cooldown active until ${new Date(cooldownUntil).toISOString()}`,
+      lastActivityAt: usage?.lastActivityAt ?? null,
+      observedAt: null,
+      windows: [],
+      headroomPercent: 0,
+      reason: authoritative
+        ? `capacity cooldown active until ${new Date(cooldownUntil).toISOString()}`
+        : `unconfirmed capacity signal — revalidating automatically at ${new Date(cooldownUntil).toISOString()}`,
     };
   }
 
-  // Level 4 — estimated. We have observed usage but no provider/CLI capacity number, so we
-  // do not claim to know remaining capacity; we only estimate dormancy from activity.
   if (usage) {
     if (usage.activeRuns > 0) {
       return {
@@ -105,6 +145,10 @@ export function assessCapacity(
         confidence: "estimated",
         resetAt: null,
         dormant: false,
+        lastActivityAt: usage.lastActivityAt,
+        observedAt: null,
+        windows: [],
+        headroomPercent: null,
         reason: `${usage.activeRuns} run(s) in flight — capacity in use`,
       };
     }
@@ -116,6 +160,10 @@ export function assessCapacity(
       confidence: "estimated",
       resetAt: null,
       dormant,
+      lastActivityAt: usage.lastActivityAt,
+      observedAt: null,
+      windows: [],
+      headroomPercent: null,
       reason:
         usage.lastActivityAt === null
           ? "no observed recent use — treated as dormant"
@@ -125,43 +173,65 @@ export function assessCapacity(
     };
   }
 
-  // Level 5 — unknown. No cooldown and no usage history: we know nothing, and say so.
-  // Absence of a cooldown is treated as dormant for routing preference, but the state
-  // stays honestly `unknown` rather than a fabricated `available`.
   return {
     pool,
     state: "unknown",
     confidence: "unknown",
     resetAt: null,
     dormant: true,
+    lastActivityAt: null,
+    observedAt: null,
+    windows: [],
+    headroomPercent: null,
     reason: "no capacity signal available",
   };
 }
 
-/** True when an assessment means "do not route work to this pool right now". */
+export function capacityHeadroomForModel(
+  assessment: CapacityAssessment,
+  modelLabel: string,
+): number | null {
+  if (assessment.windows.length === 0) return assessment.headroomPercent;
+  const applicable = assessment.windows.filter(
+    (window) => !window.modelLabels?.length || window.modelLabels.includes(modelLabel),
+  );
+  return minimumHeadroom(applicable);
+}
+
 export function isPoolExhausted(assessment: CapacityAssessment): boolean {
   return assessment.state === "exhausted";
 }
 
-/**
- * Assesses several pools at once into a lookup routing consumes.
- *
- * @param pools          the pool ids to assess
- * @param cooldownByPool pool → active-cooldown epoch ms (or null)
- * @param usageByPool    pool → observed usage (optional per pool)
- * @param nowMs          current epoch ms
- */
+export function isModelCapacityExhausted(
+  assessment: CapacityAssessment,
+  modelLabel: string,
+): boolean {
+  return (
+    assessment.state === "exhausted" ||
+    capacityHeadroomForModel(assessment, modelLabel) === 0
+  );
+}
+
 export function assessPools(
   pools: readonly string[],
   cooldownByPool: Map<string, number | null>,
   usageByPool: Map<string, PoolUsageObservation>,
   nowMs: number,
+  authoritativeByPool?: Map<string, boolean>,
+  liveByPool?: Map<string, LiveCapacitySnapshot>,
 ): Map<string, CapacityAssessment> {
   const out = new Map<string, CapacityAssessment>();
   for (const pool of pools) {
     out.set(
       pool,
-      assessCapacity(pool, cooldownByPool.get(pool) ?? null, nowMs, usageByPool.get(pool)),
+      assessCapacity(
+        pool,
+        cooldownByPool.get(pool) ?? null,
+        nowMs,
+        usageByPool.get(pool),
+        authoritativeByPool?.get(pool) ?? true,
+        liveByPool?.get(pool),
+      ),
     );
   }
   return out;

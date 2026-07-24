@@ -13,7 +13,7 @@
  * than hand-maintained here, so model configuration lives in one place.
  */
 
-import { dispatchableModels } from "./models.ts";
+import { dispatchableModels, modelByLabel, type ModelEntry } from "./models.ts";
 
 /** Agents we know how to launch. */
 export const AGENT_LABELS = {
@@ -59,6 +59,35 @@ export const EFFORT_LABELS: Record<string, Record<DispatcherAgent, string>> = {
 };
 
 export const DEFAULT_EFFORT_LABEL = "effort:medium";
+
+/** Provider-neutral queue admission. Assignment is derived later at pickup. */
+export const DISPATCH_READY_LABEL = "dispatch:ready";
+
+/**
+ * Legacy assignment labels continue to admit already-queued work during migration, but
+ * they are advisory unless route:human-override is present.
+ */
+export function isDispatchRequested(labels: string[]): boolean {
+  const characteristicPrefixes = [
+    "task:",
+    "complexity:",
+    "risk:",
+    "context:",
+    "ambiguity:",
+    "requirements:",
+    "reasoning:",
+    "verification:",
+    "recoverability:",
+  ];
+  return (
+    labels.includes(DISPATCH_READY_LABEL) ||
+    labels.some((label) => label.startsWith("agent:") || label.startsWith("model:")) ||
+    labels.some((label) =>
+      characteristicPrefixes.some((prefix) => label.startsWith(prefix)),
+    ) ||
+    labels.includes("route:human-override")
+  );
+}
 
 /** Optional labels that move otherwise eligible issues between dispatcher queue tiers. */
 export const QUEUE_JUMP_LABEL = "queue jump";
@@ -181,6 +210,16 @@ export interface ResolvedAssignment {
   cliEffort: string;
 }
 
+export interface ResolvedRoutingOverride {
+  model: ModelEntry;
+  /** Null means the human pinned the model but left effort to the dispatcher. */
+  effortLabel: string | null;
+}
+
+export type RoutingOverrideResult =
+  | { ok: true; value: ResolvedRoutingOverride | null }
+  | { ok: false; reason: string };
+
 export type AssignmentResult =
   | { ok: true; value: ResolvedAssignment }
   | { ok: false; reason: string };
@@ -233,6 +272,69 @@ export function resolveAssignment(labels: string[]): AssignmentResult {
       cliEffort: effort[agent],
     },
   };
+}
+
+/** Maps a registry model and provider-neutral effort label through the frozen allowlists. */
+export function assignmentForModel(
+  model: ModelEntry,
+  effortLabel: string,
+): AssignmentResult {
+  if (!isDispatcherAgent(model.cli)) {
+    return { ok: false, reason: `${model.modelLabel} has no live dispatcher agent` };
+  }
+  const effort = EFFORT_LABELS[effortLabel];
+  if (!effort) return { ok: false, reason: `unsupported effort label ${effortLabel}` };
+  return {
+    ok: true,
+    value: {
+      agent: model.cli,
+      modelLabel: model.modelLabel,
+      cliModel: model.cliModel,
+      effortLabel,
+      cliEffort: effort[model.cli],
+    },
+  };
+}
+
+/**
+ * Ordinary assignment labels are advisory output from older planning flows. Only the
+ * explicit override marker makes them authoritative; this prevents stale/partial labels
+ * from wedging otherwise routable work.
+ */
+export function resolveRoutingOverride(labels: string[]): RoutingOverrideResult {
+  if (!labels.includes("route:human-override")) return { ok: true, value: null };
+
+  const agentLabels = labels.filter((label) => label in AGENT_LABELS);
+  const modelLabels = labels.filter((label) => label.startsWith("model:"));
+  const effortLabels = labels.filter((label) => label.startsWith("effort:"));
+  if (agentLabels.length !== 1 || modelLabels.length !== 1) {
+    return {
+      ok: false,
+      reason: "route:human-override requires exactly one agent:* and one model:* label",
+    };
+  }
+  if (effortLabels.length > 1) {
+    return {
+      ok: false,
+      reason: `conflicting effort labels (${effortLabels.join(", ")})`,
+    };
+  }
+  const model = modelByLabel(modelLabels[0]!);
+  if (!model || !model.enabled || !isDispatcherAgent(model.cli)) {
+    return { ok: false, reason: `unsupported model override ${modelLabels[0]}` };
+  }
+  const agent = AGENT_LABELS[agentLabels[0] as keyof typeof AGENT_LABELS];
+  if (model.cli !== agent) {
+    return {
+      ok: false,
+      reason: `${model.modelLabel} is a ${model.cli} model but the override uses ${agentLabels[0]}`,
+    };
+  }
+  const effortLabel = effortLabels[0] ?? null;
+  if (effortLabel !== null && !EFFORT_LABELS[effortLabel]) {
+    return { ok: false, reason: `unsupported effort override ${effortLabel}` };
+  }
+  return { ok: true, value: { model, effortLabel } };
 }
 
 export function resolvePriorityTier(labels: string[]): DispatcherPriorityTier {

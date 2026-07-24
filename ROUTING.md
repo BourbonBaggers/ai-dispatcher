@@ -1,152 +1,187 @@
-# Routing rubric — how to label a dispatchable issue
+# Pickup-time routing rubric
 
-This is the routing rubric for choosing an issue’s `model:*` label (#319). An issue author
-(human or planning agent) applies it, and pure decision-support functions implement it in
-`src/models.ts`, `src/capacity.ts`, and `src/routing.ts`. The live dispatcher does not
-replace or mutate the chosen model label; it validates and obeys it. Keep this document
-and that code in sync — the code is the source of truth.
+The dispatcher chooses provider, model, and effort when it claims an issue. Issue authors
+describe the workload with characteristic and priority labels; they do not need to know
+subscription state or preselect execution parameters.
 
-## The one objective
+`src/models.ts` is the model-catalog authority. `src/routing.ts` implements the pure
+capability and effort rubric, `src/capacity.ts` normalizes capacity evidence, and the
+dispatcher joins those decisions atomically at pickup.
 
-> **Lowest total subscription capacity consumed per production-quality feature.**
+## Objective
 
-Not attempt cost, not first-attempt success, not speed. A weaker model that completes the
-work adequately — even after an occasional cheap retry — beats immediately spending scarce
-frontier capacity. Success is only counted when a feature is **merged, deployed, and needs
-no material human repair** (see telemetry semantics below).
+> Use the minimum viable model while balancing paid subscription headroom and preserving
+> frontier capacity, with no routine operator involvement.
 
-## Step 1 — Classify the issue (characteristic labels)
+Success means merged, deployed, healthy, and requiring no material human repair. A cheap
+first miss is acceptable when deterministic verification and automatic recovery make it
+useful evidence.
 
-Apply one label per dimension. Unlabelled dimensions fall back to a mid default, so label
-the axes that actually move the decision. These are objective, machine-comparable, and let
-later evidence compare similar issues.
+## 1. Describe residual work
+
+Apply the labels that materially describe the work. Missing or unknown dimensions use
+conservative middle defaults and never wedge an issue.
 
 | Dimension | Label | Values |
 | --- | --- | --- |
 | Task type | `task:<type>` | e.g. `feature`, `bugfix`, `refactor`, `docs`, `test`, `infra` |
 | Complexity | `complexity:<v>` | `trivial`, `simple`, `moderate`, `complex` |
-| Blast radius / risk | `risk:<v>` | `low`, `medium`, `high` |
+| Blast radius | `risk:<v>` | `low`, `medium`, `high` |
 | Context size | `context:<v>` | `small`, `medium`, `large` |
 | Ambiguity | `ambiguity:<v>` | `clear`, `some`, `high` |
 | Requirements quality | `requirements:<v>` | `good`, `adequate`, `poor` |
-| Reasoning depth | `reasoning:<v>` | `shallow`, `moderate`, `deep` |
+| Residual reasoning | `reasoning:<v>` | `shallow`, `moderate`, `deep` |
+| Verification strength | `verification:<v>` | `weak`, `standard`, `strong` |
+| Recoverability | `recoverability:<v>` | `low`, `medium`, `high` |
 
-**Requirements quality substitutes for model strength.** Well-specified requirements let a
-mid-tier model succeed, so `requirements:good` does *not* raise the tier — it raises
-routing *confidence*. Poorly-specified work (`requirements:poor`) should be refined before
-reaching for a stronger model, not escalated.
+Use `requirements:good` only when the issue gives a bounded execution package: outcome,
+scope and exclusions, acceptance criteria, business/data rules, dependencies, verification,
+and relevant rollback guidance.
 
-## Step 2 — Derive the minimum viable tier
+Route by uncertainty remaining after those requirements. Importance, file count, and
+state-machine vocabulary do not independently justify a stronger model.
 
-The capability ladder ascends `fast → general → complex → frontier`. The minimum viable
-tier is complexity-driven, with two floors and one reserved ceiling:
+## 2. Derive the minimum model tier
 
-| Condition | Minimum tier |
+The capability ladder is `fast → general → complex → frontier`. General is the default.
+
+| Tier | Initial use |
 | --- | --- |
-| `complexity:trivial` or `simple` | **fast** |
-| `complexity:moderate` | **general** |
-| `complexity:complex` | **complex** |
-| `risk:high` **or** `reasoning:deep` (any complexity) | at least **complex** |
-| `complexity:complex` **and** `risk:high` **and** `reasoning:deep` | **frontier** |
+| **fast** | Trivial/simple, low-risk, clear work with good requirements, shallow reasoning, and strong deterministic verification. |
+| **general** | Most bounded work with a known approach; also complex raw scope whose design is settled and whose failures are strongly verified and cheaply recoverable. |
+| **complex** | Meaningful implementation judgment remains: complex scope, high ambiguity, poor requirements, deep reasoning, or material residual risk. |
+| **frontier** | Exceptional first attempts only: complex and high-risk work with deep uncertainty plus weak verification or low recoverability. |
 
-Frontier is reached only at the ceiling of every axis — it is a genuine reserve, never a
-default for "hard" issues.
+Raw complex scope receives a one-tier recoverability discount when requirements are good,
+ambiguity is not high, reasoning and risk are not high, verification is strong, and
+recovery is cheap. Frontier otherwise remains the final automatic recovery rung.
 
-## Step 3 — Select the model (one `model:*` label)
+## 3. Derive effort independently
 
-Pick the model from the curated registry (`src/models.ts`) using, in order:
+Effort controls persistence within the selected lane. It is derived at pickup and is
+independent of subscription usage.
 
-1. **Minimum viable tier** — the lowest capable tier that meets Step 2.
-2. **Availability** — drop any pool in a known usage-limit cooldown.
-3. **Frontier protection** — never select a frontier model unless Step 2 justified it.
-4. **Large context** — `context:large` requires a large-context-capable model.
-5. **Dormant capacity** — among comparable options, prefer an otherwise-idle subscription
-   pool to conserve busy capacity.
+| Effort | Use |
+| --- | --- |
+| `effort:low` | Localized deterministic work with an obvious path and strong verification. |
+| `effort:medium` | Default normal implementation and test work. |
+| `effort:high` | Broad but bounded execution, careful sequencing, several edge cases, or multi-step verification. |
+| `effort:max` | Rare exhaustive frontier/near-frontier work where weak verification or costly recovery makes extra persistence cheaper than a miss. |
+
+Importance alone raises neither model tier nor effort. After model selection, the
+provider-neutral effort is mapped through the selected CLI's frozen allowlist; unsupported
+Codex levels remain safely capped.
+
+## 4. Read live subscription capacity
+
+At pickup the dispatcher reads both pools concurrently:
+
+- Codex: `codex app-server` JSON-RPC `account/rateLimits/read`.
+- Claude: authenticated `GET https://api.anthropic.com/api/oauth/usage`.
+
+The normalized confidence ladder is `provider-reported → cli-reported →
+persisted-limit → unconfirmed-limit → estimated → unknown`.
+
+Each live window carries utilization and reset time. Model-specific Claude windows apply
+only to their matching model. Constrained headroom is the smallest remaining percentage
+among applicable active windows.
+
+A fresh affirmative live read supersedes a stale suppression. A failed read proves
+nothing: existing evidence remains and the pool becomes unknown when there is no durable
+evidence. Credentials and raw responses are never logged or persisted.
+
+Capacity reads are bounded. One or both adapters failing never stops the scan.
+
+## 5. Select provider and model
+
+For each issue in priority order:
+
+1. Exclude models below the minimum tier.
+2. Admit at most one non-frontier tier of headroom.
+3. Enforce context and task capabilities.
+4. Withhold frontier unless the issue characteristics justify it.
+5. Exclude pools or model-specific windows proven exhausted.
+6. When both pools have comparable live evidence and their constrained headroom differs
+   by more than the hysteresis threshold, prefer greater headroom.
+7. When evidence is close, missing, or incomparable, use the durable round-robin cursor.
+8. Within the chosen pool, use the lowest adequate model, then task-class match.
+
+If an issue is temporarily unroutable, leave it unclaimed and continue through the queue.
+Retry it on later polls. Capacity scheduling never creates `autoship-held`, spends a
+repair attempt, or pages the operator.
 
 Current live lanes:
 
-| Tier | `model:*` label | CLI model | Pool | Frontier |
-| --- | --- | --- | --- | --- |
-| fast | `model:claude-haiku-4.5` | `claude-haiku-4-5-20251001` | claude-subscription | no |
-| general / large-context / planning | `model:claude-sonnet-5` | `claude-sonnet-5` | claude-subscription | no |
-| complex | `model:gpt-5.5` | `gpt-5.5` | codex-subscription | no |
-| frontier reserve | `model:claude-opus-4.8` | `claude-opus-4-8` | claude-subscription | **yes** |
+<!-- BEGIN GENERATED LIVE MODEL LANES -->
+| Tier | Role | `agent:*` label | `model:*` label | CLI model | Pool | Frontier |
+| --- | --- | --- | --- | --- | --- | --- |
+| fast | fast | `agent:claude` | `model:claude-haiku-4.5` | `claude-haiku-4-5-20251001` | `claude-subscription` | no |
+| general | general | `agent:claude` | `model:claude-sonnet-5` | `claude-sonnet-5` | `claude-subscription` | no |
+| frontier | frontier-reserve | `agent:claude` | `model:claude-opus-4.8` | `claude-opus-4-8` | `claude-subscription` | **yes** |
+| complex | complex | `agent:codex` | `model:gpt-5.5` | `gpt-5.5` | `codex-subscription` | no |
+<!-- END GENERATED LIVE MODEL LANES -->
 
-Selected models use the registry’s **explicit CLI identifier**, never an implicit
-dispatcher default. Provider identifiers are changed only in `src/models.ts`.
+Run `npm run docs:routing` after changing `src/models.ts`.
 
-## Step 4 — Record the rationale (routing-rationale labels)
+## 6. Assignment labels and overrides
 
-The pure routing result emits these rationale values; an issue author or planning
-automation may add matching labels to preserve the decision:
-`route:min-viable`, `route:dormant-capacity`, `route:frontier-justified`,
-`route:capacity-constrained`, `route:task-class-match`. The dispatch loop itself does not
-rewrite issue routing labels.
+Any recognized workload-characteristic label admits a planned issue. `dispatch:ready` is
+the explicit provider-neutral admission marker for an issue that intentionally relies on
+all default characteristics. Neither form needs `agent:*`, `model:*`, or `effort:*`.
+Ordinary assignment labels remain a legacy admission signal, but are advisory/stale and
+cannot wedge the queue. After the
+durable claim, the dispatcher rewrites them best-effort for visibility.
 
-**Human overrides:** a model chosen by a human against the rubric must carry
-`route:human-override`. Overrides are recorded and analysed separately and are **excluded
-from the automatic learning dataset** so human preference never distorts the policy.
+Only `route:human-override` makes assignment labels authoritative. It requires exactly one
+compatible `agent:*` and `model:*`; `effort:*` is optional. Without explicit effort, the
+dispatcher still derives it. Invalid explicit overrides are visible human-input errors
+rather than silently ignored instructions.
 
-## Planning retry / handoff policy
+Overrides pin the initial launch only. Automatic quota handoff and the normal repair →
+frontier → exhaustion contract still apply. Override attempts are recorded but excluded
+from the learning dataset.
 
-`planNextAttempt` provides cost-aware advice to planning/routing callers. It is not the
-live delivery-recovery state machine. Its advice by failure category is:
+## 7. Quota handoff
 
-| Failure category | Next attempt |
-| --- | --- |
-| `transient` (provider blip) | retry the **same** model if its pool is up |
-| `usage-limit` (pool exhausted) | hand off to **comparable** capacity in another pool |
-| `context-exhaustion` | hand off to a **large-context** model |
-| `implementation-failure` / `test-failure` | escalate **exactly one** tier |
-| `requirements-block` / `human-intervention` | **hold** for a human — do not burn tokens |
+A quota exit changes capacity, not task difficulty. The dispatcher re-routes the existing
+run inside the original capability band, preserving assigned effort and branch state.
+One adjacent non-frontier tier is allowed, so Sonnet exhaustion can hand off to GPT-5.5
+before Opus. A quota handoff does not consume the frontier rung.
 
-Escalation reaches the **frontier only as the last rung**, and that final attempt is
-automatic. Operator involvement begins only if the frontier attempt also fails.
+If no alternate pool is usable, the run waits and revalidates automatically. It does not
+become operator work.
 
-The live dispatcher’s delivery contract is intentionally simpler and stricter:
-independent `agent`, `ci`, `merge`, and `deploy` ledgers each run the configured number
-of assigned-model repairs, then one automatic configured frontier attempt, then durable
-exhaustion. Planning advice must never insert an operator gate into that runtime ladder.
+## 8. Durable evidence
 
-## Priority is separate from routing
+Before any launch or GitHub mutation, the claim stores:
 
-Human priority (`queue jump` / `technical debt` / normal) controls *order*, never *which
-model*. The two are independent by construction.
+- immutable original agent, model, and effort;
+- assignment source and timestamp;
+- minimum tier and characteristic labels;
+- routing and effort rationale;
+- capacity selection method;
+- sanitized capacity assessments; and
+- selected capacity pool.
 
-## Capacity honesty
+Restart and later delivery phases restore this original assignment. Frontier use in one
+phase does not rewrite it. GitHub assignment-label failures are cosmetic.
 
-Capacity is assessed on a descending confidence ladder (`provider-reported` →
-`cli-reported` → `persisted-limit` → `estimated` → `unknown`). No CLI exposes a remaining
-quota today, so the system reports `persisted-limit` (from an active cooldown) or
-`estimated`/`unknown` — it never fabricates a precise remaining-capacity number.
+Attempt telemetry records the same sanitized routing evidence. Token counts remain
+`unavailable` until a trusted launcher signal exists; they are never fabricated.
 
-## Telemetry semantics
+## Operator-involvement invariant
 
-Every terminal run records an **attempt**; attempts fold into an **issue** record.
+Initial routing, effort selection, adapter failure, exhausted subscriptions, and stale
+suppressions are scheduling states. They wait, retry, rotate, or hand off automatically.
+Only genuinely invalid/revoked credentials across all providers, absence of any technically
+capable configured model, an explicit invalid human override, or the existing fully spent
+repair → frontier → durable exhaustion path can require an operator.
 
-- **Token counts carry a source** — `reported | estimated | unavailable`. The launcher
-  emits no counts today, so real attempts record `unavailable`, never a fake `0`.
-- **Success ≠ a clean exit or a PR.** An issue succeeds only when merged **and** deployed
-  **and** free of regression/material human repair.
-- Manual overrides are recorded but excluded from learning.
+## Priority and future providers
 
-Run `ai-dispatcher report` for the analytics view (completed features by model, success by
-task category, first-attempt/retry rates, frontier utilization, recommendations).
+`queue jump`, regular, and `technical debt` control order only. They never select model or
+effort.
 
-## Evidence-based adjustment
-
-Once enough comparable data exists, initial routing may be adjusted among approved
-non-frontier models based on evidence. Recovery escalation remains fixed: bounded
-assigned-model repairs, one frontier attempt, then an exhausted handoff.
-
-## Adding a future provider
-
-The registry is provider-neutral. To add a CLI-backed lane (e.g. a Gemini free tier):
-
-1. Add a `ModelEntry` to the `MODELS` registry in `src/models.ts` (see the disabled
-   `model:gemini-2.5-pro` entry as a template) with its provider, pinned `cliModel`, tier,
-   task classes, context characteristics, and `capacityPool`. That file is the single
-   authority for the catalog — there is no longer a mirrored copy to keep in sync.
-2. Teach the runner to launch that CLI and add its `cli` value to `LIVE_DISPATCH_CLIS`.
-3. Set `enabled: true`. The label allowlist, routing, capacity, and reporting pick it up
-   from the data with no further change.
+To add a provider, add the complete disabled catalog entry in `src/models.ts`, implement
+its launch and bounded capacity adapters, test its safety contract, then enable it. Never
+mirror the model allowlist outside the registry.
