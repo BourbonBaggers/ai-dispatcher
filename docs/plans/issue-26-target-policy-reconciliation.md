@@ -24,7 +24,7 @@ Call reconciliation from the dispatcher launcher before every start/resume invoc
 thread policy paths into the generated prompt, and make launch fail before provider
 startup if verification fails.
 
-## Milestone 3: end-to-end isolation tests
+## [DONE] Milestone 3: end-to-end isolation tests
 
 Add shell/runner tests proving repeated reconciliation is idempotent, target worktrees
 stay clean, repository instructions are not modified, and non-dispatcher interactive
