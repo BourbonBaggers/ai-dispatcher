@@ -175,11 +175,11 @@ test("implementation failure escalates exactly one tier", () => {
   assert.equal(fromGeneral.model!.modelLabel, "model:gpt-5.5");
 });
 
-test("escalation to frontier requires human approval", () => {
+test("escalation to frontier is the final automatic attempt", () => {
   const p = planNextAttempt("implementation-failure", M("model:gpt-5.5"), capacity({}));
   assert.equal(p.action, "escalate-frontier");
   assert.equal(p.model!.modelLabel, "model:claude-opus-4.8");
-  assert.equal(p.requiresHumanApproval, true);
+  assert.equal(p.requiresHumanApproval, false);
 });
 
 test("context exhaustion hands off to large-context capacity", () => {
@@ -196,8 +196,9 @@ test("requirements block and human intervention hold for a human", () => {
   }
 });
 
-test("a failure at the top tier hands off rather than inventing a stronger tier", () => {
+test("a failure at the frontier holds because automation is exhausted", () => {
   const p = planNextAttempt("implementation-failure", M("model:claude-opus-4.8"), capacity({}));
-  assert.equal(p.action, "handoff");
-  assert.equal(p.model!.modelLabel, "model:gpt-5.5"); // opus's fallback
+  assert.equal(p.action, "hold");
+  assert.equal(p.model, null);
+  assert.match(p.rationale, /automation exhausted/);
 });

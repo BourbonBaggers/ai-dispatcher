@@ -46,7 +46,6 @@ src/
   github.ts               gh CLI wrapper (argv arrays, repo threaded through)
   selection.ts            pure issue eligibility + priority-tier ordering
   token-exhaustion.ts     provider-owned exhaustion detection + cooldown math (pure)
-  failure-policy.ts       3-strike per-issue deferral (pure)
   state.ts                atomic file-backed store + single-instance lock
   runner.ts               launch argv/env + terminal-state classification + supervision
   capture.ts              the uncommitted-work capture DECISION (mirrors the shell)
@@ -86,9 +85,10 @@ support for *choosing* that label (the planning-repo rubric) and for *planning a
   — never a fabricated remaining-quota number. Telemetry token counts are `unavailable`
   (the launcher emits none), and success requires merged + deployed + no human repair — a
   clean exit or PR is not success. Do not "improve" these into optimistic fabrications.
-- **Frontier is protected.** Routing withholds frontier models unless the characteristics
-  justify them; escalation reaches frontier only as the last rung and flags
-  `requiresHumanApproval`. Any change that raises frontier usage is a human decision.
+- **Frontier is the final automatic recovery rung.** Initial routing still withholds
+  frontier models unless task characteristics justify them. After bounded assigned-model
+  repairs fail, escalation to the configured frontier model is automatic; only failure
+  there is a human handoff.
 - **Manual overrides** (`route:human-override`) are recorded but excluded from the learning
   dataset — keep that exclusion intact.
 - The rubric itself lives in [`ROUTING.md`](ROUTING.md); keep it in sync with the code.

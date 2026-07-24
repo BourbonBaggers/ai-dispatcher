@@ -378,8 +378,8 @@ function firstAvailable(
 /**
  * Plans the next attempt after a failure, cost-driven rather than reflexively escalating
  * within one provider. Fallback preference comes from the model's own `fallbacks` list.
- * Frontier is only ever reached when a lower-tier attempt has already failed, and the plan
- * flags it so the operator can gate the frontier capacity increase (principle §4).
+ * Frontier is only ever reached when lower-tier repair attempts have failed. That final
+ * escalation is automatic; operator involvement begins only if frontier also fails.
  */
 export function planNextAttempt(
   failureCategory: FailureCategory,
@@ -428,7 +428,7 @@ export function planNextAttempt(
         action: "handoff",
         model: handoff,
         escalationReason: reason,
-        requiresHumanApproval: handoff.frontier,
+        requiresHumanApproval: false,
         rationale: `hand off to comparable capacity (${handoff.modelLabel})`,
       };
     }
@@ -446,25 +446,34 @@ export function planNextAttempt(
         action: "handoff",
         model: target,
         escalationReason: reason,
-        requiresHumanApproval: target.frontier,
+        requiresHumanApproval: false,
         rationale: `hand off to large-context capacity (${target.modelLabel})`,
       };
     }
     return { action: "hold", model: null, escalationReason: reason, requiresHumanApproval: false, rationale: "no large-context capacity available — hold" };
   }
 
-  // Implementation / test failure: escalate exactly one capability tier. Reaching the
-  // frontier is allowed only as the last rung, and always flagged for human approval.
+  // Implementation / test failure: escalate exactly one capability tier. Frontier is
+  // the final automated rung; failure there is the handoff point.
   const nextRank = tierRank(currentModel.tier) + 1;
   if (nextRank >= MODEL_TIERS.length) {
-    // Already at the top tier — nothing stronger to escalate to.
+    if (currentModel.frontier) {
+      return {
+        action: "hold",
+        model: null,
+        escalationReason: reason,
+        requiresHumanApproval: false,
+        rationale: "frontier attempt failed — automation exhausted",
+      };
+    }
+    // Already at the strongest non-frontier tier: use an explicit fallback if present.
     const sameTierElsewhere = firstAvailable(currentModel.fallbacks, capacityByPool, models);
     if (sameTierElsewhere) {
       return {
         action: "handoff",
         model: sameTierElsewhere,
         escalationReason: reason,
-        requiresHumanApproval: sameTierElsewhere.frontier,
+        requiresHumanApproval: false,
         rationale: `top tier reached — hand off to ${sameTierElsewhere.modelLabel}`,
       };
     }
@@ -482,9 +491,9 @@ export function planNextAttempt(
     action: target.frontier ? "escalate-frontier" : "escalate-tier",
     model: target,
     escalationReason: reason,
-    requiresHumanApproval: target.frontier,
+    requiresHumanApproval: false,
     rationale: target.frontier
-      ? `escalate to frontier (${target.modelLabel}) — requires human approval`
+      ? `escalate automatically to final frontier attempt (${target.modelLabel})`
       : `escalate one tier to ${target.modelLabel}`,
   };
 }

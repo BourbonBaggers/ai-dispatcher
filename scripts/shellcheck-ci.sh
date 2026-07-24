@@ -74,10 +74,10 @@ is_shell_file() {
 }
 
 run_shellcheck_batch() {
-  local -n batch_ref="$1"
-  local now elapsed remaining rc
+  local now elapsed remaining rc batch_count
+  batch_count="$#"
 
-  ((${#batch_ref[@]} > 0)) || return 0
+  ((batch_count > 0)) || return 0
   now="$(now_ms)"
   elapsed="$(((now - CHECK_PHASE_START_MS) / 1000))"
   remaining="$((TIMEOUT_SECONDS - elapsed))"
@@ -86,11 +86,11 @@ run_shellcheck_batch() {
   fi
 
   rc=0
-  timeout "${remaining}s" shellcheck --severity=error --shell=bash "${batch_ref[@]}" || rc=$?
+  timeout "${remaining}s" shellcheck --severity=error --shell=bash "$@" || rc=$?
   case "$rc" in
     0) return 0 ;;
     124|137)
-      die "ShellCheck timed out after ${TIMEOUT_SECONDS}s while checking a batch of ${#batch_ref[@]} file(s). Reproduce locally with: SHELLCHECK_TIMEOUT_SECONDS=${TIMEOUT_SECONDS} scripts/shellcheck-ci.sh"
+      die "ShellCheck timed out after ${TIMEOUT_SECONDS}s while checking a batch of ${batch_count} file(s). Reproduce locally with: SHELLCHECK_TIMEOUT_SECONDS=${TIMEOUT_SECONDS} scripts/shellcheck-ci.sh"
       ;;
     *) return "$rc" ;;
   esac
@@ -131,7 +131,7 @@ checked=0
 for file in "${files[@]}"; do
   batch+=("$file")
   if ((${#batch[@]} >= BATCH_SIZE)); then
-    run_shellcheck_batch batch
+    run_shellcheck_batch "${batch[@]}"
     checked=$((checked + ${#batch[@]}))
     log "Checked $checked/${#files[@]} files"
     batch=()
@@ -139,7 +139,7 @@ for file in "${files[@]}"; do
 done
 
 if ((${#batch[@]} > 0)); then
-  run_shellcheck_batch batch
+  run_shellcheck_batch "${batch[@]}"
   checked=$((checked + ${#batch[@]}))
   log "Checked $checked/${#files[@]} files"
 fi

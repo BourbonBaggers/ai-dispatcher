@@ -98,8 +98,8 @@ reflexively escalate within one provider. By failure category:
 | `implementation-failure` / `test-failure` | escalate **exactly one** tier |
 | `requirements-block` / `human-intervention` | **hold** for a human — do not burn tokens |
 
-Escalation reaches the **frontier only as the last rung**, and any frontier escalation is
-flagged `requiresHumanApproval` — the operator gates the frontier capacity increase.
+Escalation reaches the **frontier only as the last rung**, and that final attempt is
+automatic. Operator involvement begins only if the frontier attempt also fails.
 
 ## Priority is separate from routing
 
@@ -126,12 +126,11 @@ Every terminal run records an **attempt**; attempts fold into an **issue** recor
 Run `ai-dispatcher report` for the analytics view (completed features by model, success by
 task category, first-attempt/retry rates, frontier utilization, recommendations).
 
-## Evidence-based adjustment (and its one hard gate)
+## Evidence-based adjustment
 
-Once enough comparable data exists, routing may be adjusted **among approved non-frontier
-models** based on evidence — e.g. routing a task category to a lower tier that reliably
-succeeds. **Any change that increases frontier-model usage requires explicit human
-approval.** This is the non-negotiable gate on the frontier reserve.
+Once enough comparable data exists, initial routing may be adjusted among approved
+non-frontier models based on evidence. Recovery escalation remains fixed: bounded
+assigned-model repairs, one frontier attempt, then an exhausted handoff.
 
 ## Adding a future provider
 

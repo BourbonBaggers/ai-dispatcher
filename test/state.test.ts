@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StateStore, LockHeldError } from "../src/state.ts";
@@ -196,6 +196,34 @@ test("a corrupt state file is preserved and replaced with empty state", () => {
     const preserved = existsSync(join(dir, "state.json"));
     assert.equal(preserved, true);
     store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("legacy CI/deploy recovery fields migrate into the unified ledger", () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    store.createRun(claimData(7));
+    store.releaseLock();
+
+    const statePath = join(dir, "state.json");
+    const raw = JSON.parse(readFileSync(statePath, "utf8")) as {
+      runs: Array<Record<string, unknown>>;
+    };
+    delete raw.runs[0]!.recovery;
+    raw.runs[0]!.ciSelfHealAttempts = 2;
+    raw.runs[0]!.ciEscalated = true;
+    raw.runs[0]!.deployEscalated = true;
+    writeFileSync(statePath, JSON.stringify(raw));
+
+    const reopened = StateStore.open(dir);
+    assert.deepEqual(reopened.allRuns()[0]!.recovery, {
+      ci: { attempts: 2, escalated: true },
+      deploy: { attempts: 0, escalated: true },
+    });
+    reopened.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

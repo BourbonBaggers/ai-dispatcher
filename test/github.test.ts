@@ -135,6 +135,7 @@ test("prMergeInfo parses structured PR mergeability fields", async () => {
         isDraft: false,
         mergeStateStatus: "DIRTY",
         reviewDecision: null,
+        mergeCommit: { oid: "merge789" },
       }),
     ),
   );
@@ -147,6 +148,7 @@ test("prMergeInfo parses structured PR mergeability fields", async () => {
     isDraft: false,
     mergeStateStatus: "DIRTY",
     reviewDecision: null,
+    mergeCommitOid: "merge789",
   });
 });
 

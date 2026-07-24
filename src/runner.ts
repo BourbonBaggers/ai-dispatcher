@@ -74,7 +74,10 @@ export function dispatchAgentArgs(scriptPath: string, spec: AgentLaunchSpec): st
  * (never argv) and is mandatory — the script fails fast if `DISPATCHER_REPO` is empty,
  * so there is no hard-coded repository anywhere in the pipeline (issue #320).
  */
-export function dispatchAgentEnv(config: DispatcherConfig): Record<string, string> {
+export function dispatchAgentEnv(
+  config: DispatcherConfig,
+  recoveryReason?: string | null,
+): Record<string, string> {
   const env: Record<string, string> = {
     DISPATCHER_REPO: config.repo.slug,
     // Legacy alias the ported script also accepts, kept so a hand-run stays compatible.
@@ -83,6 +86,7 @@ export function dispatchAgentEnv(config: DispatcherConfig): Record<string, strin
     DISPATCHER_WORKTREE_DIR: config.worktreeDir,
   };
   if (config.envSourceDir) env.DISPATCHER_ENV_SOURCE_DIR = config.envSourceDir;
+  if (recoveryReason) env.DISPATCHER_RECOVERY_REASON = recoveryReason.slice(0, 4_000);
   return env;
 }
 
@@ -176,6 +180,18 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
     };
   }
 
+  // Conventional shell signal exits (128 + signal) are interruptions, not evidence
+  // that the agent failed the issue. Service shutdown commonly produces 143 (SIGTERM);
+  // treating it as a hard failure generated operator-facing "exited with code 143"
+  // noise and bypassed the resumable path.
+  if (exitCode === 130 || exitCode === 143) {
+    return {
+      status: "interrupted",
+      exitCode,
+      summary: `The agent process was interrupted by signal (exit ${exitCode}). Its work will resume automatically.`,
+    };
+  }
+
   if (!sawResult) {
     // We know NOTHING about what the agent achieved — it was killed (a CLI crash, a
     // dropped connection, a restart). Work on disk survives, so this is resumable. This
@@ -235,6 +251,19 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
   return { status: "failed", exitCode, summary: `The agent exited with code ${exitCode}.` };
 }
 
+export function requirePrForDelivery(
+  outcome: RunOutcome,
+  prNumber: number | null,
+): RunOutcome {
+  if (outcome.status !== "shipped" || prNumber !== null) return outcome;
+  return {
+    status: "failed",
+    exitCode: outcome.exitCode,
+    summary:
+      "The agent committed work but did not open a pull request. Resume and complete the delivery handoff.",
+  };
+}
+
 /**
  * Builds the token-exhaustion summary and the concrete suppression window. Pure; the
  * caller persists the cooldown and fires the (single) notification.
@@ -289,7 +318,7 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
   };
 
   const args = dispatchAgentArgs(DISPATCH_AGENT_SCRIPT, spec);
-  const env = { ...process.env, ...dispatchAgentEnv(config) };
+  const env = { ...process.env, ...dispatchAgentEnv(config, run.failureSummary) };
 
   logger.info("launching agent", {
     runId: run.id,
@@ -360,13 +389,19 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
     child.stderr.on("data", lineReader((line) => handleLine(line, "stderr")));
 
     const finish = (outcome: RunOutcome): void => {
-      const status: TerminalStatus = outcome.status;
+      // A clean process exit with commits but no PR is not a delivery handoff. Calling
+      // it provisionally shipped makes autoship skip it and leaves a false success.
+      // Convert it to an agent failure so the autonomous repair ladder relaunches the
+      // agent to push/open the PR.
+      const observed = store.getRun(run.id);
+      const effectiveOutcome = requirePrForDelivery(outcome, observed?.prNumber ?? null);
+      const status: TerminalStatus = effectiveOutcome.status;
       let summary: string | null;
 
-      if (outcome.status === "token_exhausted") {
+      if (effectiveOutcome.status === "token_exhausted") {
         const { summary: exhaustionSummary, until } = tokenExhaustionSummary(
           run.agent,
-          outcome.signal,
+          effectiveOutcome.signal,
           now(),
         );
         summary = exhaustionSummary;
@@ -379,12 +414,12 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
           )
           .catch(() => undefined);
       } else {
-        summary = outcome.summary;
+        summary = effectiveOutcome.summary;
       }
 
       const finalized = store.updateRun(run.id, {
         status,
-        exitCode: outcome.exitCode,
+        exitCode: effectiveOutcome.exitCode,
         failureSummary: summary ? redact(summary) : null,
         outputSeq,
         finishedAt: now(),
@@ -394,7 +429,7 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
         runId: run.id,
         issue: run.issueNumber,
         status,
-        exitCode: outcome.exitCode,
+        exitCode: effectiveOutcome.exitCode,
       });
 
       resolve(finalized);
