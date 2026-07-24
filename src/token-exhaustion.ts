@@ -47,6 +47,13 @@ export const PROVIDER_CAPACITY_KIND = [
 ] as const;
 export type ProviderCapacityKind = (typeof PROVIDER_CAPACITY_KIND)[number];
 
+export const PROVIDER_CAPACITY_SIGNAL_SOURCE = [
+  "canonical-line",
+  "structured-error",
+  "provider-banner",
+] as const;
+export type ProviderCapacitySignalSource = (typeof PROVIDER_CAPACITY_SIGNAL_SOURCE)[number];
+
 /**
  * Fallback cooldown when Claude reports a quota-like signal with no reset. Claude's
  * subscription limits reset on a documented rolling ~5-hour window — this assumption is
@@ -82,6 +89,10 @@ export interface WallClockReset {
 
 export interface ProviderCapacitySignal {
   kind: ProviderCapacityKind;
+  /** Provenance class used to distinguish provider errors from untrusted tool output. */
+  source?: ProviderCapacitySignalSource;
+  /** Original process stream carrying the trusted provider event. */
+  stream?: "stdout" | "stderr";
   /** Absolute reset instant (epoch ms) when directly reported; else null. */
   resetAt: number | null;
   /** Wall-clock reset ("resets 4am (UTC)"), resolved later against `now`. */
@@ -119,7 +130,8 @@ const ANY_CAPACITY_PHRASE = new RegExp(
   "i",
 );
 
-const CANONICAL_LIMIT = /usage limit reached\s*\|\s*(\d{9,13})/i;
+const CANONICAL_LIMIT_LINE =
+  /^(?:Claude AI|Claude|Codex|OpenAI Codex)?\s*usage limit reached\s*\|\s*(\d{9,13})\s*$/i;
 
 const EPOCH_MS_THRESHOLD = 1e12;
 const RESET_CLAUSE = /reset[s]?\b\s*(?:at\s+)?(.+)$/i;
@@ -197,34 +209,49 @@ function classifyKind(text: string): ProviderCapacityKind | null {
   if (THROTTLE_PHRASE.test(text)) return "throttling";
   if (CONTEXT_PHRASE.test(text)) return "context-exhaustion";
   if (BILLING_PHRASE.test(text)) return "billing";
-  if (CANONICAL_LIMIT.test(text) || EXHAUSTION_PHRASE.test(text) || SESSION_LIMIT_BANNER.test(text)) {
+  if (
+    CANONICAL_LIMIT_LINE.test(text) ||
+    EXHAUSTION_PHRASE.test(text) ||
+    SESSION_LIMIT_BANNER.test(text)
+  ) {
     return "unconfirmed-quota";
   }
   return null;
 }
 
-function buildSignal(text: string, epoch: number | null): ProviderCapacitySignal {
+function buildSignal(
+  text: string,
+  epoch: number | null,
+  source: ProviderCapacitySignalSource,
+  stream: "stdout" | "stderr",
+): ProviderCapacitySignal {
   const kind = classifyKind(text) ?? "unknown";
   const excerpt = text.slice(0, MAX_EXCERPT_LENGTH);
 
-  if (epoch !== null) return { kind, resetAt: epoch, wallClock: null, resetLabel: null, excerpt };
+  if (epoch !== null) {
+    return { kind, source, stream, resetAt: epoch, wallClock: null, resetLabel: null, excerpt };
+  }
 
   const label = extractResetLabel(text);
 
   const piped = text.match(/\|\s*(\d{9,13})\b/);
   if (piped?.[1]) {
     const parsed = parseEpoch(piped[1]);
-    if (parsed !== null) return { kind, resetAt: parsed, wallClock: null, resetLabel: label, excerpt };
+    if (parsed !== null) {
+      return { kind, source, stream, resetAt: parsed, wallClock: null, resetLabel: label, excerpt };
+    }
   }
 
   const iso = text.match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?/);
   if (iso) {
     const ms = Date.parse(iso[0]);
-    if (Number.isFinite(ms)) return { kind, resetAt: ms, wallClock: null, resetLabel: label, excerpt };
+    if (Number.isFinite(ms)) {
+      return { kind, source, stream, resetAt: ms, wallClock: null, resetLabel: label, excerpt };
+    }
   }
 
   const wallClock = label ? parseWallClock(label) : null;
-  return { kind, resetAt: null, wallClock, resetLabel: label, excerpt };
+  return { kind, source, stream, resetAt: null, wallClock, resetLabel: label, excerpt };
 }
 
 function extractAssistantText(event: Record<string, unknown>): string {
@@ -238,13 +265,39 @@ function extractAssistantText(event: Record<string, unknown>): string {
   return parts.join(" ");
 }
 
+function structuredErrorText(event: Record<string, unknown>): string {
+  const error = event["error"];
+  const nestedError =
+    error && typeof error === "object" ? (error as Record<string, unknown>) : null;
+  return [
+    event["message"],
+    typeof error === "string" ? error : null,
+    nestedError?.["message"],
+    nestedError?.["code"],
+    event["result"],
+    event["subtype"],
+  ]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ");
+}
+
+function detectCanonicalLine(
+  line: string,
+  stream: "stdout" | "stderr",
+): ProviderCapacitySignal | null {
+  const canonical = line.trim().match(CANONICAL_LIMIT_LINE);
+  return canonical?.[1]
+    ? buildSignal(line.trim(), parseEpoch(canonical[1]), "canonical-line", stream)
+    : null;
+}
+
 /** Recognizes a Claude provider-capacity signal in one line of agent output. */
 export function detectClaudeTokenExhaustion(
   line: string,
   stream: "stdout" | "stderr",
 ): ProviderCapacitySignal | null {
-  const canonical = line.match(CANONICAL_LIMIT);
-  if (canonical?.[1]) return buildSignal(line, parseEpoch(canonical[1]));
+  const canonical = detectCanonicalLine(line, stream);
+  if (canonical) return canonical;
 
   const trimmed = line.trim();
 
@@ -257,10 +310,10 @@ export function detectClaudeTokenExhaustion(
     }
 
     if (event["type"] === "result" && event["is_error"] === true) {
-      const text = [event["result"], event["error"], event["subtype"]]
-        .filter((v): v is string => typeof v === "string")
-        .join(" ");
-      if (ANY_CAPACITY_PHRASE.test(text)) return buildSignal(text, null);
+      const text = structuredErrorText(event);
+      if (ANY_CAPACITY_PHRASE.test(text)) {
+        return buildSignal(text, null, "structured-error", stream);
+      }
       return null;
     }
 
@@ -269,15 +322,24 @@ export function detectClaudeTokenExhaustion(
       // on ordinary assistant prose that merely mentions tokens/limits (e.g. summarizing
       // an issue body that talks about exhaustion).
       const text = extractAssistantText(event);
-      if (SESSION_LIMIT_BANNER.test(text)) return buildSignal(text, null);
+      if (SESSION_LIMIT_BANNER.test(text)) {
+        return buildSignal(text, null, "provider-banner", stream);
+      }
       return null;
     }
 
     return null;
   }
 
-  if (stream === "stdout" && SESSION_LIMIT_BANNER.test(line)) return buildSignal(line, null);
-  if (stream === "stderr" && ANY_CAPACITY_PHRASE.test(line)) return buildSignal(line, null);
+  if (stream === "stdout" && SESSION_LIMIT_BANNER.test(line)) {
+    return buildSignal(line, null, "provider-banner", stream);
+  }
+  // stream-json keeps repository/tool output inside typed stdout events. Plain stderr is
+  // accepted only when the CLI itself marks the line as an error; arbitrary prose is not
+  // provider-owned evidence.
+  if (/^(?:error|fatal)\s*:/i.test(trimmed) && ANY_CAPACITY_PHRASE.test(trimmed)) {
+    return buildSignal(trimmed, null, "provider-banner", stream);
+  }
   return null;
 }
 
@@ -286,19 +348,22 @@ export function detectCodexTokenExhaustion(
   line: string,
   stream: "stdout" | "stderr",
 ): ProviderCapacitySignal | null {
-  const canonical = line.match(CANONICAL_LIMIT);
-  if (canonical?.[1]) return buildSignal(line, parseEpoch(canonical[1]));
+  const canonical = detectCanonicalLine(line, stream);
+  if (canonical) return canonical;
 
   const trimmed = line.trim();
   if (trimmed.startsWith("{")) {
     try {
       const event = JSON.parse(trimmed) as Record<string, unknown>;
-      const isError = event["type"] === "error" || event["is_error"] === true;
+      const isError =
+        event["type"] === "error" ||
+        event["type"] === "turn.failed" ||
+        event["is_error"] === true;
       if (isError) {
-        const text = [event["message"], event["error"], event["result"]]
-          .filter((value): value is string => typeof value === "string")
-          .join(" ");
-        if (ANY_CAPACITY_PHRASE.test(text)) return buildSignal(text, null);
+        const text = structuredErrorText(event);
+        if (ANY_CAPACITY_PHRASE.test(text)) {
+          return buildSignal(text, null, "structured-error", stream);
+        }
       }
       return null;
     } catch {
@@ -306,8 +371,9 @@ export function detectCodexTokenExhaustion(
     }
   }
 
-  if (stream === "stdout" && SESSION_LIMIT_BANNER.test(line)) return buildSignal(line, null);
-  if (stream === "stderr" && ANY_CAPACITY_PHRASE.test(line)) return buildSignal(line, null);
+  // Codex runs with `--json`; its ordinary progress and command output are untrusted
+  // JSONL item events. Do not scan plain stderr: pre-JSON Codex printed the entire agent
+  // transcript there, which let repository fixtures manufacture provider cooldowns.
   return null;
 }
 
@@ -433,6 +499,8 @@ export interface CapacityResolution {
     authoritative: boolean;
     detectedAt: number;
     reportedResetLabel: string | null;
+    source?: ProviderCapacitySignalSource;
+    stream?: "stdout" | "stderr";
     /** Bounded, UNREDACTED excerpt — the caller must redact before persisting. */
     excerpt: string;
   };
@@ -462,6 +530,8 @@ export function resolveCapacitySuppression(
     authoritative: decision.authoritative,
     detectedAt: nowMs,
     reportedResetLabel: decision.resetLabel,
+    ...(signal.source ? { source: signal.source } : {}),
+    ...(signal.stream ? { stream: signal.stream } : {}),
     excerpt: signal.excerpt,
   };
 

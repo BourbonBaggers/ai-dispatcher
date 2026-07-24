@@ -530,6 +530,27 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
     };
   }
 
+  // ── Recover a ready PR that autoship did not finish ──
+  // With autoship configured, `pr_ready` is not a terminal handoff: it is an intermediate
+  // artifact state that must converge to shipped/parked/recovery. Older code could strand
+  // it after reconciling a provider-capacity exit because autoship still demanded exit 0.
+  // Re-evaluate it before fresh work; without autoship, pr_ready remains the intended
+  // terminal human handoff and is left alone.
+  const ready = config.autoshipCmd ? store.prReadyRuns()[0] : undefined;
+  if (ready) {
+    if (config.dryRun) {
+      return {
+        started: null,
+        message: `[dry-run] would resume autoship for ready issue #${ready.issueNumber} (PR #${ready.prNumber ?? "?"}).`,
+      };
+    }
+    await recheckReadyRun(deps, ready);
+    return {
+      started: store.getRun(ready.id),
+      message: `Resumed autoship for ready issue #${ready.issueNumber}.`,
+    };
+  }
+
   // ── Recheck parked (CI-pending) work ──
   // A parked run holds its issue's claim without any agent process running, so it is
   // checked before fresh work for the same reason resumables are: leaving it parked
@@ -1060,7 +1081,7 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
   }
 
   try {
-    if (run.exitCode === 0 && run.prNumber !== null) {
+    if ((run.exitCode === 0 || run.status === "pr_ready") && run.prNumber !== null) {
       recordRunPhase(deps, run, "autoshipping", "Evaluating autoship readiness.");
     }
     const outcome = await autoshipRun(
@@ -1206,6 +1227,17 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
 export async function recheckParkedRun(deps: DispatcherDeps, run: RunRecord): Promise<void> {
   deps.logger.info("rechecking parked run's CI", { runId: run.id, issue: run.issueNumber });
   recordRunPhase(deps, run, "waiting_ci", "Rechecking parked PR checks.");
+  await evaluateAutoship(deps, run);
+}
+
+/** Re-enters autoship for a durable `pr_ready` claim without relaunching its provider. */
+export async function recheckReadyRun(deps: DispatcherDeps, run: RunRecord): Promise<void> {
+  deps.logger.info("ready PR retained by autoship — resuming delivery", {
+    runId: run.id,
+    issue: run.issueNumber,
+    pr: run.prNumber ?? undefined,
+  });
+  recordRunPhase(deps, run, "autoshipping", "Resuming autoship for ready PR.");
   await evaluateAutoship(deps, run);
 }
 
