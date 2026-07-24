@@ -167,8 +167,9 @@ optional effort authoritative for the initial launch.
   CI) is reconciled to `pr_ready` rather than stranded behind a cooldown that no longer
   matters for that issue — but the suppression itself is still recorded, since it can
   still block new launches on that provider. That reconciled `pr_ready` state is valid
-  autoship evidence despite the non-zero provider exit, and a restart must re-enter
-  autoship for any retained `pr_ready` claim when autoship is configured.
+  autoship evidence despite the non-zero provider exit. If a fresh CI read parks it as
+  `ci_pending`, that state retains the same artifact trust across later scans. A restart
+  must re-enter autoship for either retained state when autoship is configured.
 - Capture uncommitted work only on `exit==0 && commitsAhead==0 && dirty`; a timeout/crash
   may have left the tree half-written.
 - A resumable run keeps both `agent-working` and its durable issue claim.
