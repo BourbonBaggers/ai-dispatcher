@@ -142,7 +142,7 @@ export const CLAIMING_STATUSES = [
  *                      and the linked issue closed.
  *   - "pr_ready"      Clean agent exit with a PR and green CI at handoff. If autoship is
  *                      configured it immediately re-gates and ships; otherwise this is
- *                      the honest terminal draft-PR handoff and retains the issue claim.
+ *                      the honest terminal ready-PR handoff and retains the issue claim.
  *   - "ci_pending"     Agent finished, PR open, CI has not resolved. Parked: the claim
  *                      is held, and the next scan re-checks CI ONLY (no agent relaunch).
  *   - "ci_failed"      CI is definitively red. Drives the repair -> frontier -> exhausted

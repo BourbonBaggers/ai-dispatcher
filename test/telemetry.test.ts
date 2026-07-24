@@ -63,9 +63,9 @@ test("aggregateIssue folds attempts and stays honest about token provenance", ()
 
 test("aggregateIssue: a PR alone is not success — merge + prod are required", () => {
   const attempts = [attempt({ terminalStatus: "pr_ready", prCreated: true })];
-  // Draft PR only: not success.
+  // Ready/open PR only: not success.
   assert.equal(aggregateIssue(1, attempts).success, false);
-  assert.equal(aggregateIssue(1, attempts).prStatus, "draft");
+  assert.equal(aggregateIssue(1, attempts).prStatus, "open");
   // Merged + deployed, no repair/regression: success.
   const done = aggregateIssue(1, attempts, {
     prStatus: "merged",
@@ -74,6 +74,13 @@ test("aggregateIssue: a PR alone is not success — merge + prod are required", 
   });
   assert.equal(done.success, true);
   assert.equal(done.finalCompletingModel, "claude-sonnet-5");
+  const frontierCompleted = aggregateIssue(1, attempts, {
+    prStatus: "merged",
+    mergeStatus: "merged",
+    productionStatus: "deployed",
+    finalCompletingModel: "claude-opus-4-8",
+  });
+  assert.equal(frontierCompleted.finalCompletingModel, "claude-opus-4-8");
   // Merged + deployed but a human had to repair it: NOT success.
   const repaired = aggregateIssue(1, attempts, {
     mergeStatus: "merged",

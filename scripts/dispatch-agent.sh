@@ -18,12 +18,19 @@
 #   DISPATCHER_WORKTREE_DIR parent dir for per-run checkouts (required)
 #   DISPATCHER_ENV_SOURCE_DIR  optional checkout whose .env seeds each run checkout
 #
-# Protocol back to the runner — line-oriented, on stdout:
+# Protocol back to the runner — line-oriented, on dedicated fd 3:
 #   ::pid:: <pid>                  the process group to kill / probe for liveness
 #   ::event:: <ISO8601> <message>  lifecycle milestones for the run timeline
 #   ::result:: exit=<n> pr=<url> commit=<sha> plan=<path> commits=<n> ci=<state>
 # Everything else on stdout/stderr is raw agent output, streamed as it happens.
 set -euo pipefail
+
+# The Node supervisor gives the launcher a dedicated control pipe on fd 3. Keep a
+# stdout fallback for direct diagnostic invocation, but close fd 3 in the provider
+# process below so agent output can never forge ::pid::/::result:: records.
+if ! { true >&3; } 2>/dev/null; then
+  exec 3>&1
+fi
 
 # nvm puts node/npm/codex/claude on PATH only for login shells.
 export PATH="$HOME/bin:$PATH"
@@ -111,12 +118,12 @@ ISSUE_URL="https://github.com/${REPO_SLUG}/issues/${ISSUE}"
 issue_state="$(gh issue view "$ISSUE" --repo "$REPO_SLUG" --json state --jq '.state' 2>/dev/null || echo UNKNOWN)"
 if [[ "$issue_state" == "CLOSED" ]]; then
   printf '::event:: %s issue #%s is already closed — refusing to start work on it\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ISSUE"
-  printf '::result:: exit=0 pr= commit= plan= commits=0 ci=none\n'
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ISSUE" >&3
+  printf '::result:: exit=0 pr= commit= plan= commits=0 ci=none disposition=abandoned\n' >&3
   exit 0
 fi
 
-event() { printf '::event:: %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+event() { printf '::event:: %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&3; }
 
 # Safety net for the top failure mode: an agent that finishes but never commits. Kept in
 # its own file so the decision logic is unit-testable without launching a real agent.
@@ -126,7 +133,7 @@ source "$SCRIPT_DIR/lib/dispatch-capture.sh"
 
 # Own the whole process group so a timeout or a dropped connection takes the agent (and
 # everything it spawned) down with us — no orphaned agents on the box.
-printf '::pid:: %s\n' "$$"
+printf '::pid:: %s\n' "$$" >&3
 
 AGENT_PID=""
 CHECKPOINT_PID=""
@@ -296,11 +303,8 @@ When the implementation is complete:
   the instant the PR merges -- before the deploy that follows even starts, let alone
   passes its health check. Merge is not shipped. Whatever ships this PR closes the
   issue itself, only after a verified deploy.
-- The ONLY exception: if the change deletes or truncates production data, removes or
-  disables billing/payment infrastructure, or disables/weakens a security control, open
-  it as a DRAFT instead (--draft) with a top-of-body line naming exactly which of those
-  three applies and what a human needs to check. Nothing else qualifies -- "complex",
-  "large diff", or "not 100% sure" are not destructive and must ship ready for review.
+- There is no destructive-change or human-review draft gate. Open every PR ready for
+  review; autoship relies on CI, backups, health verification, and rollback.
 
 BEFORE YOU FINISH: printing or describing a diff is NOT committing. Run \`git status\`
 as your final check; commit anything uncommitted with git (and push it), or it is
@@ -426,7 +430,7 @@ if [[ "$AGENT" == "claude" ]]; then
       --permission-mode bypassPermissions \
       --output-format stream-json \
       --verbose \
-    < .dispatcher-prompt.md &
+    < .dispatcher-prompt.md 3>&- &
 else
   # workspace-write keeps the agent's writes inside this checkout; network access is
   # switched back on because it must be able to fetch, push, and open a PR.
@@ -438,7 +442,7 @@ else
       -c sandbox_workspace_write.network_access=true \
       -c model_reasoning_effort="$EFFORT" \
       - \
-    < .dispatcher-prompt.md &
+    < .dispatcher-prompt.md 3>&- &
 fi
 AGENT_PID=$!
 wait "$AGENT_PID"
@@ -510,18 +514,47 @@ if [[ "$COMMITS_AHEAD" -eq 0 ]] && capture_uncommitted_work "$ISSUE" "$EXIT_CODE
   COMMITS_AHEAD="$LOCAL_COMMITS"
 fi
 
-# Push local work ONLY if we have a commit here and nothing is on the remote yet.
-# (An agent is free to do its work somewhere other than this checkout; the safety net
-# above also produces a local commit that must reach the remote to be PR'd.)
-if [[ "$LOCAL_COMMITS" -gt 0 ]] && ! git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
-  git push --quiet -u origin "$BRANCH" 2>/dev/null && event "pushed $BRANCH"
+# A clean exit may still leave milestone work after an earlier commit. Shipping the
+# existing PR in that state silently drops the dirty tail. Preserve it and turn this
+# launch into a repairable failure so the assigned model comes back to commit/push it.
+if [[ "$EXIT_CODE" -eq 0 && "$COMMITS_AHEAD" -gt 0 && -n "$(git status --porcelain 2>/dev/null)" ]]; then
+  event "UNPUBLISHED WORK: clean exit left dirty files after earlier commits — repairing before ship"
+  EXIT_CODE=75
+fi
+
+# Publish local repair commits even when the remote branch already exists. The old
+# "push only if branch absent" rule stranded perfectly good CI/merge repairs locally
+# while autoship kept evaluating the stale remote PR.
+REMOTE_HEAD=""
+if git fetch --quiet origin "$BRANCH" 2>/dev/null; then
+  REMOTE_HEAD="$(git rev-parse FETCH_HEAD 2>/dev/null || true)"
+fi
+if [[ "$LOCAL_COMMITS" -gt 0 ]]; then
+  if [[ -z "$REMOTE_HEAD" ]]; then
+    if git push --quiet -u origin "$BRANCH" 2>/dev/null; then
+      event "pushed $BRANCH"
+    else
+      event "UNPUBLISHED WORK: failed to create remote branch $BRANCH"
+      EXIT_CODE=75
+    fi
+  elif git merge-base --is-ancestor "$REMOTE_HEAD" HEAD && [[ "$(git rev-parse HEAD)" != "$REMOTE_HEAD" ]]; then
+    if git push --quiet origin "HEAD:$BRANCH" 2>/dev/null; then
+      event "pushed local repair commits to existing $BRANCH"
+    else
+      event "UNPUBLISHED WORK: failed to update existing remote branch $BRANCH"
+      EXIT_CODE=75
+    fi
+  elif ! git merge-base --is-ancestor HEAD "$REMOTE_HEAD"; then
+    event "UNPUBLISHED WORK: local and remote $BRANCH diverged — agent repair required"
+    EXIT_CODE=75
+  fi
 fi
 
 if [[ "$LOCAL_COMMITS" -eq 0 && "$REMOTE_COMMITS" -gt 0 ]]; then
   event "agent committed outside this checkout — $REMOTE_COMMITS commit(s) found on origin/$BRANCH"
 fi
 
-PR_URL="$(gh pr list --repo "$REPO_SLUG" --head "$BRANCH" --json url --jq '.[0].url // empty' 2>/dev/null || true)"
+PR_URL="$(gh pr list --repo "$REPO_SLUG" --head "$BRANCH" --state all --json url --jq '.[0].url // empty' 2>/dev/null || true)"
 
 if [[ -n "$PR_URL" ]]; then
   event "pull request: $PR_URL"
@@ -549,13 +582,24 @@ if [[ "$MAIN_BEFORE" != "unknown" && "$MAIN_AFTER" != "$MAIN_BEFORE" ]]; then
   event "ALARM: origin/main moved during this run ($MAIN_BEFORE -> $MAIN_AFTER). If this agent pushed to main, revert it."
 fi
 
-# Did the agent close its own issue? Closure follows a human's merge, not the agent.
+# A merged PR is still a delivery handoff even if its branch no longer has commits ahead
+# of main. Autoship must pick it up and verify/deploy it rather than burn the model ladder
+# claiming the agent produced zero work.
 if [[ -n "$PR_URL" ]]; then
   pr_state="$(gh pr view "$PR_URL" --json state --jq '.state' 2>/dev/null || echo UNKNOWN)"
+  if [[ "$pr_state" == "MERGED" && "$COMMITS_AHEAD" -eq 0 ]]; then
+    COMMITS_AHEAD=1
+    event "PR already merged — handing its merge to autoship for production verification"
+  fi
+fi
+
+# Did the agent close its own issue? Any closure during the launcher run is premature:
+# only the later autoship verifier has enough production evidence to close it.
+if [[ -n "$PR_URL" ]]; then
   issue_state="$(gh issue view "$ISSUE" --repo "$REPO_SLUG" --json state --jq '.state' 2>/dev/null || echo UNKNOWN)"
-  if [[ "$issue_state" == "CLOSED" && "$pr_state" != "MERGED" ]]; then
+  if [[ "$issue_state" == "CLOSED" ]]; then
     gh issue reopen "$ISSUE" --repo "$REPO_SLUG" >/dev/null 2>&1 \
-      && event "BOUNDARY: the agent closed issue #${ISSUE} while its PR was unmerged — reopened it"
+      && event "BOUNDARY: issue #${ISSUE} closed before verified production — reopened it"
   fi
 fi
 
@@ -596,7 +640,7 @@ if [[ -n "$PR_URL" ]]; then
   esac
 fi
 
-printf '::result:: exit=%s pr=%s commit=%s plan=%s commits=%s ci=%s\n' \
-  "$EXIT_CODE" "${PR_URL:-}" "${COMMIT:-}" "${PLAN:-}" "${COMMITS_AHEAD:-0}" "${CI_STATE:-none}"
+printf '::result:: exit=%s pr=%s commit=%s plan=%s commits=%s ci=%s disposition=normal\n' \
+  "$EXIT_CODE" "${PR_URL:-}" "${COMMIT:-}" "${PLAN:-}" "${COMMITS_AHEAD:-0}" "${CI_STATE:-none}" >&3
 
 exit "$EXIT_CODE"

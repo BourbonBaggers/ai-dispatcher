@@ -88,6 +88,10 @@ export function closeIssueArgs(slug: string, issue: number): string[] {
   return ["issue", "close", String(issue), "--repo", slug];
 }
 
+export function reopenIssueArgs(slug: string, issue: number): string[] {
+  return ["issue", "reopen", String(issue), "--repo", slug];
+}
+
 export function prMergeInfoArgs(slug: string, pr: number): string[] {
   return [
     "pr",
@@ -188,6 +192,11 @@ export class GithubClient {
    */
   async closeIssue(issue: number): Promise<boolean> {
     return (await this.exec("gh", closeIssueArgs(this.repo.slug, issue))).ok;
+  }
+
+  /** Restores an issue that closed before merged code was verified healthy in production. */
+  async reopenIssue(issue: number): Promise<boolean> {
+    return (await this.exec("gh", reopenIssueArgs(this.repo.slug, issue))).ok;
   }
 
   /**

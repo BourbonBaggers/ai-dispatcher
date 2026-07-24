@@ -141,6 +141,7 @@ export interface ControlResult {
   plan: string;
   commits: number;
   ci: CiState;
+  disposition: "normal" | "abandoned";
 }
 
 export interface ParsedControlLine {
@@ -180,6 +181,7 @@ export function parseControlLine(line: string): ParsedControlLine | null {
         ci: (CI_STATES as string[]).includes(fields.get("ci") ?? "")
           ? (fields.get("ci") as CiState)
           : "none",
+        disposition: fields.get("disposition") === "abandoned" ? "abandoned" : "normal",
       },
     };
   }
