@@ -2,8 +2,9 @@
 
 Standalone AI issue dispatcher. Polls a GitHub repository, claims one open issue carrying
 an `agent:*` + `model:*` label pair, and runs Codex or Claude Code against it in an
-isolated checkout — serially, with retries, provider cooldowns, durable file-backed
-state, and a **draft pull request** as the output.
+isolated checkout — serially, with retries, provider cooldowns, and durable file-backed
+state. Without autoship its handoff is a draft pull request. With autoship configured,
+the output is a merged PR, verified production deployment, and closed issue.
 
 It is extracted from the AI Issue Dispatcher that lived inside the
 `BourbonBaggers/internal-tools` monorepo (issues #188/#232/#234/#245/#249/#281/#307). The
@@ -14,6 +15,9 @@ repository is now an explicit, required argument with **no hard-coded fallback**
 > **This repository is the dispatcher's only home.** The extraction is complete — the
 > embedded dispatcher has been removed from `internal-tools` along with its Postgres
 > tables. Do not copy this service back into that monorepo; see AGENTS.md.
+
+> **Agent context is one file.** `AGENTS.md` is canonical and `CLAUDE.md` is a symlink
+> to it. Do not replace the symlink with a divergent Claude-only copy.
 
 ## What it does
 
@@ -35,6 +39,12 @@ On each scan (when no run is active):
 5. **Recover or finalize.** Agent/CI/merge/deploy failures retry with the assigned model,
    then get one Opus 4.8 attempt. Only verified production success or exhausted frontier
    failure finalizes the delivery; progress attempts do not page the operator.
+
+For coding, CI, merge, and deploy, `autoship-held` is valid only with durable evidence
+that the assigned-model repair budget and the automatic frontier attempt both failed.
+Legacy holds without that proof clear and resume themselves. Markdown conflicts are not
+a human gate: deterministic generated-file repair handles safe generated-only conflicts,
+and all other conflicts enter the agent repair ladder.
 
 The dispatcher is **strictly serial**: only one agent runs at a time, guaranteed by a
 single-instance lock plus the fact that each run is driven to completion before the loop
@@ -66,11 +76,11 @@ label simply fails to resolve and the issue is skipped with a visible reason.
 
 ## Capacity-aware routing & evidence (#319)
 
-The dispatcher obeys the `model:*` label on each issue, but that label is chosen by a
-deterministic, data-driven routing rubric that routes to the **minimum viable model**,
-prefers otherwise-idle (dormant) subscription capacity, protects the frontier reserve, and
-permits cost-driven retries/handoffs. The full decision table is in
-[`ROUTING.md`](ROUTING.md) — it is the policy an issue author applies when labelling work.
+The dispatcher validates and obeys the `model:*` label on each issue; it does not choose
+or rewrite that label at dispatch time. Issue authors and planning automation use the
+deterministic, data-driven rubric to choose the **minimum viable model**, prefer dormant
+subscription capacity, and protect the frontier reserve. The full decision table and its
+pure decision-support functions are described in [`ROUTING.md`](ROUTING.md).
 
 Every terminal run records an **attempt** into `telemetry.json` (alongside dispatcher
 state); attempts fold into per-issue records. The model is honest about what it can't
@@ -111,10 +121,24 @@ environment form; every variable is documented there.
 | `--interval <seconds>`     | `DISPATCHER_POLL_INTERVAL_SECONDS`  | `900`                      | poll interval                                                                                  |
 | `--max-minutes <min>`      | `DISPATCHER_MAX_RUNTIME_MINUTES`    | `90`                       | per-run wall-clock budget                                                                      |
 | `--state-dir <path>`       | `DISPATCHER_STATE_DIR`              | `./state`                  | durable state directory                                                                        |
+| `--autoship-deploy-dir`    | `DISPATCHER_AUTOSHIP_DEPLOYMENT_DIR` | state/repo-specific      | dedicated checkout used only for merge/deploy/rollback                                         |
+| `--autoship-timeout-minutes` | `DISPATCHER_AUTOSHIP_TIMEOUT_MINUTES` | `120`                  | complete merge/deploy/verify/rollback command ceiling                                           |
 | `--author-auth <mode>`     | `DISPATCHER_ISSUE_AUTHOR_AUTH_MODE` | `author-allowlist`         | `author-allowlist` requires the original issue author to be trusted; `none` allows all authors |
 | `--trusted-authors <list>` | `DISPATCHER_TRUSTED_ISSUE_AUTHORS`  | _(required for allowlist)_ | comma-separated GitHub usernames, matched case-insensitively                                   |
 | `--log-level <level>`      | `DISPATCHER_LOG_LEVEL`              | `info`                     | `debug\|info\|warn\|error`                                                                     |
 | —                          | `NTFY_URL` / `NTFY_TOPIC`           | _(optional)_               | ntfy push notifications; disabled if unset                                                     |
+
+Autoship and recovery also use environment-only configuration:
+
+| Env | Default | Meaning |
+| --- | --- | --- |
+| `DISPATCHER_AUTOSHIP_CMD` | disabled | repository-specific merge/deploy/health/rollback command |
+| `DISPATCHER_GENERATED_CONFLICT_ALLOWLIST` | `docs/memory.md,docs/researcher.md` | exact generated paths eligible for deterministic conflict recovery |
+| `DISPATCHER_GENERATED_CONFLICT_REGEN_CMD` | disabled | target-repository command to regenerate allowlisted files |
+| `DISPATCHER_GENERATED_CONFLICT_MAX_ATTEMPTS` | `1` | deterministic generated-conflict attempts per pass |
+| `DISPATCHER_GENERATED_CONFLICT_CI_WAIT_SECONDS` | `900` | CI wait after generated-conflict repair |
+| `DISPATCHER_CI_SELF_HEAL_MAX_ATTEMPTS` | `2` | assigned-model repairs for each of agent/CI/merge/deploy |
+| `DISPATCHER_CI_ESCALATION_MODEL` | `claude-opus-4-8` | one final automatic model attempt after repairs |
 
 `author-allowlist` fails closed when trusted authors are missing or malformed. Untrusted
 issues are left open, marked `needs-input`, and commented once. The check uses only the
@@ -190,6 +214,8 @@ Recognized states are `merge_succeeded_deployment_not_attempted`,
 `deployment_failed_rollback_succeeded`, `deployment_failed_rollback_failed`,
 `deployment_state_unknown`, and `shipped`. Without this line, non-zero exits are conservatively
 reported as unknown production state and sent through the automated deploy-repair ladder.
+If production already contains an older requested merge, the command must report it
+delivered without deploying that older SHA over newer production.
 
 Autoship commands have a 120-minute default ceiling
 (`DISPATCHER_AUTOSHIP_TIMEOUT_MINUTES`). Timeout terminates the entire deploy process
@@ -230,7 +256,10 @@ to the checkout the systemd unit runs *from* (e.g. `~/ai-dispatcher`) so a resta
 the merged code. `self-ship.sh` re-gates and merges, then hands the restart to a **detached**
 transient unit (outside the dispatcher's own cgroup, so the restart does not kill the ship
 command mid-flight) which verifies health and **rolls back** to the previous commit if the
-new code does not come up. See [`.env.example`](.env.example) for the exact variables.
+new code does not come up. The detached unit keeps restarting last-known-good until it is
+healthy; it does not page the operator from this intermediate failure. The restarted
+dispatcher then owns the normal deploy-repair → frontier → exhausted ladder. See
+[`.env.example`](.env.example) for the exact variables.
 
 ## Run outcome semantics
 
@@ -243,13 +272,17 @@ CI was never the problem — the claim was released too early.
 
 The terminal statuses:
 
+- **`pr_ready`** — the agent exited cleanly with a PR and green CI at handoff. This is
+  the terminal draft-PR output when autoship is disabled; with autoship configured it is
+  immediately re-gated and cannot become `shipped` until production is verified. It
+  retains the issue claim (but not the `agent-working` label), preventing redispatch.
 - **`shipped`** — the only TRUE success: the PR is merged, production health passed,
   and the linked issue was closed.
 - **`ci_pending`** — the agent finished and opened a PR, but CI had not resolved yet.
   **Parked**: the claim stays, and the next scan re-checks CI ONLY — it does not
   relaunch the agent to wait on a check that is already running.
 - **`ci_failed`** — a ladder-in-progress marker (CI is definitively red, or a deploy
-  failure is being escalated). Drives the self-heal → escalate → held ladder described
+  failure is being escalated). Drives the repair → frontier → exhausted ladder described
   above and keeps the issue claim across the relaunch. Always resolved further within the
   same finalize pass; a run should not be found sitting in this status across a scan
   boundary in normal operation.
@@ -273,11 +306,10 @@ This is what the #366 postmortem calls "merge is not shipped": an issue auto-clo
 merge read as done while the deploy was still mid-build and prod was still on the
 previous release.
 
-Only `evaluateAutoship` (dispatcher.ts) ever writes `shipped` or `held`, and it is the
-only place `ci_pending`/`ci_failed` transition based on a fresh CI read — called both
-right after a fresh/resumed/self-healed/escalated run finishes and again on every parked
-recheck, so a run's status is always a live re-evaluation, never a stale snapshot from
-whenever the agent process happened to exit.
+Only the autoship evaluation/finalization path in `dispatcher.ts` writes verified
+`shipped` or exhausted `held`; `exhaustRun` is the single hold/page function. Fresh CI
+reads transition `ci_pending`/`ci_failed` both right after a
+fresh/resumed/self-healed/escalated run and on every parked recheck.
 
 ## State model
 

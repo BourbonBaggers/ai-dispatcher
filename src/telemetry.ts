@@ -11,8 +11,8 @@
  *      usage can set `reported` without any schema change.
  *   2. Success is not a clean CLI exit or a PR. An issue succeeds only when it is merged
  *      AND reaches production AND needs no material human repair (PRD "Definition of
- *      success"). The dispatcher ends at a draft PR and cannot observe merge/prod, so
- *      those fields stay conservatively unknown until something records them.
+ *      success"). Autoship can observe and verify delivery, but attempt records and
+ *      lifecycle overlays remain separate; absent overlay facts stay conservative.
  *
  * The aggregation is pure and unit-tested directly; the store mirrors `state.ts` — an
  * atomic JSON file (temp-file + rename), zero runtime dependencies.
@@ -71,7 +71,7 @@ export interface AttemptRecord {
   humanInterventionRequired: boolean;
   frontierModelUsed: boolean;
   manualOverride: boolean;
-  /** Dispatcher terminal status (shipped/ci_pending/ci_failed/held/failed/timed_out/interrupted/token_exhausted). */
+  /** Dispatcher terminal status (pr_ready/shipped/ci_pending/ci_failed/held/failed/timed_out/interrupted/token_exhausted). */
   terminalStatus: string;
 }
 
@@ -171,6 +171,7 @@ export function aggregateIssue(
   const tokensByProvider: Record<string, TokenTotals> = {};
   let totalActiveDurationMs = 0;
   let finalCompletingModel: string | null = null;
+  let lastPrModel: string | null = null;
   let manualOverrideInvolved = false;
 
   for (const a of mine) {
@@ -180,6 +181,7 @@ export function aggregateIssue(
     tokensByProvider[a.provider] = foldTokens(tokensByProvider[a.provider], a.tokens);
     totalActiveDurationMs += a.activeDurationMs ?? 0;
     if (a.manualOverride) manualOverrideInvolved = true;
+    if (a.prCreated) lastPrModel = model;
     // The completing model is the last attempt that reached a PR with a clean terminal state.
     if (a.terminalStatus === "shipped" && a.prCreated) finalCompletingModel = model;
   }
@@ -195,6 +197,7 @@ export function aggregateIssue(
     productionStatus === "deployed" &&
     !regressionDetected &&
     !humanRepairRequired;
+  if (success && finalCompletingModel === null) finalCompletingModel = lastPrModel;
 
   return {
     issueNumber,

@@ -109,6 +109,7 @@ export interface RunSignals {
 }
 
 export type TerminalStatus =
+  | "pr_ready"
   | "shipped"
   | "ci_pending"
   | "ci_failed"
@@ -133,12 +134,9 @@ export type RunOutcome =
  *   5. clean exit, CI red -> `ci_failed` (drives the self-heal/escalate/held ladder)
  *   6. clean exit, CI pending -> `ci_pending` (parked; the NEXT scan re-checks CI only,
  *      it does not relaunch the agent)
- *   7. clean exit, CI pass -> `shipped`, but PROVISIONALLY: this is the agent's own
- *      observation at hand-off, not authoritative. `evaluateAutoship` (dispatcher.ts)
- *      re-checks CI itself moments later and can downgrade this to `ci_pending` /
- *      `ci_failed` / `held` if the agent's snapshot was stale or wrong, or confirm it
- *      once the PR is ACTUALLY merged and deployed. Never trust an agent's self-report
- *      of success (see autoship.ts) -- this label is a hand-off, not a verdict.
+ *   7. clean exit, CI pass -> `pr_ready`: an honest hand-off, not production success.
+ *      `evaluateAutoship` re-checks CI and may park, repair, exhaust, or persist
+ *      `shipped` only after merge + deploy + health + issue closure.
  *   8. non-zero exit (failed)
  *
  * None of statuses 5-7 are ever "succeeded" outright: that word used to cover all three
@@ -242,10 +240,7 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
   }
 
   if (exitCode === 0) {
-    // Provisional: the agent's own hand-off observation, not a verdict. evaluateAutoship
-    // re-confirms CI and only calls this truly `shipped` once the PR is merged and
-    // deployed (or downgrades it if the agent's snapshot was stale/wrong).
-    return { status: "shipped", exitCode: 0, summary: null };
+    return { status: "pr_ready", exitCode: 0, summary: null };
   }
 
   return { status: "failed", exitCode, summary: `The agent exited with code ${exitCode}.` };
@@ -255,7 +250,7 @@ export function requirePrForDelivery(
   outcome: RunOutcome,
   prNumber: number | null,
 ): RunOutcome {
-  if (outcome.status !== "shipped" || prNumber !== null) return outcome;
+  if (outcome.status !== "pr_ready" || prNumber !== null) return outcome;
   return {
     status: "failed",
     exitCode: outcome.exitCode,

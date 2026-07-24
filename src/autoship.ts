@@ -10,7 +10,7 @@
  * internal-tools incident that took production down for 40 hours:
  *
  *   1. Only a clean agent exit (exitCode 0) that opened a PR is a candidate --
- *      regardless of which of shipped/ci_pending/ci_failed status it currently wears,
+ *      regardless of which of pr_ready/ci_pending/ci_failed status it currently wears,
  *      since this function is the sole authority that decides among those. Nothing
  *      else (an agent that gave up or crashed) ships.
  *   2. Re-confirm CI is green NOW, from `gh pr checks` exit status — never a verdict
@@ -26,8 +26,8 @@
  * final attempt returns `exhausted`; the dispatcher owns the sole hold/page path.
  *
  * The ship command is trusted to be honest about success because it, not this module,
- * can see production health. This module's job is to make sure it is only ever called on
- * a green, non-destructive PR.
+ * can see production health. This module re-gates CI but deliberately does not classify
+ * a green change as destructive or require human review; backup and rollback own risk.
  */
 
 import { classifyShipResult } from "./autoship-deployment.ts";
@@ -60,7 +60,7 @@ export interface AutoshipGithub {
   prDiff(pr: number): Promise<string | null>;
   comment(issue: number, body: string): Promise<boolean>;
   addLabel(issue: number, label: string): Promise<boolean>;
-  /** The issue's current labels -- used only to check for HUMAN_REVIEW_REQUIRED_LABEL. */
+  /** The issue's current labels; retained as part of the GitHub surface for diagnostics. */
   issueLabels(issue: number): Promise<string[]>;
   /** `gh pr ready <pr>`: promotes a draft PR to ready for review. */
   markPrReady(pr: number): Promise<boolean>;
@@ -93,8 +93,7 @@ export interface AutoshipDeps {
   /** Assigned-model repair attempts per owned phase before frontier escalation. */
   ciSelfHealMaxAttempts: number;
   /**
-   * CLI model for the ONE escalation attempt after ciSelfHealMaxAttempts is exhausted and
-   * Final stronger-model attempt after ordinary repairs are spent.
+   * CLI model for the one final automatic attempt after ordinary repairs are spent.
    */
   ciEscalationModel: string;
   /**
@@ -127,7 +126,7 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   if (!deps.autoshipCmd) {
     return { action: "skipped", reason: "autoship not configured" };
   }
-  // Candidacy is about what the run PRODUCED, not which of shipped/ci_pending/ci_failed
+  // Candidacy is about what the run PRODUCED, not which of pr_ready/ci_pending/ci_failed
   // status label it currently wears -- this function is the SOLE authority that decides
   // among those, called both right after a fresh run and again on every parked recheck
   // (dispatcher.ts's evaluateAutoship), so it must not gate on a status it might itself

@@ -186,6 +186,22 @@ test("heldRuns returns only held runs, and a held run still holds its claim (#10
   }
 });
 
+test("pr_ready retains its issue claim without becoming resumable or parked", () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run = store.createRun(claimData(7));
+    store.updateRun(run.id, { status: "pr_ready" });
+
+    assert.equal(store.claimingRunsByIssue().get(7), "pr_ready");
+    assert.deepEqual(store.resumableRuns(), []);
+    assert.deepEqual(store.parkedRuns(), []);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a corrupt state file is preserved and replaced with empty state", () => {
   const dir = tmp();
   try {

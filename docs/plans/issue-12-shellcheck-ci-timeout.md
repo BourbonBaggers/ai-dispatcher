@@ -1,9 +1,12 @@
 # Issue 12: Prevent ShellCheck PR checks from hanging indefinitely
 
+> Historical completed plan. Current CI behavior is implemented by
+> `scripts/shellcheck-ci.sh`; this file is evidence, not an instruction list.
+
 The referenced `ai-dispatcher` and `internal-tools` runs both eventually completed. Their
 GitHub metadata shows the shared delay was before the shell-checking jobs started running:
-once scheduled, the ShellCheck steps completed in seconds. This repo still needs bounded,
-phase-visible ShellCheck CI so the next incident can distinguish runner queueing,
+once scheduled, the ShellCheck steps completed in seconds. The completed work added
+bounded, phase-visible ShellCheck CI so later incidents can distinguish runner queueing,
 installation, discovery, and analysis without guesswork.
 
 ## [DONE] Milestone 1: Document the observed root cause

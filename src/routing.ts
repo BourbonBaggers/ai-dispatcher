@@ -352,7 +352,7 @@ export interface NextAttemptPlan {
   /** The model to run next, or null when holding for a human / nothing available. */
   model: ModelEntry | null;
   escalationReason: string;
-  /** Frontier capacity increase — the operator must approve before it is consumed. */
+  /** Compatibility field. Automatic recovery always leaves this false. */
   requiresHumanApproval: boolean;
   rationale: string;
 }

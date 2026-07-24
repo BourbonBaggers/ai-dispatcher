@@ -1,10 +1,10 @@
 # Routing rubric — how to label a dispatchable issue
 
-This is the routing policy the AI dispatcher enforces (#319). It is the rubric an issue
-author (human or planning agent) applies when creating an issue, and it is implemented
-as data + pure functions in `src/models.ts`, `src/capacity.ts`, and `src/routing.ts`. Keep
-this document and that code in sync — the code is the source of truth; this is its
-decision table.
+This is the routing rubric for choosing an issue’s `model:*` label (#319). An issue author
+(human or planning agent) applies it, and pure decision-support functions implement it in
+`src/models.ts`, `src/capacity.ts`, and `src/routing.ts`. The live dispatcher does not
+replace or mutate the chosen model label; it validates and obeys it. Keep this document
+and that code in sync — the code is the source of truth.
 
 ## The one objective
 
@@ -72,23 +72,25 @@ Current live lanes:
 | complex | `model:gpt-5.5` | `gpt-5.5` | codex-subscription | no |
 | frontier reserve | `model:claude-opus-4.8` | `claude-opus-4-8` | claude-subscription | **yes** |
 
-Selected models use an **explicit, pinned identifier**, never a floating alias, so a
-provider silently upgrading an alias cannot cause quality-over-cost drift.
+Selected models use the registry’s **explicit CLI identifier**, never an implicit
+dispatcher default. Provider identifiers are changed only in `src/models.ts`.
 
 ## Step 4 — Record the rationale (routing-rationale labels)
 
-The dispatcher applies these automatically; an issue author may add them to document a
-manual choice: `route:min-viable`, `route:dormant-capacity`, `route:frontier-justified`,
-`route:capacity-constrained`, `route:task-class-match`.
+The pure routing result emits these rationale values; an issue author or planning
+automation may add matching labels to preserve the decision:
+`route:min-viable`, `route:dormant-capacity`, `route:frontier-justified`,
+`route:capacity-constrained`, `route:task-class-match`. The dispatch loop itself does not
+rewrite issue routing labels.
 
 **Human overrides:** a model chosen by a human against the rubric must carry
 `route:human-override`. Overrides are recorded and analysed separately and are **excluded
 from the automatic learning dataset** so human preference never distorts the policy.
 
-## Retry / handoff policy
+## Planning retry / handoff policy
 
-Retries and handoffs are allowed when they lower expected *total* feature cost, not to
-reflexively escalate within one provider. By failure category:
+`planNextAttempt` provides cost-aware advice to planning/routing callers. It is not the
+live delivery-recovery state machine. Its advice by failure category is:
 
 | Failure category | Next attempt |
 | --- | --- |
@@ -100,6 +102,11 @@ reflexively escalate within one provider. By failure category:
 
 Escalation reaches the **frontier only as the last rung**, and that final attempt is
 automatic. Operator involvement begins only if the frontier attempt also fails.
+
+The live dispatcher’s delivery contract is intentionally simpler and stricter:
+independent `agent`, `ci`, `merge`, and `deploy` ledgers each run the configured number
+of assigned-model repairs, then one automatic configured frontier attempt, then durable
+exhaustion. Planning advice must never insert an operator gate into that runtime ladder.
 
 ## Priority is separate from routing
 
