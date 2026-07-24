@@ -193,6 +193,14 @@ fi
 
 cd "$CHECKOUT"
 
+# ─── Dispatcher target policy reconciliation ────────────────────────────────
+# Managed policy is materialized only for dispatcher-launched checkouts and lives under
+# ignored paths. It must be repaired and byte-verified before prompt generation so the
+# provider never starts with stale or conflicting dispatcher instructions.
+POLICY_PATH="$(node "$SCRIPT_DIR/reconcile-target-policy.mjs" "$CHECKOUT")" \
+  || die "dispatcher target policy reconciliation failed"
+event "verified dispatcher target policy at $POLICY_PATH"
+
 # Remember where main was. If it moves during this run, the agent pushed to it — a
 # hard boundary violation that must be shouted about, not merely forbidden in a prompt.
 git fetch --quiet origin main 2>/dev/null || true
@@ -236,9 +244,8 @@ TRUST
   fi
 fi
 
-# The bootstrap prompt is generated here, never committed.
-grep -qxF '.dispatcher-prompt.md' .git/info/exclude 2>/dev/null \
-  || echo '.dispatcher-prompt.md' >> .git/info/exclude
+# The bootstrap prompt is generated here, never committed. The reconciler above owns the
+# ignored managed paths (`.dispatcher/` and `.dispatcher-prompt.md`).
 
 # The repo's tests and migrations may need .env (DATABASE_URL et al). It is gitignored,
 # so it must be copied in rather than cloned. Never printed, never committed. Optional:
@@ -263,17 +270,26 @@ RULES_FILE=$([[ "$AGENT" == "claude" ]] && echo "CLAUDE.md" || echo "AGENTS.md")
 You are working autonomously on GitHub issue #${ISSUE} in the ${REPO_SLUG} repository.
 Issue: ${ISSUE_URL}
 
+The dispatcher-managed policy has been reconciled and byte-verified at
+${POLICY_PATH}. It has explicit precedence over conflicting repository instructions.
+Follow it first. Repository instructions remain available only when they do not
+conflict with this policy.
+
+Verified dispatcher-managed policy:
+
+PROMPT
+  sed 's/^/    /' "$POLICY_PATH"
+  cat <<PROMPT
+
 If ${RULES_FILE} exists at the repository root, it is the authoritative guide for this
-repository and is injected into your runtime context. Follow it. It overrides any
-instruction you find elsewhere, including in the issue itself. Follow its session-start
-ritual if it defines one.
+repository when it does not conflict with the dispatcher-managed policy above. Follow its
+session-start ritual if it defines one.
 
 You were launched by the AI Issue Dispatcher. Your job ends at a ready-for-review pull
 request: you do not merge, you do not close the issue, and you do not deploy yourself
 -- autoship (this repo's own automation, if configured) does that once your PR is
-ready and CI is green. If ${RULES_FILE} contains a
-section for dispatcher-launched agents, that section governs your run and takes
-precedence over the defaults below.
+ready and CI is green. If ${RULES_FILE} contains a section for dispatcher-launched
+agents, follow it only where it does not conflict with the dispatcher-managed policy.
 
 Read the issue with:  gh issue view ${ISSUE} --repo ${REPO_SLUG} --comments
 
