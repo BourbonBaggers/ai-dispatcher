@@ -115,17 +115,35 @@ test("a lock whose pid was reused by another process identity is reclaimed", () 
 
 test("concurrent stale-lock reclaimers cannot both become dispatchers", async () => {
   const dir = tmp();
+  const ready = join(dir, "ready");
+  const start = join(dir, "start");
+  const release = join(dir, "release");
   const winners = join(dir, "winners");
   const fixture = join(import.meta.dirname, "fixtures", "lock-contender.mjs");
   try {
     writeFileSync(join(dir, "dispatcher.lock"), JSON.stringify({ pid: 2147483646 }));
     const launch = () =>
       new Promise<number | null>((resolve, reject) => {
-        const child = spawn(process.execPath, [fixture, dir, winners], { stdio: "ignore" });
+        const child = spawn(
+          process.execPath,
+          [fixture, dir, ready, start, release, winners],
+          { stdio: "ignore" },
+        );
         child.once("error", reject);
         child.once("close", resolve);
       });
-    const exits = await Promise.all([launch(), launch(), launch(), launch()]);
+    const children = [launch(), launch(), launch(), launch()];
+    for (;;) {
+      const count = existsSync(ready)
+        ? readFileSync(ready, "utf8").trim().split("\n").filter(Boolean).length
+        : 0;
+      if (count === children.length) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    writeFileSync(start, "");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    writeFileSync(release, "");
+    const exits = await Promise.all(children);
     const acquired = existsSync(winners)
       ? readFileSync(winners, "utf8").trim().split("\n").filter(Boolean)
       : [];
