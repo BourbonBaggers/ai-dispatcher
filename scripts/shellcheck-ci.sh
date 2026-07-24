@@ -47,6 +47,13 @@ format_duration() {
   printf '%d.%03ds' "$((ms / 1000))" "$((ms % 1000))"
 }
 
+shell_quote_words() {
+  local word
+  for word in "$@"; do
+    printf ' %q' "$word"
+  done
+}
+
 is_excluded_path() {
   local path="$1" dir
   for dir in "${EXCLUDED_DIRS[@]}"; do
@@ -75,7 +82,7 @@ is_shell_file() {
 
 run_shellcheck_batch() {
   local -n batch_ref="$1"
-  local now elapsed remaining rc
+  local now elapsed remaining rc command
 
   ((${#batch_ref[@]} > 0)) || return 0
   now="$(now_ms)"
@@ -84,6 +91,9 @@ run_shellcheck_batch() {
   if ((remaining <= 0)); then
     die "ShellCheck timed out after ${TIMEOUT_SECONDS}s. Reproduce locally with: SHELLCHECK_TIMEOUT_SECONDS=${TIMEOUT_SECONDS} scripts/shellcheck-ci.sh"
   fi
+
+  command="shellcheck --severity=error --shell=bash$(shell_quote_words "${batch_ref[@]}")"
+  log "ShellCheck batch command: $command"
 
   rc=0
   timeout "${remaining}s" shellcheck --severity=error --shell=bash "${batch_ref[@]}" || rc=$?

@@ -106,6 +106,11 @@ test("shellcheck-ci discovers only tracked non-symlink shell files outside exclu
     assert.match(result.stdout, /ShellCheck version: 0\.10\.0/);
     assert.match(result.stdout, /Discovered shell file count: 3/);
     assert.match(result.stdout, /ShellCheck base command: shellcheck --severity=error --shell=bash/);
+    assert.match(
+      result.stdout,
+      /ShellCheck batch command: shellcheck --severity=error --shell=bash bin\/tool scripts\/a\.sh/,
+    );
+    assert.match(result.stdout, /ShellCheck batch command: shellcheck --severity=error --shell=bash scripts\/b\.sh/);
     assert.match(result.stdout, /Checked 2\/3 files/);
     assert.match(result.stdout, /Checked 3\/3 files/);
 

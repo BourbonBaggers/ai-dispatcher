@@ -48,3 +48,10 @@ installation, discovery, and analysis without guesswork.
 - Prove bounded batching is used and timeout exits produce the actionable failure
   message.
 - Run `npm test` and `npm run typecheck`.
+
+## [DONE] Milestone 6: Log exact bounded ShellCheck commands
+
+- Log the exact shell-escaped ShellCheck command for each bounded batch before the batch
+  starts.
+- Extend wrapper tests to assert the logged commands match the discovered files.
+- Run `npm test` and `npm run typecheck`.
