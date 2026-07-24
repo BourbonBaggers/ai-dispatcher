@@ -9,9 +9,11 @@
  * The order of checks is the whole point, and every one of them was paid for in the
  * internal-tools incident that took production down for 40 hours:
  *
- *   1. A clean agent exit (exitCode 0) that opened a PR is a candidate. So is a
- *      `pr_ready` run reconciled from a later provider-capacity exit: its trusted
- *      commits + PR + green-CI evidence already proves the provider is no longer needed.
+ *   1. A clean agent exit (exitCode 0) that opened a PR is a candidate. So are
+ *      `pr_ready` and `ci_pending` runs descended from a later provider-capacity exit:
+ *      their trusted commits + PR evidence already proves the provider is no longer
+ *      needed. `ci_pending` preserves that trust while fresh checks or detached
+ *      deployment verification are pending.
  *      Nothing else (an agent that gave up or crashed) ships.
  *   2. Re-confirm CI is green NOW, from `gh pr checks` exit status — never a verdict
  *      observed earlier, never the agent's self-report.
@@ -130,12 +132,15 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   // status label it currently wears -- this function is the SOLE authority that decides
   // among those, called both right after a fresh run and again on every parked recheck
   // (dispatcher.ts's evaluateAutoship), so it must not gate on a status it might itself
-  // be about to overwrite. `pr_ready` is also authoritative delivery evidence when the
+  // be about to overwrite. `pr_ready` is authoritative delivery evidence when the
   // provider later exits on capacity: the runner assigns that status only after trusted
-  // commits + PR + green-CI control records. Requiring the raw provider exit to be zero
-  // contradicted that reconciliation and stranded an otherwise complete PR (#38).
-  const deliveryReadyCapacityExit = run.status === "pr_ready" && run.exitCode !== null;
-  if ((run.exitCode !== 0 && !deliveryReadyCapacityExit) || run.prNumber === null) {
+  // commits + PR + green-CI control records. A recheck may then park the same delivery as
+  // `ci_pending` while fresh CI or detached deployment verification resolves; that state
+  // must retain the same artifact trust across scans. Requiring the raw provider exit to
+  // be zero contradicted that reconciliation and stranded an otherwise complete PR (#38).
+  const artifactBackedDelivery =
+    (run.status === "pr_ready" || run.status === "ci_pending") && run.exitCode !== null;
+  if ((run.exitCode !== 0 && !artifactBackedDelivery) || run.prNumber === null) {
     return { action: "skipped", reason: "run has no trusted PR-ready delivery evidence" };
   }
   const pr = run.prNumber;
