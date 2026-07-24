@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
+  linkSync,
   openSync,
   mkdirSync,
   readFileSync,
@@ -274,50 +275,30 @@ export class StateStore {
   private acquireLock(): void {
     for (;;) {
       const token = randomUUID();
-      try {
-        // O_EXCL is the actual cross-process mutex. The former exists/read/write sequence
-        // let two simultaneous starters both observe "missing" and both become active.
-        const fd = openSync(this.lockFilePath, "wx", 0o600);
-        try {
-          writeFileSync(
-            fd,
-            JSON.stringify({
-              token,
-              pid: process.pid,
-              startedAt: Date.now(),
-              processIdentity: processIdentity(process.pid),
-            }),
-            "utf8",
-          );
-        } finally {
-          closeSync(fd);
-        }
+      if (
+        this.publishExclusiveLock(this.lockFilePath, {
+          token,
+          pid: process.pid,
+          startedAt: Date.now(),
+          processIdentity: processIdentity(process.pid),
+        })
+      ) {
         this.locked = true;
         this.lockToken = token;
         return;
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
       }
 
       // Stale reclamation is itself serialized. Without this second exclusive file,
       // two starters could both diagnose the old lock as stale; the slower one could
       // then unlink the faster one's newly acquired live lock (an ABA race).
       const reclaimToken = randomUUID();
-      let reclaimFd: number;
-      try {
-        reclaimFd = openSync(this.reclaimLockFilePath, "wx", 0o600);
-        writeFileSync(
-          reclaimFd,
-          JSON.stringify({
+      if (
+        !this.publishExclusiveLock(this.reclaimLockFilePath, {
             token: reclaimToken,
             pid: process.pid,
             processIdentity: processIdentity(process.pid),
-          }),
-          "utf8",
-        );
-        closeSync(reclaimFd);
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+        })
+      ) {
           try {
             const raw = JSON.parse(readFileSync(this.reclaimLockFilePath, "utf8")) as {
               token?: string;
@@ -337,8 +318,6 @@ export class StateStore {
           }
           Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
           continue;
-        }
-        throw err;
       }
 
       try {
@@ -372,6 +351,38 @@ export class StateStore {
         }
       } finally {
         this.unlinkOwnedLock(this.reclaimLockFilePath, reclaimToken);
+      }
+    }
+  }
+
+  /**
+   * Publishes a complete lock record atomically.
+   *
+   * Creating the final path with O_EXCL and then writing left a brief empty/partial JSON
+   * window. A concurrent stale reclaimer could classify that brand-new live lock as
+   * corrupt, unlink it, and let multiple processes believe they owned the dispatcher.
+   * A fully-written candidate plus an atomic hard link has no partial-record window:
+   * exactly one link succeeds and every observer sees the complete inode.
+   */
+  private publishExclusiveLock(path: string, record: object): boolean {
+    const candidate = `${path}.candidate-${process.pid}-${randomUUID()}`;
+    const fd = openSync(candidate, "wx", 0o600);
+    try {
+      writeFileSync(fd, JSON.stringify(record), "utf8");
+    } finally {
+      closeSync(fd);
+    }
+    try {
+      linkSync(candidate, path);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw err;
+    } finally {
+      try {
+        unlinkSync(candidate);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
       }
     }
   }

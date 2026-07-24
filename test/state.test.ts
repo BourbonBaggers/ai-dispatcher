@@ -126,20 +126,22 @@ test("concurrent stale-lock reclaimers cannot both become dispatchers", async ()
   const start = join(dir, "start");
   const release = join(dir, "release");
   const winners = join(dir, "winners");
+  const rejected = join(dir, "rejected");
   const fixture = join(import.meta.dirname, "fixtures", "lock-contender.mjs");
+  let children: Promise<number | null>[] = [];
   try {
     writeFileSync(join(dir, "dispatcher.lock"), JSON.stringify({ pid: 2147483646 }));
     const launch = () =>
       new Promise<number | null>((resolve, reject) => {
         const child = spawn(
           process.execPath,
-          [fixture, dir, ready, start, release, winners],
+          [fixture, dir, ready, start, release, winners, rejected],
           { stdio: "ignore" },
         );
         child.once("error", reject);
         child.once("close", resolve);
       });
-    const children = [launch(), launch(), launch(), launch()];
+    children = [launch(), launch(), launch(), launch()];
     for (;;) {
       const count = existsSync(ready)
         ? readFileSync(ready, "utf8").trim().split("\n").filter(Boolean).length
@@ -148,7 +150,27 @@ test("concurrent stale-lock reclaimers cannot both become dispatchers", async ()
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     writeFileSync(start, "");
-    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    // Hold the winner until every concurrent loser has actually observed its live
+    // lock. A fixed sleep made slow CI runners release the winner too early, after
+    // which late contenders legitimately acquired the lock sequentially and the test
+    // misreported them as simultaneous owners.
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const winnerCount = existsSync(winners)
+        ? readFileSync(winners, "utf8").trim().split("\n").filter(Boolean).length
+        : 0;
+      const rejectedCount = existsSync(rejected)
+        ? readFileSync(rejected, "utf8").trim().split("\n").filter(Boolean).length
+        : 0;
+      if (winnerCount === 1 && rejectedCount === children.length - 1) break;
+      if (Date.now() >= deadline) {
+        assert.fail(
+          `lock contenders did not settle (winners=${winnerCount}, rejected=${rejectedCount})`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
     writeFileSync(release, "");
     const exits = await Promise.all(children);
     const acquired = existsSync(winners)
@@ -158,6 +180,9 @@ test("concurrent stale-lock reclaimers cannot both become dispatchers", async ()
     assert.equal(exits.filter((code) => code === 0).length, 1);
     assert.equal(exits.filter((code) => code === 2).length, 3);
   } finally {
+    // Unblock a winner even when an assertion fails so the test cannot leak a child.
+    if (!existsSync(release)) writeFileSync(release, "");
+    await Promise.allSettled(children);
     rmSync(dir, { recursive: true, force: true });
   }
 });
