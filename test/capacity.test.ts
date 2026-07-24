@@ -84,3 +84,32 @@ test("assessPools builds a per-pool lookup", () => {
   assert.equal(map.get("codex-subscription")!.confidence, "estimated");
   assert.equal(map.get("codex-subscription")!.dormant, true);
 });
+
+// ── unconfirmed cooldowns (#32) ─────────────────────────────────────────────────
+// An unconfirmed, self-revalidating capacity signal must never be reported at the same
+// confidence as a provider-reported reset — that would read as proven exhaustion.
+
+test("an unconfirmed cooldown is exhausted but reported at unconfirmed-limit, not persisted-limit", () => {
+  const a = assessCapacity("codex-subscription", NOW + 60_000, NOW, undefined, false);
+  assert.equal(a.state, "exhausted");
+  assert.equal(a.confidence, "unconfirmed-limit");
+  assert.match(a.reason, /unconfirmed/);
+  assert.equal(isPoolExhausted(a), true);
+});
+
+test("omitting authoritative defaults to true (proven), preserving prior behavior", () => {
+  const a = assessCapacity("codex-subscription", NOW + 60_000, NOW);
+  assert.equal(a.confidence, "persisted-limit");
+});
+
+test("assessPools threads per-pool authoritative flags", () => {
+  const pools = ["claude-subscription", "codex-subscription"];
+  const cooldowns = new Map<string, number | null>([
+    ["claude-subscription", NOW + 1000],
+    ["codex-subscription", NOW + 1000],
+  ]);
+  const authoritative = new Map([["codex-subscription", false]]);
+  const map = assessPools(pools, cooldowns, new Map(), NOW, authoritative);
+  assert.equal(map.get("claude-subscription")!.confidence, "persisted-limit");
+  assert.equal(map.get("codex-subscription")!.confidence, "unconfirmed-limit");
+});

@@ -32,7 +32,7 @@ gives it terminal-classification precedence over the run's own artifact evidence
 - `capacity.ts` gains an `authoritative` input so an unconfirmed cooldown is reported at
   a distinct, lower confidence tier instead of being conflated with proven exhaustion.
 
-## Milestone 1: pure classification + policy in `token-exhaustion.ts`
+## [DONE] Milestone 1: pure classification + policy in `token-exhaustion.ts`
 
 Add `ProviderCapacityKind`, broaden detection to throttling/context/billing phrases
 (kept inside the same provider-owned-output scoping the anti-spoof tests already cover),
@@ -40,25 +40,25 @@ and replace `computeSuppressUntil`/`tokenExhaustionSummary` with
 `computeCapacityDecision` + `resolveCapacitySuppression` (kind/provider-aware policy +
 delivery-ready reconciliation). Update `test/token-exhaustion.test.ts`.
 
-## Milestone 2: durable evidence in `state.ts`
+## [DONE] Milestone 2: durable evidence in `state.ts`
 
 Replace `claudeSuppressedUntil`/`codexSuppressedUntil: number | null` with
 `claudeSuppression`/`codexSuppression: ProviderSuppressionRecord | null`, migrate legacy
 numeric fields on read, add `getProviderSuppression`/`setProviderSuppression`. Update
 `test/state.test.ts`.
 
-## Milestone 3: wire `runner.ts`
+## [DONE] Milestone 3: wire `runner.ts`
 
 `classifyRunOutcome` excludes `context-exhaustion` from the `token_exhausted` branch.
 `finish()` calls `resolveCapacitySuppression`, persists the evidence unconditionally,
 and only then applies the delivery-ready reconciliation. Update `test/runner.test.ts`.
 
-## Milestone 4: wire `dispatcher.ts`
+## [DONE] Milestone 4: wire `dispatcher.ts`
 
 Read suppression through `getProviderSuppression`; make the eligibility-skip reason text
 honest about confidence (proven vs. unconfirmed/revalidating).
 
-## Milestone 5: capacity honesty in `capacity.ts`
+## [DONE] Milestone 5: capacity honesty in `capacity.ts`
 
 Add an `authoritative` input (default `true`, additive/non-breaking) and a new
 `unconfirmed-limit` confidence tier so an unconfirmed cooldown is never reported as
