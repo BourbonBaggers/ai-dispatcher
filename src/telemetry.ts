@@ -295,6 +295,10 @@ export class TelemetryStore {
 
   /** Appends an attempt record. */
   recordAttempt(attempt: AttemptRecord): void {
+    // Finalization is deliberately replayable after a crash. The attempt id is the
+    // idempotency key, so replaying the same terminal observation must not inflate
+    // attempts, duration, or frontier utilization.
+    if (this.data.attempts.some((existing) => existing.attemptId === attempt.attemptId)) return;
     this.data.attempts.push(attempt);
     this.persist();
   }

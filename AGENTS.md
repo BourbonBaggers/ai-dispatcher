@@ -126,7 +126,9 @@ support for *choosing* that label (the planning-repo rubric) and for *planning a
 - **Frontier is the final automatic recovery rung.** Initial routing still withholds
   frontier models unless task characteristics justify them. After bounded assigned-model
   repairs fail, escalation to the configured frontier model is automatic; only failure
-  there is a human handoff.
+  there is a human handoff. The original assignment is immutable in durable state:
+  frontier use in one phase must not turn the next phase's ordinary repair attempts into
+  more frontier attempts.
 - **Manual overrides** (`route:human-override`) are recorded but excluded from the learning
   dataset — keep that exclusion intact.
 - The rubric itself lives in [`ROUTING.md`](ROUTING.md); keep it in sync with the code.
@@ -148,11 +150,16 @@ support for *choosing* that label (the planning-repo rubric) and for *planning a
 - Before a ship command can merge or self-restart, persist `ci_pending` so a killed parent
   leaves a recoverable claim. Detached self-deploy result state starts as `pending`; a
   restarted dispatcher waits for that verifier instead of launching another restart.
+- The runner persists `finalizationPending` with every terminal observation before
+  returning it. A restart must finish that exact run's recovery/autoship before selecting
+  fresh work; replayed telemetry is idempotent.
 - Self-ship failure resets to last-known-good and keeps restarting until healthy. The
   shell must not page on an intermediate new-code or rollback start failure; the
   restarted dispatcher’s durable recovery ledger owns escalation and exhaustion.
 - Ship-command timeout must terminate the whole process tree, retain output without a
   `maxBuffer` abort, and return a repairable timeout. The default ceiling is 120 minutes.
+- A GitHub read failure is `unknown`, never fabricated red CI or proof that an exhausted
+  hold label was removed. Unknown state parks and rechecks without spending model budget.
 - A historical merged SHA that production already contains is delivered. Never deploy it
   exactly over a newer production SHA; that would be an automated rollback.
 - `shipped` means merge + production health + issue closure. Merge alone, green CI, a PR,

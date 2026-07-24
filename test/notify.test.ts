@@ -63,3 +63,23 @@ test("send defaults to the normal priority and never throws on a network error",
     globalThis.fetch = original;
   }
 });
+
+test("a hung notification is aborted instead of freezing the dispatcher", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = ((_url: string, init: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      init.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    })) as typeof fetch;
+  try {
+    const notifier = createNotifier({
+      ntfyUrl: "https://ntfy.sh",
+      ntfyTopic: "dispatch",
+      timeoutMs: 10,
+    });
+    const started = Date.now();
+    await notifier.send("t", "b");
+    assert.ok(Date.now() - started < 1_000);
+  } finally {
+    globalThis.fetch = original;
+  }
+});

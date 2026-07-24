@@ -14,13 +14,16 @@
 
 import { randomUUID } from "node:crypto";
 import {
+  closeSync,
   existsSync,
+  openSync,
   mkdirSync,
   readFileSync,
   writeFileSync,
   renameSync,
-  rmSync,
+  unlinkSync,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import {
   ACTIVE_STATUSES,
@@ -44,6 +47,12 @@ export interface RunRecord {
   cliModel: string;
   effortLabel: string;
   cliEffort: string;
+  /** Immutable issue assignment. Recovery must return here before a later phase retries. */
+  assignedAgent: DispatcherAgent;
+  assignedModelLabel: string;
+  assignedCliModel: string;
+  assignedEffortLabel: string;
+  assignedCliEffort: string;
   branch: string;
   checkoutPath: string;
   planPath: string | null;
@@ -59,6 +68,14 @@ export interface RunRecord {
   lastProgressSeq: number;
   /** Total output lines seen this run. */
   outputSeq: number;
+  /**
+   * Set by the runner before it returns a terminal result and cleared only after the
+   * dispatcher has applied recovery/autoship. This closes the kill window between those
+   * two operations without resurrecting historical terminal rows.
+   */
+  finalizationPending?: boolean;
+  /** In-memory migration marker used to collapse duplicate pre-contract terminal rows. */
+  legacyFinalization?: boolean;
   /** Independent retry + frontier-escalation budgets for every owned delivery phase. */
   recovery?: RecoveryLedger;
   /** Present only when the current hold was created after the full frontier ladder. */
@@ -66,6 +83,8 @@ export interface RunRecord {
     kind: RecoveryKind;
     reason: string;
     at: number;
+    /** False only while GitHub has not yet confirmed the external hold label write. */
+    labelApplied?: boolean;
   };
   /** @deprecated Read-only compatibility with pre-ledger state/test fixtures. */
   ciSelfHealAttempts?: number;
@@ -112,9 +131,34 @@ function normalizeRunRecovery(run: RunRecord): RunRecord {
     ciEscalated?: boolean;
     deployEscalated?: boolean;
   };
-  if (legacy.recovery) return run;
-  return {
+  const hadRecoveryLedger = legacy.recovery !== undefined && legacy.recovery !== null;
+  const normalized = {
     ...run,
+    assignedAgent: run.assignedAgent ?? run.agent,
+    assignedModelLabel: run.assignedModelLabel ?? run.modelLabel,
+    assignedCliModel: run.assignedCliModel ?? run.cliModel,
+    assignedEffortLabel: run.assignedEffortLabel ?? run.effortLabel,
+    assignedCliEffort: run.assignedCliEffort ?? run.cliEffort,
+  };
+  if (run.status === ("succeeded" as DispatcherStatus)) {
+    // Old releases used `succeeded` for a PR handoff. It is not proof of deployment.
+    // Re-enter finalization so autoship verifies it, while non-autoship installs settle
+    // on the honest `pr_ready` handoff.
+    normalized.status = "pr_ready";
+    normalized.finalizationPending = true;
+    normalized.legacyFinalization = true;
+  }
+  if (run.status === "shipped" && !hadRecoveryLedger) {
+    // Early self-ship releases wrote `shipped` before issue closure survived the
+    // parent restart. Re-verify the already-merged SHA and closure; exact-SHA deploy
+    // commands are inclusion-aware and cannot roll production backward.
+    normalized.status = "pr_ready";
+    normalized.finalizationPending = true;
+    normalized.legacyFinalization = true;
+  }
+  if (hadRecoveryLedger) return normalized;
+  return {
+    ...normalized,
     recovery: {
       ci: {
         attempts: Math.max(0, legacy.ciSelfHealAttempts ?? 0),
@@ -126,6 +170,27 @@ function normalizeRunRecovery(run: RunRecord): RunRecord {
       },
     },
   };
+}
+
+function collapseLegacyFinalizations(runs: RunRecord[]): RunRecord[] {
+  const newestByIssue = new Map<number, RunRecord>();
+  for (const run of runs) {
+    if (!run.legacyFinalization) continue;
+    const current = newestByIssue.get(run.issueNumber);
+    if (!current || run.createdAt > current.createdAt) newestByIssue.set(run.issueNumber, run);
+  }
+  return runs.map((run) => {
+    if (!run.legacyFinalization || newestByIssue.get(run.issueNumber)?.id === run.id) return run;
+    // Old releases could redispatch one issue dozens of times with the same PR. Exact
+    // delivery is verified from the newest row; replaying every duplicate would starve
+    // the queue for many poll intervals without adding evidence.
+    return {
+      ...run,
+      status: "abandoned",
+      finalizationPending: false,
+      legacyFinalization: false,
+    };
+  });
 }
 
 /** A live process holds this lock. */
@@ -148,17 +213,31 @@ function processAlive(pid: number): boolean {
   }
 }
 
+function processIdentity(pid: number): string | null {
+  try {
+    return execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: 5_000,
+    }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 export class StateStore {
   private readonly dir: string;
   private readonly stateFilePath: string;
   private readonly lockFilePath: string;
+  private readonly reclaimLockFilePath: string;
   private state: PersistedState;
   private locked = false;
+  private lockToken: string | null = null;
 
   private constructor(dir: string) {
     this.dir = dir;
     this.stateFilePath = join(dir, STATE_FILE);
     this.lockFilePath = join(dir, LOCK_FILE);
+    this.reclaimLockFilePath = `${this.lockFilePath}.reclaim`;
     this.state = emptyState();
   }
 
@@ -175,37 +254,125 @@ export class StateStore {
   }
 
   private acquireLock(): void {
-    if (existsSync(this.lockFilePath)) {
+    for (;;) {
+      const token = randomUUID();
       try {
-        // Any LIVE pid holding the lock blocks — including our own (a double-open is a
-        // bug). Only a lock left by a DEAD process (a crash/restart gives a new pid) is
-        // safe to reclaim.
-        const raw = JSON.parse(readFileSync(this.lockFilePath, "utf8")) as { pid?: number };
-        if (typeof raw.pid === "number" && processAlive(raw.pid)) {
-          throw new LockHeldError(raw.pid);
+        // O_EXCL is the actual cross-process mutex. The former exists/read/write sequence
+        // let two simultaneous starters both observe "missing" and both become active.
+        const fd = openSync(this.lockFilePath, "wx", 0o600);
+        try {
+          writeFileSync(
+            fd,
+            JSON.stringify({
+              token,
+              pid: process.pid,
+              startedAt: Date.now(),
+              processIdentity: processIdentity(process.pid),
+            }),
+            "utf8",
+          );
+        } finally {
+          closeSync(fd);
         }
+        this.locked = true;
+        this.lockToken = token;
+        return;
       } catch (err) {
-        if (err instanceof LockHeldError) throw err;
-        // A corrupt/stale lock from a dead process — safe to reclaim.
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      }
+
+      // Stale reclamation is itself serialized. Without this second exclusive file,
+      // two starters could both diagnose the old lock as stale; the slower one could
+      // then unlink the faster one's newly acquired live lock (an ABA race).
+      const reclaimToken = randomUUID();
+      let reclaimFd: number;
+      try {
+        reclaimFd = openSync(this.reclaimLockFilePath, "wx", 0o600);
+        writeFileSync(
+          reclaimFd,
+          JSON.stringify({
+            token: reclaimToken,
+            pid: process.pid,
+            processIdentity: processIdentity(process.pid),
+          }),
+          "utf8",
+        );
+        closeSync(reclaimFd);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+          try {
+            const raw = JSON.parse(readFileSync(this.reclaimLockFilePath, "utf8")) as {
+              token?: string;
+              pid?: number;
+              processIdentity?: string | null;
+            };
+            const alive =
+              typeof raw.pid === "number" &&
+              processAlive(raw.pid) &&
+              (typeof raw.processIdentity !== "string" ||
+                processIdentity(raw.pid) === raw.processIdentity);
+            if (!alive && typeof raw.token === "string") {
+              this.unlinkOwnedLock(this.reclaimLockFilePath, raw.token);
+            }
+          } catch {
+            // Its owner may be between exclusive create and writing. Retry shortly.
+          }
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+          continue;
+        }
+        throw err;
+      }
+
+      try {
+        let stale = true;
+        let pid: number | null = null;
+        try {
+          const raw = JSON.parse(readFileSync(this.lockFilePath, "utf8")) as {
+            pid?: number;
+            processIdentity?: string | null;
+          };
+          pid = typeof raw.pid === "number" ? raw.pid : null;
+          if (pid !== null && processAlive(pid)) {
+            const actualIdentity = processIdentity(pid);
+            // Legacy locks lack an identity; preserve their conservative live-pid behavior.
+            stale =
+              typeof raw.processIdentity === "string" &&
+              actualIdentity !== null &&
+              raw.processIdentity !== actualIdentity;
+            if (!stale) throw new LockHeldError(pid);
+          }
+        } catch (err) {
+          if (err instanceof LockHeldError) throw err;
+          // Corrupt/unreadable lock: unlink below and race again through O_EXCL.
+        }
+        if (stale) {
+          try {
+            unlinkSync(this.lockFilePath);
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+          }
+        }
+      } finally {
+        this.unlinkOwnedLock(this.reclaimLockFilePath, reclaimToken);
       }
     }
-    writeFileSync(
-      this.lockFilePath,
-      JSON.stringify({ pid: process.pid, startedAt: Date.now() }),
-      "utf8",
-    );
-    this.locked = true;
+  }
+
+  private unlinkOwnedLock(path: string, token: string): void {
+    try {
+      const raw = JSON.parse(readFileSync(path, "utf8")) as { token?: string };
+      if (raw.token === token) unlinkSync(path);
+    } catch {
+      // Missing/replaced locks are not ours to remove.
+    }
   }
 
   /** Releases the lock. Safe to call more than once. */
   releaseLock(): void {
     if (!this.locked) return;
-    try {
-      rmSync(this.lockFilePath, { force: true });
-    } catch {
-      // best effort
-    }
+    if (this.lockToken !== null) this.unlinkOwnedLock(this.lockFilePath, this.lockToken);
     this.locked = false;
+    this.lockToken = null;
   }
 
   private load(): void {
@@ -222,7 +389,7 @@ export class StateStore {
           codexSuppressedUntil: parsed.settings?.codexSuppressedUntil ?? null,
         },
         runs: Array.isArray(parsed.runs)
-          ? parsed.runs.map((run) => normalizeRunRecovery(run))
+          ? collapseLegacyFinalizations(parsed.runs.map((run) => normalizeRunRecovery(run)))
           : [],
       };
     } catch {
@@ -270,6 +437,14 @@ export class StateStore {
       .filter((r) => statuses.includes(r.status))
       .sort((a, b) => a.createdAt - b.createdAt)
       .map((r) => ({ ...r }));
+  }
+
+  /** Terminal observations whose recovery/autoship side effects were not checkpointed. */
+  pendingFinalizations(): RunRecord[] {
+    return this.state.runs
+      .filter((run) => run.finalizationPending === true)
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((run) => ({ ...run }));
   }
 
   resumableRuns(): RunRecord[] {
@@ -329,6 +504,12 @@ export class StateStore {
       | "remotePid"
       | "recovery"
       | "exhaustion"
+      | "assignedAgent"
+      | "assignedModelLabel"
+      | "assignedCliModel"
+      | "assignedEffortLabel"
+      | "assignedCliEffort"
+      | "finalizationPending"
     >,
   ): RunRecord {
     if (this.activeRun()) throw new Error("a run is already active — the dispatcher is serial");
@@ -348,6 +529,12 @@ export class StateStore {
       resumeCount: 0,
       lastProgressSeq: 0,
       outputSeq: 0,
+      assignedAgent: data.agent,
+      assignedModelLabel: data.modelLabel,
+      assignedCliModel: data.cliModel,
+      assignedEffortLabel: data.effortLabel,
+      assignedCliEffort: data.cliEffort,
+      finalizationPending: false,
       recovery: {},
       remotePid: null,
       createdAt: now,
