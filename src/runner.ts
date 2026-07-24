@@ -20,9 +20,9 @@ import { parseControlLine, redact, toTerminalLines } from "./sanitize.ts";
 import type { CiState } from "./sanitize.ts";
 import {
   detectProviderTokenExhaustion,
-  computeSuppressUntil,
-  formatResetTime,
-  type TokenExhaustionSignal,
+  resolveCapacitySuppression,
+  suppressesPool,
+  type ProviderCapacitySignal,
 } from "./token-exhaustion.ts";
 import type { DispatcherAgent } from "./labels.ts";
 import type { DispatcherConfig } from "./config.ts";
@@ -119,8 +119,8 @@ export interface RunSignals {
   resultCi: CiState;
   /** A pre-launch closed issue is retired without spending model recovery. */
   resultDisposition?: "normal" | "abandoned";
-  /** First provider token-exhaustion signal seen this run, if any. */
-  tokenExhaustion: TokenExhaustionSignal | null;
+  /** First provider capacity signal seen this run, if any. */
+  tokenExhaustion: ProviderCapacitySignal | null;
   /** For the timed-out summary message. */
   maxRuntimeMinutes: number;
 }
@@ -137,14 +137,17 @@ export type TerminalStatus =
   | "token_exhausted";
 
 export type RunOutcome =
-  | { status: "token_exhausted"; exitCode: number; signal: TokenExhaustionSignal }
+  | { status: "token_exhausted"; exitCode: number; signal: ProviderCapacitySignal }
   | { status: Exclude<TerminalStatus, "token_exhausted">; exitCode: number; summary: string | null };
 
 /**
  * Classifies a finished run into exactly one terminal state.
  *
  * Precedence is load-bearing and ported verbatim from the embedded runner:
- *   1. token exhaustion (recoverable provider state, must not read as a generic failure)
+ *   1. provider capacity signal (recoverable provider state, must not read as a generic
+ *      failure) — EXCEPT context/request-size exhaustion, which is a per-request limit,
+ *      not account capacity, and must not suppress the whole provider pool (#32); it
+ *      falls through to the ordinary failure ladder below instead.
  *   2. timeout (124/137 — branch preserved, resumable)
  *   3. no result line (killed blind — resumable, MUST precede the commit/CI branches
  *      whose defaults would otherwise misjudge it as a hard failure)
@@ -185,11 +188,13 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
   // branch and checkout intact, so both are resumable.
   const timedOut = exitCode === 124 || exitCode === 137;
 
-  // The provider ran out of subscription tokens: recoverable state, not a defect in the
+  // The provider signaled a capacity problem: recoverable state, not a defect in the
   // work, so it must not be classified as a generic exit-1 failure (which would
   // re-notify every scan). A non-zero exit is still required so a stray match on a clean
-  // run can never trip it.
-  if (tokenExhaustion && exitCode !== 0 && !timedOut) {
+  // run can never trip it. Context/request-size exhaustion is excluded: it is a
+  // per-request limit, not proof the whole provider pool is unavailable, so it falls
+  // through to the ordinary failure ladder instead of pausing the provider.
+  if (tokenExhaustion && suppressesPool(tokenExhaustion.kind) && exitCode !== 0 && !timedOut) {
     return { status: "token_exhausted", exitCode, signal: tokenExhaustion };
   }
 
@@ -282,27 +287,6 @@ export function requirePrForDelivery(
   };
 }
 
-/**
- * Builds the token-exhaustion summary and the concrete suppression window. Pure; the
- * caller persists the cooldown and fires the (single) notification.
- */
-export function tokenExhaustionSummary(
-  agent: DispatcherAgent,
-  signal: TokenExhaustionSignal,
-  nowMs: number,
-): { summary: string; until: Date } {
-  const window = computeSuppressUntil(signal, nowMs);
-  const provider = agent === "claude" ? "Claude" : "Codex";
-  const reported = window.resetLabel ? ` (${provider} reported: ${window.resetLabel})` : "";
-  const summary = window.parseFailed
-    ? `${provider} is out of tokens${reported}. The run is preserved and ${provider} dispatching is paused until ${formatResetTime(
-        window.until,
-      )} (safety fallback).`
-    : `${provider} is out of tokens${reported}. The run is preserved and ${provider} dispatching is paused until the reported reset at ${formatResetTime(
-        window.until,
-      )}.`;
-  return { summary, until: window.until };
-}
 
 export interface RunnerDeps {
   config: DispatcherConfig;
@@ -359,7 +343,7 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
     let resultCommits = 0;
     let resultCi: CiState = "none";
     let resultDisposition: "normal" | "abandoned" = "normal";
-    let tokenExhaustion: TokenExhaustionSignal | null = null;
+    let tokenExhaustion: ProviderCapacitySignal | null = null;
     let outputSeq = run.outputSeq;
     let launcherTimedOut = false;
     let launcherKillTimer: NodeJS.Timeout | undefined;
@@ -449,17 +433,27 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
       // agent to push/open the PR.
       const observed = store.getRun(run.id);
       const effectiveOutcome = requirePrForDelivery(outcome, observed?.prNumber ?? null);
-      const status: TerminalStatus = effectiveOutcome.status;
+      let status: TerminalStatus = effectiveOutcome.status;
       let summary: string | null;
 
       if (effectiveOutcome.status === "token_exhausted") {
-        const { summary: exhaustionSummary, until } = tokenExhaustionSummary(
+        // Provider-capacity state and run/artifact state are kept separate (#32): the
+        // suppression evidence is persisted unconditionally (it may still block NEW
+        // launches), but a run whose own evidence already proves the work is
+        // delivery-ready is reconciled to `pr_ready` rather than stranded behind the
+        // cooldown of a provider that is no longer needed for this issue.
+        const resolution = resolveCapacitySuppression(
           run.agent,
           effectiveOutcome.signal,
+          { resultCommits, resultCi, prNumber: observed?.prNumber ?? null },
           now(),
         );
-        summary = exhaustionSummary;
-        store.setSuppressedUntil(run.agent, until.getTime());
+        store.setProviderSuppression(run.agent, {
+          ...resolution.evidence,
+          excerpt: redact(resolution.evidence.excerpt),
+        });
+        status = resolution.status;
+        summary = resolution.summary;
       } else {
         summary = effectiveOutcome.summary;
       }

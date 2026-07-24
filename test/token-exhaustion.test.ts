@@ -4,12 +4,19 @@ import {
   detectClaudeTokenExhaustion,
   detectCodexTokenExhaustion,
   detectProviderTokenExhaustion,
-  computeSuppressUntil,
+  computeCapacityDecision,
+  resolveCapacitySuppression,
   isProviderSuppressed,
-  FALLBACK_SUPPRESSION_MS,
+  suppressesPool,
+  CLAUDE_ROLLING_WINDOW_FALLBACK_MS,
+  UNCONFIRMED_QUOTA_REVALIDATION_MS,
+  THROTTLE_REVALIDATION_MS,
+  BILLING_REVALIDATION_MS,
 } from "../src/token-exhaustion.ts";
 
-test("canonical |<epoch> form is detected on any stream", () => {
+// ── detection ─────────────────────────────────────────────────────────────────
+
+test("canonical |<epoch> form is detected on any stream and classified authoritative", () => {
   const epochSec = 2_000_000_000;
   const sig = detectClaudeTokenExhaustion(`Claude AI usage limit reached|${epochSec}`, "stdout");
   assert.ok(sig);
@@ -25,6 +32,7 @@ test("the real subscription banner is detected on plain stdout", () => {
   assert.equal(sig!.resetLabel, "4am (UTC)");
   assert.ok(sig!.wallClock);
   assert.equal(sig!.wallClock!.hour, 4);
+  assert.equal(sig!.kind, "unconfirmed-quota");
 });
 
 test("banner surfaces via an assistant stream-json event", () => {
@@ -55,6 +63,12 @@ test("issue text echoed as a tool_result never trips detection", () => {
     message: { content: [{ type: "text", text: "The issue mentions being out of tokens." }] },
   });
   assert.equal(detectClaudeTokenExhaustion(assistantProse, "stdout"), null);
+  // ...and the same holds for the new categories (billing/throttling/context prose)
+  const billingProse = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "text", text: "The issue is about insufficient credits handling." }] },
+  });
+  assert.equal(detectClaudeTokenExhaustion(billingProse, "stdout"), null);
 });
 
 test("broad exhaustion phrase is trusted on stderr and in is_error results", () => {
@@ -93,30 +107,106 @@ test("detectProviderTokenExhaustion routes by agent", () => {
   );
 });
 
-test("computeSuppressUntil uses a reported future epoch verbatim", () => {
+// ── kind classification ──────────────────────────────────────────────────────
+
+test("throttling/rate-limit phrases classify as throttling, not a quota exhaustion", () => {
+  const sig = detectCodexTokenExhaustion(
+    JSON.stringify({ type: "error", message: "rate limited: too many requests, please slow down" }),
+    "stdout",
+  );
+  assert.ok(sig);
+  assert.equal(sig!.kind, "throttling");
+});
+
+test("context/request-size phrases classify as context-exhaustion", () => {
+  const sig = detectClaudeTokenExhaustion("Error: maximum context length exceeded for this request", "stderr");
+  assert.ok(sig);
+  assert.equal(sig!.kind, "context-exhaustion");
+});
+
+test("billing/credit phrases classify as billing, not a generic quota error", () => {
+  const sig = detectCodexTokenExhaustion(
+    JSON.stringify({ type: "error", message: "insufficient credits — please add a payment method" }),
+    "stdout",
+  );
+  assert.ok(sig);
+  assert.equal(sig!.kind, "billing");
+});
+
+test("an unrecognized-but-quota-like error still detects, classified unconfirmed-quota", () => {
+  const sig = detectClaudeTokenExhaustion("Error: token budget exceeded for this session", "stderr");
+  assert.ok(sig);
+  assert.equal(sig!.kind, "unconfirmed-quota");
+});
+
+test("suppressesPool excludes only context-exhaustion", () => {
+  assert.equal(suppressesPool("context-exhaustion"), false);
+  for (const kind of ["authoritative-exhaustion", "unconfirmed-quota", "throttling", "billing", "unknown"] as const) {
+    assert.equal(suppressesPool(kind), true, kind);
+  }
+});
+
+// ── suppression policy ───────────────────────────────────────────────────────
+
+test("a reported future epoch is authoritative regardless of which phrase matched", () => {
   const now = 1_000_000_000_000;
   const future = now + 3_600_000;
-  const w = computeSuppressUntil({ resetAt: future, resetLabel: null }, now);
-  assert.equal(w.parseFailed, false);
-  assert.equal(w.until.getTime(), future);
+  const decision = computeCapacityDecision("codex", { kind: "unconfirmed-quota", resetAt: future, resetLabel: null, excerpt: "" }, now);
+  assert.equal(decision.authoritative, true);
+  assert.equal(decision.kind, "authoritative-exhaustion");
+  assert.equal(decision.until.getTime(), future);
 });
 
-test("computeSuppressUntil falls back to the safety window when nothing parses", () => {
-  const now = 1_000_000_000_000;
-  const w = computeSuppressUntil({ resetAt: null, wallClock: null, resetLabel: null }, now);
-  assert.equal(w.parseFailed, true);
-  assert.equal(w.until.getTime(), now + FALLBACK_SUPPRESSION_MS);
-});
-
-test("computeSuppressUntil resolves a wall-clock banner to a future instant", () => {
+test("a reported wall-clock reset resolves to a future instant and is authoritative", () => {
   const now = Date.UTC(2026, 0, 15, 6, 0, 0); // 06:00 UTC
-  const w = computeSuppressUntil(
-    { resetAt: null, wallClock: { hour: 4, minute: 0, timeZone: "UTC" }, resetLabel: "4am (UTC)" },
+  const decision = computeCapacityDecision(
+    "claude",
+    { kind: "unconfirmed-quota", resetAt: null, wallClock: { hour: 4, minute: 0, timeZone: "UTC" }, resetLabel: "4am (UTC)", excerpt: "" },
     now,
   );
   // 4am UTC already passed today → next day 4am UTC
-  assert.equal(w.parseFailed, false);
-  assert.equal(w.until.getTime(), Date.UTC(2026, 0, 16, 4, 0, 0));
+  assert.equal(decision.authoritative, true);
+  assert.equal(decision.until.getTime(), Date.UTC(2026, 0, 16, 4, 0, 0));
+});
+
+test("Codex, no reset: bounded near-term revalidation, NOT the Claude rolling-window fallback", () => {
+  const now = 1_000_000_000_000;
+  const decision = computeCapacityDecision(
+    "codex",
+    { kind: "unconfirmed-quota", resetAt: null, wallClock: null, resetLabel: null, excerpt: "usage limit reached" },
+    now,
+  );
+  assert.equal(decision.authoritative, false);
+  assert.equal(decision.until.getTime(), now + UNCONFIRMED_QUOTA_REVALIDATION_MS);
+  assert.notEqual(decision.until.getTime(), now + CLAUDE_ROLLING_WINDOW_FALLBACK_MS);
+});
+
+test("Claude, no reset: the documented rolling-window fallback still applies (Claude-only)", () => {
+  const now = 1_000_000_000_000;
+  const decision = computeCapacityDecision(
+    "claude",
+    { kind: "unconfirmed-quota", resetAt: null, wallClock: null, resetLabel: null, excerpt: "usage limit reached" },
+    now,
+  );
+  assert.equal(decision.authoritative, false);
+  assert.equal(decision.until.getTime(), now + CLAUDE_ROLLING_WINDOW_FALLBACK_MS);
+});
+
+test("throttling gets its own short backoff regardless of provider", () => {
+  const now = 1_000_000_000_000;
+  for (const agent of ["claude", "codex"] as const) {
+    const decision = computeCapacityDecision(agent, { kind: "throttling", resetAt: null, resetLabel: null, excerpt: "" }, now);
+    assert.equal(decision.until.getTime(), now + THROTTLE_REVALIDATION_MS, agent);
+    assert.equal(decision.authoritative, false);
+  }
+});
+
+test("billing gets its own distinct window, not the rolling-window number or the short quota window", () => {
+  const now = 1_000_000_000_000;
+  const decision = computeCapacityDecision("claude", { kind: "billing", resetAt: null, resetLabel: null, excerpt: "" }, now);
+  assert.equal(decision.until.getTime(), now + BILLING_REVALIDATION_MS);
+  assert.notEqual(BILLING_REVALIDATION_MS, CLAUDE_ROLLING_WINDOW_FALLBACK_MS);
+  assert.notEqual(BILLING_REVALIDATION_MS, UNCONFIRMED_QUOTA_REVALIDATION_MS);
 });
 
 test("isProviderSuppressed compares against the deadline", () => {
@@ -124,4 +214,71 @@ test("isProviderSuppressed compares against the deadline", () => {
   assert.equal(isProviderSuppressed(new Date(2_000), now), true);
   assert.equal(isProviderSuppressed(new Date(500), now), false);
   assert.equal(isProviderSuppressed(null, now), false);
+});
+
+// ── resolution: reconciliation with run/artifact evidence ───────────────────
+
+test("resolveCapacitySuppression keeps token_exhausted when the run has no complete evidence", () => {
+  const now = 1_000_000_000_000;
+  const resolution = resolveCapacitySuppression(
+    "codex",
+    { kind: "unconfirmed-quota", resetAt: null, resetLabel: null, excerpt: "usage limit reached" },
+    { resultCommits: 0, resultCi: "none", prNumber: null },
+    now,
+  );
+  assert.equal(resolution.status, "token_exhausted");
+  assert.match(resolution.summary, /Codex/);
+  assert.match(resolution.summary, /unconfirmed/);
+  assert.equal(resolution.evidence.authoritative, false);
+  assert.equal(resolution.evidence.until, now + UNCONFIRMED_QUOTA_REVALIDATION_MS);
+});
+
+test("resolveCapacitySuppression reconciles to pr_ready when commits + PR + green CI already exist", () => {
+  const now = 1_000_000_000_000;
+  const resolution = resolveCapacitySuppression(
+    "codex",
+    { kind: "unconfirmed-quota", resetAt: null, resetLabel: null, excerpt: "usage limit reached" },
+    { resultCommits: 5, resultCi: "pass", prNumber: 31 },
+    now,
+  );
+  assert.equal(resolution.status, "pr_ready");
+  assert.match(resolution.summary, /already complete/);
+  // The suppression evidence is still produced — capacity state stays separate from
+  // whether THIS run's own artifact is complete.
+  assert.equal(resolution.evidence.until, now + UNCONFIRMED_QUOTA_REVALIDATION_MS);
+});
+
+test("resolveCapacitySuppression does NOT reconcile on green CI alone — commits and a PR are required too", () => {
+  const now = 1_000_000_000_000;
+  const noCommits = resolveCapacitySuppression(
+    "codex",
+    { kind: "unconfirmed-quota", resetAt: null, resetLabel: null, excerpt: "" },
+    { resultCommits: 0, resultCi: "pass", prNumber: 31 },
+    now,
+  );
+  assert.equal(noCommits.status, "token_exhausted");
+
+  const noPr = resolveCapacitySuppression(
+    "codex",
+    { kind: "unconfirmed-quota", resetAt: null, resetLabel: null, excerpt: "" },
+    { resultCommits: 2, resultCi: "pass", prNumber: null },
+    now,
+  );
+  assert.equal(noPr.status, "token_exhausted");
+});
+
+test("resolveCapacitySuppression with an authoritative reset reports it, not the safety fallback wording", () => {
+  const now = 1_000_000_000_000;
+  const resetAt = now + 3_600_000;
+  const resolution = resolveCapacitySuppression(
+    "claude",
+    { kind: "unconfirmed-quota", resetAt, resetLabel: "4am (UTC)", excerpt: "" },
+    { resultCommits: 0, resultCi: "none", prNumber: null },
+    now,
+  );
+  assert.equal(resolution.evidence.until, resetAt);
+  assert.equal(resolution.evidence.authoritative, true);
+  assert.match(resolution.summary, /Claude/);
+  assert.match(resolution.summary, /4am \(UTC\)/);
+  assert.doesNotMatch(resolution.summary, /unconfirmed/);
 });

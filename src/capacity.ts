@@ -10,14 +10,17 @@
  * Confidence ladder (descending preference of signal source):
  *   1. provider-reported  — provider's own remaining/reset numbers  (not exposed today)
  *   2. cli-reported       — CLI limit-state / account status         (not exposed today)
- *   3. persisted-limit    — a persisted token-exhaustion cooldown with a known reset
- *   4. estimated          — a local estimate from observed dispatch history
- *   5. unknown            — no signal at all
+ *   3. persisted-limit    — a persisted cooldown with a provider-reported (authoritative) reset
+ *   4. unconfirmed-limit  — a persisted cooldown from an unconfirmed, no-reset signal (#32)
+ *   5. estimated          — a local estimate from observed dispatch history
+ *   6. unknown            — no signal at all
  *
- * The two live signals are `persisted-limit` (from an active provider cooldown, which the
- * dispatcher already tracks in `token-exhaustion.ts`) and `estimated` (from observed
- * usage). Levels 1–2 exist in the type so a future adapter can return them without a
- * schema change.
+ * `persisted-limit` vs. `unconfirmed-limit` matters for honesty (#32 requirement 11): an
+ * unconfirmed no-reset quota-like signal (`token-exhaustion.ts`'s
+ * `authoritative: false`) is a self-revalidating guess, not proof the pool is exhausted,
+ * so it must never be reported at the same confidence as a provider-reported reset. The
+ * two live signals besides those are `estimated` (from observed usage). Levels 1–2 exist
+ * in the type so a future adapter can return them without a schema change.
  *
  * This module is pure: routing (`routing.ts`) consumes the assessments to prefer dormant
  * capacity, and the dispatcher supplies the cooldown/usage facts. No IO here.
@@ -28,6 +31,7 @@ export const CAPACITY_CONFIDENCE = [
   "provider-reported",
   "cli-reported",
   "persisted-limit",
+  "unconfirmed-limit",
   "estimated",
   "unknown",
 ] as const;
@@ -72,30 +76,37 @@ export interface CapacityAssessment {
  * Assesses one capacity pool from the honest signals we actually have.
  *
  * @param pool         capacity pool id (e.g. "claude-subscription")
- * @param cooldownUntil epoch ms a persisted token-exhaustion cooldown runs until, or null
+ * @param cooldownUntil epoch ms a persisted capacity cooldown runs until, or null
  * @param nowMs        current epoch ms
  * @param usage        observed local usage, when available (raises confidence to estimated)
+ * @param authoritative whether the cooldown came from a provider-reported reset (default
+ *   `true`, preserving prior behavior). `false` means an unconfirmed, self-revalidating
+ *   guess (#32) — reported at `unconfirmed-limit`, never conflated with proven exhaustion.
  */
 export function assessCapacity(
   pool: string,
   cooldownUntil: number | null,
   nowMs: number,
   usage?: PoolUsageObservation,
+  authoritative = true,
 ): CapacityAssessment {
-  // Level 3 — persisted-limit. A cooldown that is still in the future is hard evidence the
-  // pool is exhausted, with a known reset. This is the strongest signal we can produce.
+  // Level 3/4 — a cooldown that is still in the future means the pool is paused. Whether
+  // that is proven (persisted-limit) or an unconfirmed guess pending revalidation
+  // (unconfirmed-limit) is reported honestly rather than collapsed into one confidence.
   if (cooldownUntil !== null && cooldownUntil > nowMs) {
     return {
       pool,
       state: "exhausted",
-      confidence: "persisted-limit",
+      confidence: authoritative ? "persisted-limit" : "unconfirmed-limit",
       resetAt: cooldownUntil,
       dormant: false,
-      reason: `token cooldown active until ${new Date(cooldownUntil).toISOString()}`,
+      reason: authoritative
+        ? `capacity cooldown active until ${new Date(cooldownUntil).toISOString()}`
+        : `unconfirmed capacity signal — revalidating automatically at ${new Date(cooldownUntil).toISOString()}`,
     };
   }
 
-  // Level 4 — estimated. We have observed usage but no provider/CLI capacity number, so we
+  // Level 5 — estimated. We have observed usage but no provider/CLI capacity number, so we
   // do not claim to know remaining capacity; we only estimate dormancy from activity.
   if (usage) {
     if (usage.activeRuns > 0) {
@@ -125,7 +136,7 @@ export function assessCapacity(
     };
   }
 
-  // Level 5 — unknown. No cooldown and no usage history: we know nothing, and say so.
+  // Level 6 — unknown. No cooldown and no usage history: we know nothing, and say so.
   // Absence of a cooldown is treated as dormant for routing preference, but the state
   // stays honestly `unknown` rather than a fabricated `available`.
   return {
@@ -150,18 +161,27 @@ export function isPoolExhausted(assessment: CapacityAssessment): boolean {
  * @param cooldownByPool pool → active-cooldown epoch ms (or null)
  * @param usageByPool    pool → observed usage (optional per pool)
  * @param nowMs          current epoch ms
+ * @param authoritativeByPool pool → whether its cooldown is provider-reported (default
+ *   `true` when absent for a pool, preserving prior behavior — see `assessCapacity`)
  */
 export function assessPools(
   pools: readonly string[],
   cooldownByPool: Map<string, number | null>,
   usageByPool: Map<string, PoolUsageObservation>,
   nowMs: number,
+  authoritativeByPool?: Map<string, boolean>,
 ): Map<string, CapacityAssessment> {
   const out = new Map<string, CapacityAssessment>();
   for (const pool of pools) {
     out.set(
       pool,
-      assessCapacity(pool, cooldownByPool.get(pool) ?? null, nowMs, usageByPool.get(pool)),
+      assessCapacity(
+        pool,
+        cooldownByPool.get(pool) ?? null,
+        nowMs,
+        usageByPool.get(pool),
+        authoritativeByPool?.get(pool) ?? true,
+      ),
     );
   }
   return out;

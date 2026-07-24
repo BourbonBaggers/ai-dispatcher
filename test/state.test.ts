@@ -187,18 +187,51 @@ test("concurrent stale-lock reclaimers cannot both become dispatchers", async ()
   }
 });
 
-test("suppression windows round-trip", () => {
+test("provider-capacity suppression evidence round-trips", () => {
   const dir = tmp();
   try {
     const store = StateStore.open(dir);
-    store.setSuppressedUntil("claude", 12345);
-    assert.equal(store.getSettings().claudeSuppressedUntil, 12345);
-    assert.equal(store.getSettings().codexSuppressedUntil, null);
+    store.setProviderSuppression("claude", {
+      kind: "unconfirmed-quota",
+      until: 12345,
+      authoritative: false,
+      detectedAt: 100,
+      reportedResetLabel: null,
+      excerpt: "usage limit reached",
+    });
+    assert.equal(store.getProviderSuppression("claude")?.until, 12345);
+    assert.equal(store.getProviderSuppression("claude")?.kind, "unconfirmed-quota");
+    assert.equal(store.getProviderSuppression("codex"), null);
     store.releaseLock();
 
     const reopened = StateStore.open(dir);
-    assert.equal(reopened.getSettings().claudeSuppressedUntil, 12345);
+    assert.equal(reopened.getProviderSuppression("claude")?.until, 12345);
+    assert.equal(reopened.getProviderSuppression("claude")?.authoritative, false);
     reopened.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a legacy pre-evidence suppression epoch migrates to a durable record on read", () => {
+  const dir = tmp();
+  try {
+    writeFileSync(
+      join(dir, "state.json"),
+      JSON.stringify({
+        version: 1,
+        settings: { claudeSuppressedUntil: 99999, codexSuppressedUntil: null },
+        runs: [],
+      }),
+      "utf8",
+    );
+    const store = StateStore.open(dir);
+    const record = store.getProviderSuppression("claude");
+    assert.ok(record);
+    assert.equal(record!.until, 99999);
+    assert.equal(record!.authoritative, true);
+    assert.equal(store.getProviderSuppression("codex"), null);
+    store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
