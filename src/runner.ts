@@ -26,10 +26,11 @@ import {
 } from "./token-exhaustion.ts";
 import type { DispatcherAgent } from "./labels.ts";
 import type { DispatcherConfig } from "./config.ts";
-import type { StateStore, RunRecord } from "./state.ts";
+import { phaseForStatus, type StateStore, type RunPhase, type RunRecord } from "./state.ts";
 import type { Logger } from "./logger.ts";
 import type { Notifier } from "./notify.ts";
 import { terminateProcessTree } from "./exec.ts";
+import { appendRunOutputEntry } from "./run-output.ts";
 
 /** The bundled script the runner launches — resolved relative to this module. */
 export const DISPATCH_AGENT_SCRIPT = fileURLToPath(
@@ -333,6 +334,40 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
   });
 
   return new Promise<RunRecord>((resolve) => {
+    let outputSeq = run.outputSeq;
+    const appendLifecycle = (status: string, message: string | null): void => {
+      outputSeq += 1;
+      if (config.stateDir) {
+        appendRunOutputEntry(config.stateDir, {
+          version: 1,
+          runId: run.id,
+          seq: outputSeq,
+          timestamp: now(),
+          type: "lifecycle",
+          stream: "control",
+          status,
+          message: message ? redact(message) : null,
+        });
+      }
+    };
+    const transitionPhase = (phase: RunPhase, message: string): void => {
+      outputSeq += 1;
+      if (config.stateDir) {
+        appendRunOutputEntry(config.stateDir, {
+          version: 1,
+          runId: run.id,
+          seq: outputSeq,
+          timestamp: now(),
+          type: "phase",
+          stream: "control",
+          phase,
+          message,
+        });
+      }
+      store.updateRun(run.id, { phase, outputSeq });
+    };
+
+    transitionPhase("preparing", "Preparing agent launch.");
     // fd 3 is a launcher-only control channel. Provider stdout is untrusted and may
     // contain text that looks exactly like ::result::/::pid::; never parse it as control.
     const child = spawn("bash", args, { env, stdio: ["ignore", "pipe", "pipe", "pipe"] });
@@ -344,7 +379,6 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
     let resultCi: CiState = "none";
     let resultDisposition: "normal" | "abandoned" = "normal";
     let tokenExhaustion: ProviderCapacitySignal | null = null;
-    let outputSeq = run.outputSeq;
     let launcherTimedOut = false;
     let launcherKillTimer: NodeJS.Timeout | undefined;
     const launcherTimeout = setTimeout(
@@ -362,7 +396,8 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
     if (child.pid) {
       // Persist before the shell's first control record so startup crashes can still
       // identify and terminate an orphaned checkout/npm/gh process tree.
-      store.updateRun(run.id, { remotePid: child.pid, status: "running" });
+      transitionPhase(spec.mode === "resume" ? "recovering" : "agent_working", "Agent provider started.");
+      store.updateRun(run.id, { remotePid: child.pid, status: "running", outputSeq });
     }
 
     const handleLine = (
@@ -381,17 +416,20 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
       }
 
       if (control?.kind === "pid") {
-        store.updateRun(run.id, { remotePid: control.pid ?? null, status: "running" });
+        store.updateRun(run.id, { remotePid: control.pid ?? null, status: "running", outputSeq });
         return;
       }
 
       if (control?.kind === "event") {
-        outputSeq += 1;
-        logger.info("event", { runId: run.id, issue: run.issueNumber, message: redact(control.message ?? "") });
+        const message = redact(control.message ?? "");
+        appendLifecycle("event", message);
+        store.updateRun(run.id, { outputSeq });
+        logger.info("event", { runId: run.id, issue: run.issueNumber, message });
         return;
       }
 
       if (control?.kind === "result" && control.result) {
+        transitionPhase("publishing", "Launcher reported delivery result.");
         sawResult = true;
         resultExit = control.result.exit;
         resultCommits = control.result.commits;
@@ -403,6 +441,7 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
           prNumber: pr ? Number.parseInt(pr.split("/").pop() ?? "", 10) || null : null,
           lastCommit: commit || null,
           planPath: plan || null,
+          outputSeq,
         });
         return;
       }
@@ -410,7 +449,20 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
       for (const rendered of toTerminalLines(line, run.agent)) {
         if (rendered.trim()) {
           outputSeq += 1;
-          logger.debug("output", { runId: run.id, line: redact(rendered) });
+          const redacted = redact(rendered);
+          if (config.stateDir) {
+            appendRunOutputEntry(config.stateDir, {
+              version: 1,
+              runId: run.id,
+              seq: outputSeq,
+              timestamp: now(),
+              type: "output",
+              stream,
+              line: redacted,
+            });
+          }
+          store.updateRun(run.id, { outputSeq });
+          logger.debug("output", { runId: run.id, line: redacted });
         }
       }
     };
@@ -458,8 +510,10 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
         summary = effectiveOutcome.summary;
       }
 
+      appendLifecycle(status, summary);
       const finalized = store.updateRun(run.id, {
         status,
+        phase: phaseForStatus(status),
         exitCode: effectiveOutcome.exitCode,
         failureSummary: summary ? redact(summary) : null,
         outputSeq,
@@ -484,8 +538,10 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
       clearTimeout(launcherTimeout);
       if (launcherKillTimer) clearTimeout(launcherKillTimer);
       logger.error("agent process failed to start", { runId: run.id, error: redact(err.message) });
+      appendLifecycle("failed", `Could not launch the agent: ${err.message}`);
       const finalized = store.updateRun(run.id, {
         status: "failed",
+        phase: phaseForStatus("failed"),
         exitCode: null,
         failureSummary: redact(`Could not launch the agent: ${err.message}`),
         outputSeq,

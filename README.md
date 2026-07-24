@@ -96,6 +96,63 @@ deployed **and** free of material human repair — never on a clean exit or a PR
 node bin/ai-dispatcher.mjs report --state-dir ~/dispatcher/state
 ```
 
+## Local status and history
+
+`status` and `history` are local, read-only, and lock-free. They read only
+`DISPATCHER_STATE_DIR` / `--state-dir`, never call GitHub, never acquire
+`dispatcher.lock`, and never mutate durable state. If both `state.json` and
+`state.json.backup` are unreadable, they fail closed instead of reporting idle.
+
+```bash
+ai-dispatcher status --state-dir ~/dispatcher/state
+ai-dispatcher status --state-dir ~/dispatcher/state --json
+ai-dispatcher status --state-dir ~/dispatcher/state --follow
+ai-dispatcher status --state-dir ~/dispatcher/state --json --follow
+ai-dispatcher history --state-dir ~/dispatcher/state
+ai-dispatcher history --state-dir ~/dispatcher/state --json --limit 50
+```
+
+Human `status` output is exactly `idle` when a live dispatcher has no claimed work. If no
+live lock exists and no claimed work is durable, it prints `offline`. If claimed work
+exists, it prints `active:` with the locally known issue, PR, branch, agent/model, phase,
+status, and an optional exact `gh` command the operator may run separately for fresh
+GitHub state.
+
+Each run persists an explicit trusted phase in `state.json`. Provider stdout is never
+parsed as phase evidence. The current phase is one of:
+`claimed`, `preparing`, `agent_working`, `publishing`, `waiting_ci`, `autoshipping`,
+`deploying`, `verifying`, `recovering`, or `held`. Older state rows without `phase` are
+mapped from durable status on read.
+
+Agent output is stored under `<state-dir>/run-output/<run-id>.jsonl`. Entries are
+append-only JSON lines containing the existing rendered/redacted output plus trusted
+phase and lifecycle events. They have monotonic `seq` numbers and `timestamp`
+milliseconds. Output files are pruned with their retained run records.
+
+Versioned JSON schemas:
+
+```ts
+// ai-dispatcher status --json
+{
+  version: 1,
+  service: { state: "online", pid: number } |
+    { state: "offline", pid: number | null, reason: "missing" | "stale" | "corrupt" },
+  stateSource: "primary" | "backup" | "empty",
+  current: null | RunSummary
+}
+
+// ai-dispatcher history --json
+{ version: 1, runs: RunSummary[] }
+
+// ai-dispatcher status --json --follow
+{ version: 1, event: RunOutputEntry }
+```
+
+`RunSummary` includes issue identifiers, optional PR, branch, agent/model/effort, durable
+status, current phase, trigger, timestamps/duration, last commit, plan path, recovery and
+exhaustion evidence, failure summary, and optional `ghCommand`. `RunOutputEntry` is one
+of `output`, `phase`, or `lifecycle`.
+
 ## Requirements
 
 - **Node.js 24+** (the service runs its TypeScript directly via native type-stripping; no
