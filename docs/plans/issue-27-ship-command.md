@@ -49,7 +49,7 @@ anything is not ready, exit non-zero with an explanation; the user reruns it lat
 - Unit test every branch with a fake github + fake ship runner, mirroring
   `test/autoship.test.ts`'s harness style.
 
-## Milestone 4: CLI wiring
+## [DONE] Milestone 4: CLI wiring
 
 - Add `parseShipCliConfig` to `src/config.ts`: `--repo`, `--pr` (required int), `--issue`
   (optional int), reusing `DISPATCHER_AUTOSHIP_CMD` / `DISPATCHER_AUTOSHIP_DEPLOYMENT_DIR`
