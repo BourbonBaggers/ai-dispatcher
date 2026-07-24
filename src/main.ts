@@ -18,6 +18,7 @@ import { reconcile, runScanOnce, type DispatcherDeps } from "./dispatcher.ts";
 import { run } from "./exec.ts";
 import { TelemetryStore } from "./telemetry.ts";
 import { buildRoutingReport } from "./report.ts";
+import { runHistoryCommand, runStatusCommand } from "./status.ts";
 
 /** Sleeps for `ms`, resolving early if the abort signal fires. */
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -109,6 +110,22 @@ export async function main(argv: string[]): Promise<number> {
   // `report` is a read-only subcommand that bypasses the loop config entirely.
   if (argv[0] === "report") {
     return runReport(argv.slice(1), process.env, (s) => process.stdout.write(`${s}\n`));
+  }
+  if (argv[0] === "status") {
+    return await runStatusCommand(
+      argv.slice(1),
+      process.env,
+      (s) => process.stdout.write(s),
+      (s) => process.stderr.write(s),
+    );
+  }
+  if (argv[0] === "history") {
+    return runHistoryCommand(
+      argv.slice(1),
+      process.env,
+      (s) => process.stdout.write(s),
+      (s) => process.stderr.write(s),
+    );
   }
 
   const parsed = parseCliConfig(argv, process.env);
