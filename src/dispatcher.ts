@@ -485,6 +485,11 @@ async function exhaustRun(
   const finalRun = deps.store.updateRun(run.id, {
     status: "held",
     failureSummary: `${kind} recovery exhausted: ${reason}`,
+    exhaustion: {
+      kind,
+      reason,
+      at: (deps.now ?? (() => Date.now()))(),
+    },
     finishedAt: (deps.now ?? (() => Date.now()))(),
   });
   await deps.github.addLabel(run.issueNumber, AUTOSHIP_HELD_LABEL);
@@ -658,6 +663,15 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
         generatedConflictCiWaitSeconds: deps.config.generatedConflictCiWaitSeconds,
         ciSelfHealMaxAttempts: deps.config.ciSelfHealMaxAttempts,
         ciEscalationModel: deps.config.ciEscalationModel,
+        beforeShip: ({ pr, mergedSha }) => {
+          store.updateRun(run.id, {
+            status: "ci_pending",
+            failureSummary:
+              `Deployment started for PR #${pr}` +
+              (mergedSha ? ` at merged SHA ${mergedSha}` : "") +
+              "; awaiting verified production health.",
+          });
+        },
       },
       run,
     );
@@ -756,13 +770,13 @@ export async function recheckParkedRun(deps: DispatcherDeps, run: RunRecord): Pr
 }
 
 /**
- * Rechecks a HELD run to see whether a human has approved it for shipping. A held run keeps
- * its issue claim (HELD_STATUSES ⊂ CLAIMING_STATUSES), so the issue is never re-dispatched
- * from scratch while it waits. The single signal that a human has approved is the removal of
- * the `autoship-held` label; while that label is still present this is a cheap no-op. A closed
- * issue retires the held run before any label or autoship work, because human closure is
- * terminal and must not produce repeated notifications. Once the label is gone on an OPEN
- * issue, this RESUMES autoship of the existing ready PR through the exact same
+ * Rechecks a HELD run. Current-version holds carry durable proof that assigned-model repairs
+ * and frontier escalation were exhausted; those wait for the operator to remove
+ * `autoship-held`. Legacy holds have no such proof, so the dispatcher clears their label and
+ * resumes them automatically instead of preserving obsolete manual gates forever. A held run
+ * keeps its issue claim (HELD_STATUSES ⊂ CLAIMING_STATUSES), so it is never re-dispatched from
+ * scratch while it waits. A closed issue retires the held run before any label or autoship
+ * work because closure is terminal. An OPEN, un-held issue resumes through the exact same
  * `evaluateAutoship` pipeline a fresh or parked run goes through — merge + deploy the PR that
  * is already there — rather than relaunching the agent to redo work that is already done
  * (issue #10). Like `recheckParkedRun`, it deliberately does NOT go through `finalizeRun`:
@@ -790,9 +804,20 @@ export async function recheckHeldRun(deps: DispatcherDeps, run: RunRecord): Prom
   }
 
   const labels = await deps.github.issueLabels(run.issueNumber);
-  if (labels.includes(AUTOSHIP_HELD_LABEL)) {
-    // Still held by a human — leave it exactly as it is.
+  if (labels.includes(AUTOSHIP_HELD_LABEL) && run.exhaustion) {
+    // A current-version hold carries durable proof that the full ladder was spent.
     return { rechecked: false };
+  }
+  if (labels.includes(AUTOSHIP_HELD_LABEL)) {
+    // Old versions created holds for data-loss heuristics, merge conflicts, and first
+    // deploy failures. They have no exhaustion proof and must not survive the policy
+    // migration as permanent operator work.
+    await deps.github.removeLabel(run.issueNumber, AUTOSHIP_HELD_LABEL);
+    deps.logger.warn("cleared legacy hold without frontier-exhaustion proof", {
+      runId: run.id,
+      issue: run.issueNumber,
+      pr: run.prNumber ?? undefined,
+    });
   }
   deps.logger.info("held PR un-held — resuming autoship without relaunching the agent", {
     runId: run.id,

@@ -528,10 +528,8 @@ if [[ -n "$PR_URL" ]]; then
 elif [[ "$COMMITS_AHEAD" -gt 0 ]]; then
   # Commits exist but the agent never opened a PR itself (it crashed, or the
   # uncommitted-work safety net captured a commit for it). Ready for review, same as an
-  # agent-opened PR -- CI and autoship's own data-loss gate are the real backstop here,
-  # not whether a PR happens to carry the draft flag, and this path has no less
-  # information about destructiveness than an agent's own self-assessment would (autoship
-  # inspects the diff itself either way).
+  # agent-opened PR -- CI and autonomous recovery are the backstop here, not whether a
+  # PR happens to carry the draft flag.
   PR_URL="$(gh pr create --repo "$REPO_SLUG" --base main --head "$BRANCH" \
     --title "issue #${ISSUE}: dispatcher run (${AGENT})" \
     --body "Automated run by the AI Issue Dispatcher. Issue: #${ISSUE}" \

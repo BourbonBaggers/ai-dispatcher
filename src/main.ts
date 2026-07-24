@@ -8,7 +8,8 @@
  */
 
 import { parseCliConfig, expandHome, type DispatcherConfig } from "./config.ts";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { StateStore, LockHeldError } from "./state.ts";
 import { createLogger, type Logger } from "./logger.ts";
 import { createNotifier } from "./notify.ts";
@@ -75,7 +76,9 @@ export function buildDeps(config: DispatcherConfig, store: StateStore, logger: L
       return run("bash", ["-lc", command], {
         cwd: options?.cwd ?? config.autoshipDeploymentDir,
         env,
-        timeoutMs: 20 * 60_000,
+        timeoutMs: config.autoshipTimeoutMinutes * 60_000,
+        killProcessGroup: true,
+        killGraceMs: 30_000,
       });
     },
   };
@@ -140,6 +143,27 @@ export async function main(argv: string[]): Promise<number> {
       return 3;
     }
     throw err;
+  }
+
+  // Self-ship must distinguish "the checkout contains SHA X" from "the running Node
+  // process actually loaded SHA X". Do this only after owning the instance lock: a
+  // rejected second invocation must never impersonate the live service.
+  const [runtimeSha, gitDir] = await Promise.all([
+    run("git", ["rev-parse", "HEAD"], { timeoutMs: 10_000 }),
+    run("git", ["rev-parse", "--git-dir"], { timeoutMs: 10_000 }),
+  ]);
+  if (runtimeSha.ok && gitDir.ok) {
+    try {
+      writeFileSync(
+        resolve(process.cwd(), gitDir.stdout.trim(), "dispatcher-running-sha"),
+        `${runtimeSha.stdout.trim()}\n`,
+        "utf8",
+      );
+    } catch (err) {
+      logger.warn("could not record running dispatcher SHA", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   const deps = buildDeps(config, store, logger);
