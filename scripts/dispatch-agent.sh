@@ -433,9 +433,13 @@ if [[ "$AGENT" == "claude" ]]; then
     < .dispatcher-prompt.md 3>&- &
 else
   # workspace-write keeps the agent's writes inside this checkout; network access is
-  # switched back on because it must be able to fetch, push, and open a PR.
+  # switched back on because it must be able to fetch, push, and open a PR. JSONL is a
+  # safety boundary: plain Codex writes both provider errors and untrusted tool output to
+  # stderr, so downstream capacity detection cannot distinguish a real quota error from
+  # repository text. Structured events preserve that provenance.
   setsid timeout --signal=TERM --kill-after="$KILL_GRACE_SECONDS" "${MAX_SECONDS}s" \
     codex exec \
+      --json \
       --model "$MODEL" \
       --cd "$CHECKOUT" \
       --sandbox workspace-write \
