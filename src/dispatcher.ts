@@ -25,14 +25,9 @@ import {
 import { selectEligibleIssue } from "./selection.ts";
 import { untrustedAuthorComment, UNTRUSTED_AUTHOR_LABEL } from "./author-auth.ts";
 import { isProviderSuppressed, formatResetTime } from "./token-exhaustion.ts";
-import {
-  getBlockingIssueDeferrals,
-  recordTerminalRunOutcome,
-  type IssueFailureRecord,
-} from "./failure-policy.ts";
 import { launchRun } from "./runner.ts";
 import { join } from "node:path";
-import { NOTIFY_PRIORITY_DEFAULT, NOTIFY_PRIORITY_HIGH, type Notifier } from "./notify.ts";
+import { NOTIFY_PRIORITY_HIGH, type Notifier } from "./notify.ts";
 import { autoshipRun, AUTOSHIP_HELD_LABEL, type ShipRunner } from "./autoship.ts";
 import { modelByCliModel } from "./models.ts";
 import { UNAVAILABLE_TOKENS, type AttemptRecord, type TelemetryStore } from "./telemetry.ts";
@@ -40,6 +35,11 @@ import type { GithubClient, GithubIssue } from "./github.ts";
 import type { DispatcherConfig } from "./config.ts";
 import type { Logger } from "./logger.ts";
 import type { StateStore, RunRecord } from "./state.ts";
+import {
+  decideRecovery,
+  updateRecovery,
+  type RecoveryKind,
+} from "./recovery-policy.ts";
 
 /**
  * How many times the dispatcher relaunches a run by itself before leaving it for a
@@ -162,7 +162,8 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   // ── Resume first ──
   // A resumable run holds its issue's claim, so leaving it parked while we pick up fresh
   // work would quietly abandon it. Interrupted/timed-out runs get the next slot.
-  const resumable = selectResumable(store.resumableRuns(), isSuppressed, MAX_AUTO_RESUMES);
+  const resumableRuns = store.resumableRuns();
+  const resumable = selectResumable(resumableRuns, isSuppressed, MAX_AUTO_RESUMES);
   if (resumable) {
     if (config.dryRun) {
       return {
@@ -174,6 +175,47 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
     return {
       started: resumed,
       message: `Resumed the interrupted run on issue #${resumable.issueNumber} before starting new work.`,
+    };
+  }
+
+  // A crash/timeout that reaches the ordinary resume cap must not become a silent,
+  // permanently claiming zombie. Escalate it to the frontier once; if that attempt also
+  // reaches the cap, this is genuine exhaustion and the operator gets the single page.
+  const capped = resumableRuns.find(
+    (run) => !isSuppressed(run.agent) && run.resumeCount >= MAX_AUTO_RESUMES,
+  );
+  if (capped) {
+    if (config.dryRun) {
+      return {
+        started: null,
+        message: `[dry-run] would escalate exhausted resumes for issue #${capped.issueNumber}.`,
+      };
+    }
+    const agentRecovery = capped.recovery?.agent;
+    if (agentRecovery?.escalated) {
+      await exhaustRun(
+        deps,
+        capped,
+        "agent",
+        `The process remained interrupted after ${MAX_AUTO_RESUMES} frontier resume attempts.`,
+      );
+    } else {
+      const prepared = store.updateRun(capped.id, {
+        recovery: updateRecovery(capped.recovery, "agent", {
+          attempts: config.ciSelfHealMaxAttempts,
+        }),
+      });
+      await escalateRun(
+        deps,
+        prepared,
+        config.ciEscalationModel,
+        "agent",
+        `The process remained interrupted after ${MAX_AUTO_RESUMES} resume attempts.`,
+      );
+    }
+    return {
+      started: store.getRun(capped.id),
+      message: `Escalated exhausted resumes for issue #${capped.issueNumber}.`,
     };
   }
 
@@ -225,8 +267,6 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   }
 
   const claimedByIssue = store.claimingRunsByIssue();
-  const deferredByIssue = getBlockingIssueDeferrals(store.issueFailures(), nowMs);
-
   const { candidates, target } = selectEligibleIssue(listing.issues, {
     providerSuppressed: (agent) => isSuppressed(agent),
     suppressedReason: (agent) => {
@@ -235,7 +275,6 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
       return `${provider} is out of tokens — paused until ${until ? formatResetTime(until) : "reset"}`;
     },
     claimedByIssue,
-    deferredByIssue,
     authorAuth: config.authorAuth,
   });
 
@@ -292,10 +331,6 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   // Label after claiming: the state row is the authoritative lock, and a failed label
   // write must not leave us thinking the claim failed.
   await github.addLabel(issue.number, WORKING_LABEL);
-  notifier
-    .send(`Dispatcher: ${agent} started #${issue.number}`, issue.title, NOTIFY_PRIORITY_DEFAULT)
-    .catch(() => undefined);
-
   const terminal = await launchRun(run, { config, store, logger, notifier, now });
   await finalizeRun(deps, terminal);
   pruneOldRuns(deps);
@@ -339,36 +374,35 @@ export async function resumeRun(deps: DispatcherDeps, run: RunRecord): Promise<R
 }
 
 /**
- * Self-heal: relaunches the agent on the same branch to fix a PR whose CI autoship just
- * found red, then finalizes the new terminal run exactly like any other run. Reentry
- * mirrors `resumeRun` (same checkout, same branch, trigger "resume" so dispatch-agent.sh
- * feeds the resumed agent the actual failing checks) but tracks its own counter —
- * `ciSelfHealAttempts` — so the cap is independent of the crash/timeout resume budget.
- * `autoshipRun` is the sole place that decides whether another attempt is warranted; this
- * function only ever executes an attempt it already approved.
- *
- * Recursing into `finalizeRun` lets the new terminal run go through the exact same
- * comment/notify/autoship pipeline as any other run: if the fix worked, autoship ships
- * it; if CI is still red, autoshipRun either allows another self-heal (attempt < cap) or
- * stamps `autoship-held` (cap reached) — the recursion depth is bounded by
- * `ciSelfHealMaxAttempts`.
+ * Relaunch the assigned agent on the same branch to repair one owned delivery phase.
+ * Agent, CI, merge/conflict, and deploy recovery have independent counters in the
+ * unified ledger, so success in one phase cannot consume another phase's repair budget.
+ * Recursing through `finalizeRun` is bounded by the recovery policy and preserves the
+ * normal classification, telemetry, and autoship path for every attempt.
  */
-async function selfHealRun(deps: DispatcherDeps, run: RunRecord, attempt: number): Promise<void> {
+async function repairRun(
+  deps: DispatcherDeps,
+  run: RunRecord,
+  kind: RecoveryKind,
+  attempt: number,
+  reason: string,
+): Promise<void> {
   const { config, store, github, logger, notifier } = deps;
   const now = deps.now ?? (() => Date.now());
 
   const reentered = store.updateRun(run.id, {
     status: "claimed",
     trigger: "resume",
-    ciSelfHealAttempts: attempt,
+    recovery: updateRecovery(run.recovery, kind, { attempts: attempt }),
     exitCode: null,
-    failureSummary: null,
+    failureSummary: reason,
     finishedAt: null,
   });
 
-  logger.info("self-heal: relaunching agent to fix red CI", {
+  logger.info("self-heal: relaunching agent to repair delivery failure", {
     runId: run.id,
     issue: run.issueNumber,
+    kind,
     attempt,
   });
 
@@ -379,16 +413,11 @@ async function selfHealRun(deps: DispatcherDeps, run: RunRecord, attempt: number
 }
 
 /**
- * Escalation: the one-shot follow-up after an automated ladder's budget is exhausted and
- * the problem persists. Two callers, one per budget:
- *   - `kind: "ci"`  — selfHealRun's budget is spent and CI is still red (sets `ciEscalated`).
- *   - `kind: "deploy"` — the ship command failed and no deploy escalation has run yet
- *     (sets `deployEscalated`).
- * The two budgets are independent by design: a run may burn its CI escalation greening
- * checks, ship, and only then hit a deploy failure — that deploy still deserves a fresh
- * frontier attempt, so it flips a different flag.
+ * Run the one-shot frontier attempt after the assigned model's repair budget for one
+ * phase is spent. Phase budgets are independent: using the CI escalation does not consume
+ * the later merge or deploy escalation.
  *
- * Relaunches on the same branch/checkout (a resume, exactly like selfHealRun) but
+ * Relaunches on the same branch/checkout (a resume, exactly like repairRun) but
  * overrides the run's agent/model/effort to `cliModel` — resolved via `modelByCliModel`
  * so the launched CLI and its model label stay consistent with the registry entry (an
  * escalation model is necessarily a `claude` model today, but this does not hard-code
@@ -396,14 +425,15 @@ async function selfHealRun(deps: DispatcherDeps, run: RunRecord, attempt: number
  * registry; `config.ts` already validates DISPATCHER_CI_ESCALATION_MODEL at startup, so
  * that fallback is a belt-and-suspenders default, not the expected path. Uses "effort:max"
  * or its per-agent equivalent — a last-resort attempt should not be effort-capped.
- * The relevant escalation flag is set before launching so autoshipRun never grants a
- * second one for the same failure kind.
+ * The relevant ledger entry is set before launching so autoship never grants a second
+ * frontier attempt for the same failure kind.
  */
 async function escalateRun(
   deps: DispatcherDeps,
   run: RunRecord,
   cliModel: string,
-  kind: "ci" | "deploy" = "ci",
+  kind: RecoveryKind,
+  reason: string,
 ): Promise<void> {
   const { config, store, github, logger, notifier } = deps;
   const now = deps.now ?? (() => Date.now());
@@ -421,9 +451,9 @@ async function escalateRun(
     cliModel,
     effortLabel: "effort:max",
     cliEffort,
-    ...(kind === "deploy" ? { deployEscalated: true } : { ciEscalated: true }),
+    recovery: updateRecovery(run.recovery, kind, { escalated: true }),
     exitCode: null,
-    failureSummary: null,
+    failureSummary: reason,
     finishedAt: null,
   });
 
@@ -441,8 +471,55 @@ async function escalateRun(
 }
 
 /**
- * Once-only GitHub bookkeeping after a run reaches a terminal state: apply the failure
- * deferral policy, release the working label (unless the run is still resumable/parked),
+ * The sole human-handoff path. Reaching here proves the assigned-model repair budget
+ * and the frontier attempt for this phase are both spent. The durable hold keeps the
+ * claim, and the single high-priority notification contains the actual exhausted phase
+ * and last observed failure.
+ */
+async function exhaustRun(
+  deps: DispatcherDeps,
+  run: RunRecord,
+  kind: RecoveryKind,
+  reason: string,
+): Promise<void> {
+  const finalRun = deps.store.updateRun(run.id, {
+    status: "held",
+    failureSummary: `${kind} recovery exhausted: ${reason}`,
+    finishedAt: (deps.now ?? (() => Date.now()))(),
+  });
+  await deps.github.addLabel(run.issueNumber, AUTOSHIP_HELD_LABEL);
+  await deps.github.removeLabel(run.issueNumber, WORKING_LABEL);
+  await deps.github.comment(
+    run.issueNumber,
+    [
+      `## Dispatcher exhausted — ${kind} still failing after frontier escalation`,
+      "",
+      reason,
+      "",
+      `The assigned model used ${deps.config.ciSelfHealMaxAttempts} repair attempt(s), then ` +
+        `\`${deps.config.ciEscalationModel}\` made the final attempt. Automation is now exhausted.`,
+      "",
+      "This is the only state that requires operator involvement.",
+    ].join("\n"),
+  );
+  deps.logger.error("dispatcher recovery exhausted", {
+    runId: run.id,
+    issue: run.issueNumber,
+    kind,
+    reason,
+  });
+  await deps.notifier
+    .send(
+      `Dispatcher EXHAUSTED #${run.issueNumber}`,
+      finalRun.failureSummary ?? reason,
+      NOTIFY_PRIORITY_HIGH,
+    )
+    .catch(() => undefined);
+}
+
+/**
+ * Once-only GitHub bookkeeping after a run reaches a terminal state: release the working
+ * label unless the run is still resumable/parked,
  * comment on the issue, hand off to `evaluateAutoship` to resolve the real outcome, and
  * send the run notification (except for token exhaustion, which already notified through
  * its own cooldown path, and except when evaluateAutoship just triggered a self-heal/
@@ -450,7 +527,7 @@ async function escalateRun(
  * that settles).
  */
 export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise<void> {
-  const { store, github, logger, notifier } = deps;
+  const { store, github, logger } = deps;
   const now = deps.now ?? (() => Date.now());
 
   if (run.status === "abandoned") return;
@@ -468,12 +545,34 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
     }
   }
 
-  const accounting = recordTerminalRunOutcome(store.issueFailures(), run, now());
-  store.setIssueFailures(accounting.records);
-  if (accounting.notification) {
-    notifier
-      .send(accounting.notification.title, accounting.notification.body, NOTIFY_PRIORITY_HIGH)
-      .catch(() => undefined);
+  // A plain agent failure is not a human handoff. It gets the same bounded recovery
+  // ladder as CI, merge, and deploy: assigned-model repairs, then one frontier attempt.
+  // Intermediate failures stay internal—no high-priority push and no "go fix this"
+  // issue comment while automation still owns the problem.
+  if (run.status === "failed") {
+    const decision = decideRecovery(run.recovery, "agent", deps.config.ciSelfHealMaxAttempts);
+    if (decision.action === "retry") {
+      await repairRun(
+        deps,
+        run,
+        "agent",
+        decision.attempt,
+        run.failureSummary ?? `Agent exited ${run.exitCode ?? "without a result"}.`,
+      );
+      return;
+    }
+    if (decision.action === "escalate") {
+      await escalateRun(
+        deps,
+        run,
+        deps.config.ciEscalationModel,
+        "agent",
+        run.failureSummary ?? `Agent exited ${run.exitCode ?? "without a result"}.`,
+      );
+      return;
+    }
+    await exhaustRun(deps, run, "agent", run.failureSummary ?? `Agent exited ${run.exitCode ?? "without a result"}.`);
+    return;
   }
 
   const resumable = !shouldReleaseClaim(run.status);
@@ -481,7 +580,7 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
     await github.removeLabel(run.issueNumber, WORKING_LABEL);
   }
 
-  await github.comment(run.issueNumber, buildIssueComment(run, resumable, accounting.summary));
+  await github.comment(run.issueNumber, buildIssueComment(run, resumable));
 
   logger.info("run finalized", { runId: run.id, issue: run.issueNumber, status: run.status });
 
@@ -495,25 +594,9 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
   // misleading extra push moments before the accurate one.
   if (relaunched) return;
 
-  // Re-read: evaluateAutoship may have just changed run.status (shipped/ci_pending/held)
-  // in the store -- `run` above is a snapshot from before that call.
-  const finalRun = store.getRun(run.id) ?? run;
-
-  // Token exhaustion already sent its single notification through the cooldown path;
-  // re-sending here would defeat the one-alert-per-window guarantee.
-  if (finalRun.status !== "token_exhausted") {
-    const priority =
-      finalRun.status === "shipped" || finalRun.status === "ci_pending"
-        ? NOTIFY_PRIORITY_DEFAULT
-        : NOTIFY_PRIORITY_HIGH;
-    notifier
-      .send(
-        `Dispatcher: #${finalRun.issueNumber} ${finalRun.status.replace("_", " ")}`,
-        finalRun.prUrl ? `PR: ${finalRun.prUrl}` : (finalRun.failureSummary ?? finalRun.issueTitle),
-        priority,
-      )
-      .catch(() => undefined);
-  }
+  // No progress/failure push here. Autoship owns the one verified-success notification,
+  // token exhaustion owns its cooldown notification, and exhaustRun owns the only
+  // operator-action page. Everything else remains automation-internal.
 }
 
 /**
@@ -534,17 +617,28 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
   const { store, github, notifier, logger } = deps;
 
   if (!deps.ship) {
-    // Autoship not configured for this repo: nothing will ever merge + deploy
-    // automatically, and there is no self-heal ladder without it. Map the agent's own
-    // preliminary classification onto the closest available terminal meaning, rather
-    // than leaving a "shipped" run pretending to be a real success or a "ci_failed" run
-    // stuck in a status this configuration can never resolve: a green PR is left for a
-    // human to review and merge manually (`held`); a red PR falls back to the plain
-    // `failed` accounting the dispatcher used before the self-heal ladder existed.
-    // `ci_pending` stands as-is -- parking and cheaply re-checking CI is a universal
-    // improvement that does not depend on autoship being configured.
-    if (run.status === "shipped") store.updateRun(run.id, { status: "held" });
-    else if (run.status === "ci_failed") store.updateRun(run.id, { status: "failed" });
+    const decision = decideRecovery(run.recovery, "deploy", deps.config.ciSelfHealMaxAttempts);
+    if (decision.action === "retry") {
+      await repairRun(
+        deps,
+        run,
+        "deploy",
+        decision.attempt,
+        "No autoship command is configured for this repository.",
+      );
+      return { relaunched: true };
+    }
+    if (decision.action === "escalate") {
+      await escalateRun(
+        deps,
+        run,
+        deps.config.ciEscalationModel,
+        "deploy",
+        "No autoship command is configured for this repository.",
+      );
+      return { relaunched: true };
+    }
+    await exhaustRun(deps, run, "deploy", "No autoship command is configured for this repository.");
     return { relaunched: false };
   }
 
@@ -573,55 +667,76 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
       case "shipped":
         store.updateRun(run.id, { status: "shipped" });
         return { relaunched: false };
+      case "deploy_pending":
+        // Self-deployment restarts this service from a detached systemd unit. Persist a
+        // parked claim before that restart can kill us; the new process rechecks the
+        // already-merged SHA and closes only after the detached verifier records health.
+        store.updateRun(run.id, { status: "ci_pending" });
+        return { relaunched: false };
       case "ci_not_green":
         if (outcome.state === "pending") {
           // Only touch the record on the TRANSITION into parked -- a recheck that finds
           // it still pending must stay silent and cheap, not re-write every ~15 minutes
           // while nothing has actually changed.
           if (run.status !== "ci_pending") store.updateRun(run.id, { status: "ci_pending" });
-        } else {
-          // Self-heal and escalation are both exhausted; autoshipRun already stamped
-          // autoship-held and commented in that case.
-          store.updateRun(run.id, { status: "held" });
+          return { relaunched: false };
         }
-        return { relaunched: false };
-      case "ci_self_heal":
+        // Defensive fallback: autoship normally maps red CI directly to a recovery
+        // outcome. Never let a future caller turn a raw `fail` into a premature hold.
+        {
+          const decision = decideRecovery(
+            run.recovery,
+            "ci",
+            deps.config.ciSelfHealMaxAttempts,
+          );
+          const reason = `PR #${run.prNumber ?? "?"} CI is failing.`;
+          if (decision.action === "retry") {
+            await repairRun(deps, run, "ci", decision.attempt, reason);
+            return { relaunched: true };
+          }
+          if (decision.action === "escalate") {
+            await escalateRun(
+              deps,
+              run,
+              deps.config.ciEscalationModel,
+              "ci",
+              reason,
+            );
+            return { relaunched: true };
+          }
+          await exhaustRun(deps, run, "ci", reason);
+          return { relaunched: false };
+        }
+      case "repair":
         store.updateRun(run.id, { status: "ci_failed" });
-        await selfHealRun(deps, run, outcome.attempt);
+        await repairRun(deps, run, outcome.kind, outcome.attempt, outcome.reason);
         return { relaunched: true };
-      case "ci_escalate":
+      case "escalate":
         store.updateRun(run.id, { status: "ci_failed" });
-        await escalateRun(deps, run, outcome.model, "ci");
+        await escalateRun(deps, run, outcome.model, outcome.kind, outcome.reason);
         return { relaunched: true };
-      case "ship_escalate":
-        // A deploy failure gets the same one-shot frontier attempt CI failures do: relaunch
-        // the agent on the same PR to fix the code-or-deploy-path bug, then re-ship. Marked
-        // ci_failed so the run keeps its claim across the relaunch (LADDER_STATUSES), exactly
-        // like the CI escalation above -- the status names the ladder, not the failure kind.
-        store.updateRun(run.id, { status: "ci_failed" });
-        await escalateRun(deps, run, outcome.model, "deploy");
-        return { relaunched: true };
-      case "already_merged":
-        // The PR was merged out of band; autoship stood down (it did NOT deploy or verify,
-        // so this is not `shipped`). Held keeps the claim so the issue is neither
-        // re-dispatched nor re-shipped; a human verifies the deploy and closes it.
-        store.updateRun(run.id, { status: "held" });
-        return { relaunched: false };
-      case "held":
-      case "merge_blocked":
-      case "conflict_recovery_failed":
-      case "ship_failed":
-        store.updateRun(run.id, { status: "held" });
+      case "exhausted":
+        await exhaustRun(deps, run, outcome.kind, outcome.reason);
         return { relaunched: false };
       case "skipped":
         return { relaunched: false };
     }
   } catch (err) {
-    // An autoship failure must never break the loop; it has its own ntfy path.
     logger.error("autoship threw", {
       runId: run.id,
       error: err instanceof Error ? err.message : String(err),
     });
+    const reason = `Autoship orchestration threw: ${err instanceof Error ? err.message : String(err)}`;
+    const decision = decideRecovery(run.recovery, "merge", deps.config.ciSelfHealMaxAttempts);
+    if (decision.action === "retry") {
+      await repairRun(deps, run, "merge", decision.attempt, reason);
+      return { relaunched: true };
+    }
+    if (decision.action === "escalate") {
+      await escalateRun(deps, run, deps.config.ciEscalationModel, "merge", reason);
+      return { relaunched: true };
+    }
+    await exhaustRun(deps, run, "merge", reason);
     return { relaunched: false };
   }
 }
@@ -733,13 +848,11 @@ export function attemptRecordFromRun(run: RunRecord, nowMs: number): AttemptReco
  * PROVISIONAL classification from classifyRunOutcome (runner.ts) -- posted before
  * evaluateAutoship gets a chance to confirm/override it, so "shipped" at this point
  * means "CI was green when the agent finished," not "actually merged and deployed
- * yet." autoship's own follow-up comment (self-heal / escalate / held / shipped)
- * clarifies the real outcome moments later.
+ * yet." autoship's own follow-up action determines the real outcome moments later.
  */
 export function buildIssueComment(
   run: RunRecord,
   resumable: boolean,
-  deferralSummary: string | null,
 ): string {
   const statusLabel =
     run.status === "shipped" ? "complete — CI green, handing off to autoship" : run.status.replace("_", " ");
@@ -751,8 +864,6 @@ export function buildIssueComment(
   if (run.planPath) lines.push(`- Plan: \`${run.planPath}\``);
   if (run.prUrl) lines.push(`- Pull request: ${run.prUrl}`);
   if (run.failureSummary) lines.push(`- Result: ${run.failureSummary}`);
-  if (deferralSummary) lines.push(`- Queue deferral: ${deferralSummary}`);
-
   lines.push("");
   if (run.status === "ci_pending") {
     lines.push(
@@ -762,7 +873,7 @@ export function buildIssueComment(
   } else if (run.status === "ci_failed") {
     lines.push(
       "CI is red. The dispatcher is relaunching the agent to diagnose and fix it (self-heal), " +
-        "escalating to a stronger model if that does not resolve it, before holding for a human.",
+        "then escalating to one frontier-model attempt if the assigned model cannot resolve it.",
     );
   } else if (resumable) {
     lines.push(
@@ -771,8 +882,8 @@ export function buildIssueComment(
     );
   } else if (run.status === "failed") {
     lines.push(
-      "The run was not retried automatically. It will be picked up again once the cause is understood, " +
-        "or after its failure-deferral window clears.",
+      "The dispatcher is relaunching the agent on the same branch to diagnose and repair the failure, " +
+        "then will make one frontier-model attempt if the assigned model cannot resolve it.",
     );
   }
 
@@ -836,6 +947,3 @@ export function runsToKeep(runs: RunRecord[], budget: number): Set<string> {
   for (const run of terminal) keep.add(run.id);
   return keep;
 }
-
-/** Re-export so tests referencing the record shape do not reach into failure-policy. */
-export type { IssueFailureRecord };

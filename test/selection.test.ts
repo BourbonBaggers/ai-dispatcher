@@ -18,7 +18,6 @@ function ctx(overrides: Partial<SelectionContext> = {}): SelectionContext {
     providerSuppressed: () => false,
     suppressedReason: (a) => `${a} is out of tokens`,
     claimedByIssue: new Map(),
-    deferredByIssue: new Map(),
     ...overrides,
   };
 }
@@ -127,13 +126,6 @@ test("an issue with an existing claiming run is skipped, not restarted", () => {
   const { target, candidates } = selectEligibleIssue([issue(1, CLAUDE)], context);
   assert.equal(target, null);
   assert.match(candidates[0]!.reason, /already has a interrupted dispatcher run/);
-});
-
-test("a deferred issue is skipped with the supplied reason", () => {
-  const context = ctx({ deferredByIssue: new Map([[1, "deferred after 3 matching failures"]]) });
-  const { target, candidates } = selectEligibleIssue([issue(1, CODEX)], context);
-  assert.equal(target, null);
-  assert.equal(candidates[0]!.reason, "deferred after 3 matching failures");
 });
 
 test("staleWorkingLabel is surfaced on the chosen target", () => {

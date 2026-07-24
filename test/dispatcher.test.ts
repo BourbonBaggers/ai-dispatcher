@@ -50,9 +50,7 @@ function run(overrides: Partial<RunRecord>): RunRecord {
     resumeCount: 0,
     lastProgressSeq: 0,
     outputSeq: 0,
-    ciSelfHealAttempts: 0,
-    ciEscalated: false,
-    deployEscalated: false,
+    recovery: {},
     remotePid: null,
     createdAt: 1000,
     startedAt: 1000,
@@ -166,7 +164,6 @@ test("a provisionally-shipped run's comment reads 'complete' and lists the PR", 
   const comment = buildIssueComment(
     run({ status: "shipped", prUrl: "https://x/pull/9", lastCommit: "abc123" }),
     false,
-    null,
   );
   assert.match(comment, /Dispatcher run complete/);
   assert.match(comment, /https:\/\/x\/pull\/9/);
@@ -174,13 +171,13 @@ test("a provisionally-shipped run's comment reads 'complete' and lists the PR", 
 });
 
 test("a resumable run's comment promises an automatic resume", () => {
-  const comment = buildIssueComment(run({ status: "interrupted" }), true, null);
+  const comment = buildIssueComment(run({ status: "interrupted" }), true);
   assert.match(comment, /resume this run on its next/i);
   assert.match(comment, /completed work is not redone/i);
 });
 
 test("a parked (ci_pending) run's comment says it will re-check CI, NOT relaunch the agent", () => {
-  const comment = buildIssueComment(run({ status: "ci_pending" }), true, null);
+  const comment = buildIssueComment(run({ status: "ci_pending" }), true);
   assert.match(comment, /check back once CI resolves/i);
   assert.match(comment, /will NOT relaunch the agent/i);
   // Must not also show the generic "resume this run" language -- that would wrongly
@@ -189,20 +186,19 @@ test("a parked (ci_pending) run's comment says it will re-check CI, NOT relaunch
 });
 
 test("a ci_failed run's comment describes the self-heal/escalate ladder", () => {
-  const comment = buildIssueComment(run({ status: "ci_failed" }), true, null);
+  const comment = buildIssueComment(run({ status: "ci_failed" }), true);
   assert.match(comment, /self-heal/i);
   assert.match(comment, /escalating/i);
 });
 
-test("a failed run's comment surfaces the failure summary and any deferral", () => {
+test("a failed run's comment surfaces the failure and automatic repair", () => {
   const comment = buildIssueComment(
     run({ status: "failed", failureSummary: "made no commits" }),
     false,
-    "deferred after 3 matching failures",
   );
   assert.match(comment, /Dispatcher run failed/);
   assert.match(comment, /made no commits/);
-  assert.match(comment, /deferred after 3 matching failures/);
+  assert.match(comment, /relaunching the agent/i);
 });
 
 // ── retention ─────────────────────────────────────────────────────────────────
@@ -346,6 +342,7 @@ function parkedDeps(store: StateStore, opts: {
   issueState?: "OPEN" | "CLOSED" | "UNKNOWN";
   issueLabels?: string[];
   prState?: "open" | "merged" | "closed" | "unknown";
+  shipResult?: { ok: boolean; stdout: string; stderr: string; code: number | null };
 }): {
   deps: DispatcherDeps;
   comments: string[];
@@ -377,6 +374,7 @@ function parkedDeps(store: StateStore, opts: {
         isDraft: opts.isDraft ?? false,
         mergeStateStatus: "CLEAN",
         reviewDecision: null,
+        mergeCommitOid: "merged",
       }),
       prDiff: async () => "",
       comment: async (_i: number, b: string) => { comments.push(b); return true; },
@@ -388,7 +386,10 @@ function parkedDeps(store: StateStore, opts: {
       closeIssue: async () => true,
     } as unknown as DispatcherDeps["github"],
     notifier: { send: async () => { notifications.count += 1; } },
-    ship: async () => { ships.count += 1; return { ok: true, stdout: "", stderr: "", code: 0 }; },
+    ship: async () => {
+      ships.count += 1;
+      return opts.shipResult ?? { ok: true, stdout: "", stderr: "", code: 0 };
+    },
     now: () => 5000,
   };
   return { deps, comments, labels, removedLabels, ships, reads, notifications };
@@ -455,6 +456,33 @@ test("recheckParkedRun ships once CI has resolved to green, without relaunching 
   }
 });
 
+test("recheckParkedRun remains parked while detached systemd deployment verification is pending", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run1 = parkedRun(store);
+    const { deps, ships, notifications } = parkedDeps(store, {
+      ci: "pass",
+      shipResult: {
+        ok: true,
+        stdout:
+          "::autoship:: state=merge_succeeded_deployment_not_attempted health=unknown merged=merged\n",
+        stderr: "",
+        code: 0,
+      },
+    });
+
+    await recheckParkedRun(deps, run1);
+
+    assert.equal(store.getRun(run1.id)?.status, "ci_pending");
+    assert.equal(ships.count, 1);
+    assert.equal(notifications.count, 0, "pending verification is not announced as success");
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("recheckParkedRun promotes a draft PR and ships it once CI is green (no human-review-required)", async () => {
   const dir = tmp();
   try {
@@ -490,6 +518,28 @@ test("recheckParkedRun promotes and ships a draft PR even with human-review-requ
     assert.equal(after?.status, "shipped");
     assert.equal(ships.count, 1, "the draft is promoted and shipped, not held");
     assert.ok(!labels.includes("autoship-held"), "human-review-required must not hold under autoship-everything policy");
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recheckParkedRun pages only after CI repairs and frontier escalation are exhausted", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const created = parkedRun(store);
+    const exhausted = store.updateRun(created.id, {
+      recovery: { ci: { attempts: 2, escalated: true } },
+    });
+    const { deps, comments, labels, notifications } = parkedDeps(store, { ci: "fail" });
+
+    await recheckParkedRun(deps, exhausted);
+
+    assert.equal(store.getRun(exhausted.id)?.status, "held");
+    assert.ok(labels.includes("autoship-held"));
+    assert.equal(notifications.count, 1, "one final operator page");
+    assert.match(comments.at(-1) ?? "", /Dispatcher exhausted/i);
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -597,7 +647,7 @@ test("recheckHeldRun resumes autoship and ships once autoship-held is cleared, w
   }
 });
 
-test("recheckHeldRun on an un-held but already-merged PR stands down (held), never re-running the ship command (#10)", async () => {
+test("recheckHeldRun on an un-held already-merged PR deploys and verifies it", async () => {
   const dir = tmp();
   try {
     const store = StateStore.open(dir);
@@ -608,9 +658,9 @@ test("recheckHeldRun on an un-held but already-merged PR stands down (held), nev
     const { rechecked } = await recheckHeldRun(deps, run1);
 
     assert.equal(rechecked, true);
-    assert.equal(store.getRun(run1.id)?.status, "held", "converges to a stable held, not a re-dispatch");
-    assert.equal(ships.count, 0, "never run gh pr merge on an already-merged PR");
-    assert.ok(labels.includes("autoship-held"), "re-stamped so it stays out of the queue");
+    assert.equal(store.getRun(run1.id)?.status, "shipped");
+    assert.equal(ships.count, 1, "an already-merged PR still needs deployment verification");
+    assert.ok(!labels.includes("autoship-held"));
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });

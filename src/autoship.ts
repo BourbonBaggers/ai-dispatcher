@@ -1,5 +1,5 @@
 /**
- * Autoship — merge and deploy a green PR without a human, with rails.
+ * Autoship — merge and deploy a green PR without a human.
  *
  * This is the orchestration layer. It decides WHETHER to ship and enforces the two
  * repo-agnostic rails; the repo-specific act of merging and deploying is delegated to a
@@ -15,27 +15,22 @@
  *      else (an agent that gave up or crashed) ships.
  *   2. Re-confirm CI is green NOW, from `gh pr checks` exit status — never a verdict
  *      observed earlier, never the agent's self-report.
- *   3. Data-loss gate: read the PR diff and hold anything irreversible for a human.
- *      If the diff cannot be read, HOLD — fail safe, never ship blind.
- *   4. Only then invoke the ship command. Its exit code is authoritative: 0 = shipped
- *      and verified (the command owns deploy + health-check + rollback); non-zero = it
- *      failed and rolled back, and we escalate.
+ *   3. Promote drafts and repair merge conflicts; unresolved merge state enters the
+ *      agent-repair ladder rather than a human hold.
+ *   4. Invoke the ship command. Exit status and structured health must both prove
+ *      production success; every other result enters deploy recovery.
  *
  * Self-healing: a red CI verdict at step 2 does not immediately page a human. Up to
- * `ciSelfHealMaxAttempts` times, this module instead hands control back to the caller
- * (`{ action: "ci_self_heal" }`), which relaunches the agent on the same branch to
- * diagnose and fix the failure — a resume, so dispatch-agent.sh feeds it the actual
- * failing checks rather than making it guess. Only once that budget is exhausted does a
- * red PR get the `autoship-held` label and a human notification. This mirrors the
- * generated-conflict repair above it: automation gets first crack at a known-recoverable
- * problem, and a human is paged only once automation has genuinely given up.
+ * `ciSelfHealMaxAttempts` times, this module hands control back to the caller to relaunch
+ * the assigned agent. It then requests one frontier escalation. Only failure after that
+ * final attempt returns `exhausted`; the dispatcher owns the sole hold/page path.
  *
  * The ship command is trusted to be honest about success because it, not this module,
  * can see production health. This module's job is to make sure it is only ever called on
  * a green, non-destructive PR.
  */
 
-import { classifyShipResult, type AutoshipShipState } from "./autoship-deployment.ts";
+import { classifyShipResult } from "./autoship-deployment.ts";
 import {
   repairGeneratedFileConflicts,
   type GeneratedConflictRepairRequest,
@@ -46,6 +41,11 @@ import type { ExecResult } from "./exec.ts";
 import { NOTIFY_PRIORITY_DEFAULT, NOTIFY_PRIORITY_HIGH, type Notifier } from "./notify.ts";
 import type { Logger } from "./logger.ts";
 import type { GithubPrMergeInfo } from "./github.ts";
+import {
+  decideRecovery,
+  type RecoveryDecision,
+  type RecoveryKind,
+} from "./recovery-policy.ts";
 
 /** Label left on a PR that autoship refused to ship, so it is easy to find and requeue. */
 export const AUTOSHIP_HELD_LABEL = "autoship-held";
@@ -90,11 +90,11 @@ export interface AutoshipDeps {
   generatedConflictRegenCmd: string | null;
   generatedConflictMaxAttempts: number;
   generatedConflictCiWaitSeconds: number;
-  /** Cap on self-heal relaunches for a red-CI PR before autoship-held is stamped. */
+  /** Assigned-model repair attempts per owned phase before frontier escalation. */
   ciSelfHealMaxAttempts: number;
   /**
    * CLI model for the ONE escalation attempt after ciSelfHealMaxAttempts is exhausted and
-   * CI is still red — a last, stronger-model try before giving up on human review.
+   * Final stronger-model attempt after ordinary repairs are spent.
    */
   ciEscalationModel: string;
   repairGeneratedConflicts?: (
@@ -105,15 +105,11 @@ export interface AutoshipDeps {
 export type AutoshipOutcome =
   | { action: "skipped"; reason: string }
   | { action: "ci_not_green"; state: "pending" | "fail" }
-  | { action: "ci_self_heal"; attempt: number; maxAttempts: number }
-  | { action: "ci_escalate"; model: string }
-  | { action: "held"; reasons: string[] }
-  | { action: "merge_blocked"; reason: string }
-  | { action: "conflict_recovery_failed"; reason: string; conflictPaths: string[] }
-  | { action: "shipped" }
-  | { action: "already_merged" }
-  | { action: "ship_escalate"; model: string }
-  | { action: "ship_failed"; code: number | null; detail: string; state: AutoshipShipState };
+  | { action: "repair"; kind: RecoveryKind; attempt: number; maxAttempts: number; reason: string }
+  | { action: "escalate"; kind: RecoveryKind; model: string; reason: string }
+  | { action: "exhausted"; kind: RecoveryKind; reason: string }
+  | { action: "deploy_pending"; mergedSha: string | null }
+  | { action: "shipped" };
 
 /**
  * Decide and, if warranted, ship one finalized run. Safe to call for every run — it
@@ -138,14 +134,8 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   }
   const pr = run.prNumber;
 
-  // 1b. Already merged? Stand down. A human (or a prior autoship pass) may have merged this
-  // PR out of band — most commonly by merging a held self-modification by hand instead of
-  // clearing `autoship-held` to let autoship do it. Running the ship command anyway would
-  // call `gh pr merge` on an already-merged PR, fail, and be misread as a broken deploy
-  // (the "PR already merged" hold loop in #10). Recognise it, hold cleanly with a plain
-  // informational note (NOT an error page), and never touch the ship command. The issue is
-  // deliberately NOT closed here: autoship did not perform or verify this deploy, and
-  // "merge is not shipped" (#366) — a human owns verifying it and closing the issue.
+  // 1b. Already merged? Deploy its exact merge SHA instead of retrying `gh pr merge` or
+  // standing down for manual verification. Merge is not shipped; verified production is.
   if ((await github.prState(pr)) === "merged") {
     return await alreadyMerged(deps, run, pr);
   }
@@ -155,92 +145,12 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   if (ci !== "pass") {
     logger.info("autoship: CI not green, not shipping", { issue: run.issueNumber, pr, ci });
     if (ci === "fail") {
-      const attemptsSoFar = run.ciSelfHealAttempts ?? 0;
-      if (attemptsSoFar < deps.ciSelfHealMaxAttempts) {
-        // CI failed, but we have not exhausted the self-heal budget yet. Hand this back
-        // to the caller to relaunch the agent on the same branch (a resume, so
-        // dispatch-agent.sh feeds it the actual failing checks) rather than paging a
-        // human immediately — humans should only see autoship-held once automation has
-        // genuinely given up.
-        const attempt = attemptsSoFar + 1;
-        logger.info("autoship: CI failed, attempting self-heal", {
-          issue: run.issueNumber,
-          pr,
-          attempt,
-          maxAttempts: deps.ciSelfHealMaxAttempts,
-        });
-        await notifier
-          .send(
-            `Autoship: self-heal ${attempt}/${deps.ciSelfHealMaxAttempts} for #${run.issueNumber}`,
-            `PR #${pr} CI failed — relaunching the agent to diagnose and fix before holding for a human.`,
-            NOTIFY_PRIORITY_DEFAULT,
-          )
-          .catch(() => undefined);
-        return { action: "ci_self_heal", attempt, maxAttempts: deps.ciSelfHealMaxAttempts };
-      }
-
-      const alreadyEscalated = run.ciEscalated ?? false;
-      if (!alreadyEscalated) {
-        // The default-model self-heal budget is exhausted and CI is still red. Before
-        // paging a human, spend exactly one attempt with a stronger model
-        // (ciEscalationModel, e.g. claude-opus-4-8) — some failures a fast/general model
-        // gets stuck on are within a frontier model's reach. This is a separate,
-        // one-shot budget from ciSelfHealMaxAttempts, tracked by run.ciEscalated.
-        logger.info("autoship: self-heal exhausted, escalating model", {
-          issue: run.issueNumber,
-          pr,
-          attemptsSoFar,
-          escalationModel: deps.ciEscalationModel,
-        });
-        await github
-          .comment(
-            run.issueNumber,
-            [
-              "## Autoship: self-heal failed, escalating",
-              "",
-              `Self-heal failed after ${attemptsSoFar} attempt(s). Escalating to ` +
-                `\`${deps.ciEscalationModel}\` for one last automated fix attempt before ` +
-                "holding for human review.",
-            ].join("\n"),
-          )
-          .catch(() => false);
-        await notifier
-          .send(
-            `Autoship: escalating #${run.issueNumber} to ${deps.ciEscalationModel}`,
-            `PR #${pr} CI still failing after ${attemptsSoFar} self-heal attempt(s) — escalating to ${deps.ciEscalationModel} for one last attempt.`,
-            NOTIFY_PRIORITY_DEFAULT,
-          )
-          .catch(() => undefined);
-        return { action: "ci_escalate", model: deps.ciEscalationModel };
-      }
-
-      // Self-heal AND the escalation attempt are both exhausted. Hold the issue so the
-      // dispatcher does not re-run the agent in an infinite poll loop — without a hold,
-      // the issue stays eligible because selection only looks at labels, not prior
-      // prior resolved runs, so it picks this up every 15 minutes forever. A human must
-      // clear the failing checks and remove autoship-held.
-      await stampHold(deps, run, "ci-exhausted");
-      await github
-        .comment(
-          run.issueNumber,
-          [
-            "## Autoship held — CI is still failing after self-heal and escalation",
-            "",
-            `CI checks on PR #${pr} are failing after ${attemptsSoFar} automatic fix attempt(s) ` +
-              `and an escalation attempt with \`${deps.ciEscalationModel}\`. ` +
-              "The dispatcher will not re-run until the `autoship-held` label is removed.",
-            "",
-            "Fix the failing checks, then remove the `autoship-held` label to re-enable dispatch.",
-          ].join("\n"),
-        )
-        .catch(() => false);
-      await notifier
-        .send(
-          `Autoship HELD #${run.issueNumber}`,
-          `PR #${pr} CI is still failing after ${attemptsSoFar} self-heal attempt(s) and escalation to ${deps.ciEscalationModel} — held for human review.`,
-          NOTIFY_PRIORITY_HIGH,
-        )
-        .catch(() => undefined);
+      return recoveryOutcome(
+        deps,
+        run,
+        "ci",
+        `PR #${pr} CI is still failing`,
+      );
     }
     return { action: "ci_not_green", state: ci };
   }
@@ -298,7 +208,22 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   }, { cwd: deps.autoshipDeploymentCheckout });
   const classified = classifyShipResult(result);
 
-  if (result.code !== 0) {
+  if (
+    result.code === 0 &&
+    classified.state === "merge_succeeded_deployment_not_attempted"
+  ) {
+    logger.info("autoship: detached deployment pending verification", {
+      issue: run.issueNumber,
+      pr,
+      mergedSha: classified.report?.mergedSha,
+    });
+    return { action: "deploy_pending", mergedSha: classified.report?.mergedSha ?? null };
+  }
+
+  // Exit zero is not success when the ship command's own structured report says
+  // production health failed or is unknown. Recording that as shipped is precisely the
+  // false-success state that leaves the operator cleaning up a merged, undeployed PR.
+  if (result.code !== 0 || classified.state !== "shipped" || classified.health !== "pass") {
     logger.error("autoship: ship command failed", {
       issue: run.issueNumber,
       pr,
@@ -307,60 +232,12 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
       health: classified.health,
       report: classified.report,
     });
-    const alreadyEscalated = run.deployEscalated ?? false;
-    if (!alreadyEscalated) {
-      // Mirror the CI ladder: before paging a human, spend exactly one attempt with a
-      // stronger model (ciEscalationModel, e.g. claude-opus-4-8). A deploy failure can be
-      // a code bug OR a deploy-path bug the escalated model can fix (as a human did for
-      // #366); the escalated run re-enters on the same issue/PR, and if it fixes the
-      // problem autoship re-attempts the ship and closes on health pass. This is a
-      // SEPARATE, one-shot budget from the CI escalation (run.deployEscalated, not
-      // ciEscalated), so a run that already spent its CI escalation still gets a fresh
-      // frontier attempt at the deploy. No stampHold here: the issue must stay eligible so
-      // the escalated run can pick it back up.
-      logger.info("autoship: ship failed, escalating model", {
-        issue: run.issueNumber,
-        pr,
-        code: result.code,
-        state: classified.state,
-        escalationModel: deps.ciEscalationModel,
-      });
-      await github
-        .comment(
-          run.issueNumber,
-          [
-            "## Autoship: deploy failed, escalating",
-            "",
-            `The ship command failed (exit ${result.code}, state \`${classified.state}\`). ` +
-              `Escalating to \`${deps.ciEscalationModel}\` for one last automated fix attempt ` +
-              "before holding for human review.",
-          ].join("\n"),
-        )
-        .catch(() => false);
-      await notifier
-        .send(
-          `Autoship: escalating deploy #${run.issueNumber} to ${deps.ciEscalationModel}`,
-          `PR #${pr} merged/deployed but the ship command exited ${result.code} (${classified.state}) — escalating to ${deps.ciEscalationModel} for one last attempt.`,
-          NOTIFY_PRIORITY_DEFAULT,
-        )
-        .catch(() => undefined);
-      return { action: "ship_escalate", model: deps.ciEscalationModel };
-    }
-
-    // The deploy escalation attempt is also exhausted (opus's deploy failed too). A failed
-    // (and, per the ship command's own contract, rolled-back) deploy is not something a
-    // retry on the next scan fixes by itself -- without a hold this would hammer the same
-    // ship command again every ~15 minutes on an unresolved deploy problem, the same
-    // silent-loop class of bug as the other hold paths (#366). Now a human is involved.
-    await stampHold(deps, run, "ship-failed");
-    await notifier
-      .send(
-        autoshipFailureTitle(run.issueNumber, classified.state),
-        autoshipFailureBody(pr, result.code, classified),
-        NOTIFY_PRIORITY_HIGH,
-      )
-      .catch(() => undefined);
-    return { action: "ship_failed", code: result.code, detail: classified.detail, state: classified.state };
+    return recoveryOutcome(
+      deps,
+      run,
+      "deploy",
+      autoshipFailureBody(pr, result.code, classified),
+    );
   }
 
   logger.info("autoship: shipped", {
@@ -379,20 +256,18 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   // health "fail"/"unknown" on a structured status line even when the process exited 0
   // (e.g. a script that reports honestly but exits 0 for its own reasons), so gate on
   // the parsed health, not merely on having reached this branch.
-  if (classified.health === "pass") {
-    const closed = await github.closeIssue(run.issueNumber).catch(() => false);
-    if (!closed) {
-      logger.error("autoship: shipped but failed to close the issue", {
-        issue: run.issueNumber,
-        pr,
-      });
-    }
-  } else {
-    logger.warn("autoship: shipped with a non-pass health state -- leaving the issue open for a human", {
+  const closed = await github.closeIssue(run.issueNumber).catch(() => false);
+  if (!closed) {
+    logger.error("autoship: shipped but failed to close the issue", {
       issue: run.issueNumber,
       pr,
-      health: classified.health,
     });
+    return recoveryOutcome(
+      deps,
+      run,
+      "merge",
+      `Production deployment for PR #${pr} verified, but GitHub issue #${run.issueNumber} could not be closed.`,
+    );
   }
 
   await notifier
@@ -401,18 +276,42 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   return { action: "shipped" };
 }
 
-function autoshipFailureTitle(issue: number, state: AutoshipShipState): string {
-  switch (state) {
-    case "merge_succeeded_deployment_not_attempted":
-      return `Autoship MERGED but did not deploy #${issue}`;
-    case "deployment_failed_rollback_succeeded":
-      return `Autoship rolled back #${issue}`;
-    case "deployment_failed_rollback_failed":
-      return `Autoship rollback FAILED #${issue}`;
-    case "deployment_state_unknown":
-      return `Autoship state UNKNOWN #${issue}`;
-    case "shipped":
-      return `Autoship FAILED for #${issue}`;
+async function recoveryOutcome(
+  deps: AutoshipDeps,
+  run: RunRecord,
+  kind: RecoveryKind,
+  reason: string,
+): Promise<Extract<AutoshipOutcome, { action: "repair" | "escalate" | "exhausted" }>> {
+  const decision: RecoveryDecision = decideRecovery(
+    run.recovery,
+    kind,
+    deps.ciSelfHealMaxAttempts,
+  );
+  switch (decision.action) {
+    case "retry":
+      return {
+        action: "repair",
+        kind,
+        attempt: decision.attempt,
+        maxAttempts: decision.maxAttempts,
+        reason,
+      };
+    case "escalate":
+      await deps.github
+        .comment(
+          run.issueNumber,
+          [
+            `## Autoship: ${kind} repair attempts exhausted, escalating`,
+            "",
+            reason,
+            "",
+            `Escalating to \`${deps.ciEscalationModel}\` for the final automated attempt.`,
+          ].join("\n"),
+        )
+        .catch(() => false);
+      return { action: "escalate", kind, model: deps.ciEscalationModel, reason };
+    case "exhausted":
+      return { action: "exhausted", kind, reason };
   }
 }
 
@@ -448,9 +347,12 @@ async function recoverGeneratedConflicts(
   mergeInfo: GithubPrMergeInfo,
 ): Promise<
   | { action: "recovered" }
-  | { action: "failed"; outcome: Extract<AutoshipOutcome, { action: "conflict_recovery_failed" | "ci_not_green" }> }
+  | {
+      action: "failed";
+      outcome: Extract<AutoshipOutcome, { action: "repair" | "escalate" | "exhausted" | "ci_not_green" }>;
+    }
 > {
-  const { github, logger, notifier } = deps;
+  const { github, logger } = deps;
   const repair = deps.repairGeneratedConflicts ?? ((request) => repairGeneratedFileConflicts(request));
   logger.warn("autoship: PR has merge conflicts; evaluating generated-file recovery", {
     issue: run.issueNumber,
@@ -474,40 +376,14 @@ async function recoverGeneratedConflicts(
       conflicts: result.conflictPaths,
       reason: result.reason,
     });
-    // Same gap as the CI-exhaustion and merge_blocked holds (#366): a comment that says
-    // "held" without ever stamping the label leaves the issue fully eligible, so it gets
-    // re-claimed and re-run on every subsequent scan despite the conflict never resolving
-    // itself.
-    await stampHold(deps, run, "conflict-recovery-failed");
-    await github
-      .comment(
-        run.issueNumber,
-        [
-          "## Autoship held — merge conflicts need review",
-          "",
-          "CI is green, but the PR is not mergeable. Automatic generated-file conflict",
-          "recovery did not run to completion.",
-          "",
-          `Reason: ${result.reason}`,
-          "",
-          ...result.conflictPaths.map((path) => `- ${path}`),
-        ].join("\n"),
-      )
-      .catch(() => false);
-    await notifier
-      .send(
-        `Autoship HELD #${run.issueNumber}`,
-        `PR #${pr} has merge conflicts that were not auto-recovered: ${result.reason}`,
-        NOTIFY_PRIORITY_HIGH,
-      )
-      .catch(() => undefined);
     return {
       action: "failed",
-      outcome: {
-        action: "conflict_recovery_failed",
-        reason: result.reason,
-        conflictPaths: result.conflictPaths,
-      },
+      outcome: await recoveryOutcome(
+        deps,
+        run,
+        "merge",
+        `PR #${pr} merge-conflict recovery failed: ${result.reason}; conflicts: ${result.conflictPaths.join(", ")}`,
+      ),
     };
   }
 
@@ -532,83 +408,94 @@ async function recoverGeneratedConflicts(
       ].join("\n"),
     )
     .catch(() => false);
-  await notifier
-    .send(
-      `Autoship: recovered #${run.issueNumber}`,
-      `PR #${pr} generated-file conflicts repaired; waiting for CI before merge.`,
-      NOTIFY_PRIORITY_DEFAULT,
-    )
-    .catch(() => undefined);
-
   const ci = await github.waitForPrChecks(pr, deps.generatedConflictCiWaitSeconds);
   if (ci !== "pass") {
     logger.info("autoship: repaired PR CI not green, not shipping", { issue: run.issueNumber, pr, ci });
-    return { action: "failed", outcome: { action: "ci_not_green", state: ci } };
+    if (ci === "fail") {
+      return {
+        action: "failed",
+        outcome: await recoveryOutcome(
+          deps,
+          run,
+          "ci",
+          `PR #${pr} CI failed after generated-conflict recovery.`,
+        ),
+      };
+    }
+    return { action: "failed", outcome: { action: "ci_not_green", state: "pending" } };
   }
 
   return { action: "recovered" };
 }
 
-/**
- * Best-effort label stamp for a hold outcome. `addLabel` returns false (never throws) on
- * a failed gh invocation, and every caller here used to discard that boolean — so when
- * AUTOSHIP_HELD_LABEL did not yet exist as a repo label, every stamp attempt silently
- * no-op'd and the issue stayed fully eligible, indistinguishable from a healthy hold.
- * That gap is exactly what let #366 loop for 7+ hours after the CI-exhaustion hold (and
- * later mergeBlocked) were "fixed" in code: the label existing in GitHub was never
- * verified. This does not retry — a missing label is a one-time repo setup problem, not
- * a transient one — but it makes the failure loud instead of invisible.
- */
-async function stampHold(deps: AutoshipDeps, run: RunRecord, context: string): Promise<void> {
-  const { github, logger } = deps;
-  const ok = await github.addLabel(run.issueNumber, AUTOSHIP_HELD_LABEL).catch(() => false);
-  if (!ok) {
-    logger.error(
-      "autoship: failed to stamp autoship-held — the issue remains eligible and may be " +
-        "re-dispatched again despite this hold (check that the label exists in the repo)",
-      { issue: run.issueNumber, context },
-    );
-  }
-}
-
-/**
- * Stand down on a PR that is already merged (see the call site). Holds so the issue is not
- * re-dispatched or re-shipped, but with a plain informational comment + DEFAULT-priority
- * notification, not a failure page — an out-of-band merge is a human action, not a broken
- * deploy. Idempotent and cheap to re-run: a later recheck sees `merged` again and lands
- * right back here, a stable fixed point.
- */
+/** Deploy and verify an already-merged PR by exact merge commit SHA. */
 async function alreadyMerged(deps: AutoshipDeps, run: RunRecord, pr: number): Promise<AutoshipOutcome> {
   const { github, notifier, logger } = deps;
-  logger.info("autoship: PR already merged out of band — standing down", {
+  logger.info("autoship: PR already merged — continuing with deployment verification", {
     issue: run.issueNumber,
     pr,
   });
-  await stampHold(deps, run, "already-merged");
-  await github
-    .comment(
-      run.issueNumber,
-      [
-        "## Autoship standing down — PR already merged",
-        "",
-        `PR #${pr} is already merged, so autoship has nothing to merge or deploy and did **not**`,
-        "run the ship command. Autoship did not perform or verify this deploy — merging a PR is",
-        "not the same as shipping it (#366). If this repository self-deploys, confirm the",
-        "service is running the merged code, then close this issue.",
-        "",
-        "The `autoship-held` label keeps this out of the dispatch queue; the dispatcher will not",
-        "re-run the agent for it.",
-      ].join("\n"),
-    )
-    .catch(() => false);
+  const mergeInfo = await github.prMergeInfo(pr);
+  if (!mergeInfo?.mergeCommitOid) {
+    return recoveryOutcome(
+      deps,
+      run,
+      "merge",
+      `PR #${pr} is merged, but its merge commit SHA could not be read for deployment.`,
+    );
+  }
+
+  const result = await deps.ship(
+    deps.autoshipCmd!,
+    {
+      AUTOSHIP_PR_NUMBER: String(pr),
+      AUTOSHIP_ISSUE_NUMBER: String(run.issueNumber),
+      AUTOSHIP_BRANCH: run.branch,
+      AUTOSHIP_REPO: deps.repoSlug,
+      AUTOSHIP_PR_HEAD_SHA: mergeInfo.headRefOid,
+      AUTOSHIP_BASE_SHA: mergeInfo.baseRefOid,
+      AUTOSHIP_MERGED_SHA: mergeInfo.mergeCommitOid,
+      AUTOSHIP_DEPLOYMENT_CHECKOUT: deps.autoshipDeploymentCheckout,
+    },
+    { cwd: deps.autoshipDeploymentCheckout },
+  );
+  const classified = classifyShipResult(result);
+  if (
+    result.code === 0 &&
+    classified.state === "merge_succeeded_deployment_not_attempted"
+  ) {
+    return { action: "deploy_pending", mergedSha: mergeInfo.mergeCommitOid };
+  }
+  if (result.code !== 0 || classified.state !== "shipped" || classified.health !== "pass") {
+    return recoveryOutcome(
+      deps,
+      run,
+      "deploy",
+      autoshipFailureBody(pr, result.code, classified),
+    );
+  }
+
+  const closed = await github.closeIssue(run.issueNumber).catch(() => false);
+  if (!closed) {
+    logger.error("autoship: deployed already-merged PR but failed to close issue", {
+      issue: run.issueNumber,
+      pr,
+    });
+    return recoveryOutcome(
+      deps,
+      run,
+      "merge",
+      `Already-merged PR #${pr} deployed successfully, but GitHub issue #${run.issueNumber} could not be closed.`,
+    );
+  }
   await notifier
     .send(
-      `Autoship stood down #${run.issueNumber}`,
-      `PR #${pr} is already merged — autoship did not deploy it; verify and close.`,
+      `Autoship: shipped #${run.issueNumber}`,
+      `PR #${pr} was already merged; merged commit ${mergeInfo.mergeCommitOid} is now deployed and verified.`,
       NOTIFY_PRIORITY_DEFAULT,
     )
     .catch(() => undefined);
-  return { action: "already_merged" };
+  return { action: "shipped" };
 }
 
 async function mergeBlocked(
@@ -617,36 +504,7 @@ async function mergeBlocked(
   pr: number,
   reason: string,
 ): Promise<AutoshipOutcome> {
-  const { logger, notifier, github } = deps;
+  const { logger } = deps;
   logger.warn("autoship: PR is not mergeable", { issue: run.issueNumber, pr, reason });
-  // This used to say "Autoship HELD" in the comment/notification title without ever
-  // stamping autoship-held, so the issue stayed fully eligible and got re-claimed and
-  // re-dispatched on every single poll — a busy-loop that looked identical to the
-  // CI-red infinite-loop bug (#366) but was actually "no human has converted the PR out
-  // of draft (or approved it) yet," repeating every ~15 minutes for hours. A human
-  // action (mark ready for review / approve / investigate an unreadable PR) is required
-  // in all three mergeBlocked cases, and none of them resolve themselves on a retry, so
-  // this now holds exactly like the CI-exhausted and data-loss-gate paths do.
-  await stampHold(deps, run, "merge-blocked");
-  await github
-    .comment(
-      run.issueNumber,
-      [
-        "## Autoship held — PR is not mergeable",
-        "",
-        reason,
-        "",
-        "The dispatcher did not attempt generated-file conflict recovery.",
-        "",
-        "The dispatcher will not re-run until the `autoship-held` label is removed. If this " +
-          "is a draft PR waiting on review, mark it ready for review (and merge, or clear " +
-          "the label to let autoship re-check) once it should proceed.",
-      ].join("\n"),
-    )
-    .catch(() => false);
-  await notifier
-    .send(`Autoship HELD #${run.issueNumber}`, `PR #${pr} is not mergeable: ${reason}`, NOTIFY_PRIORITY_HIGH)
-    .catch(() => undefined);
-  return { action: "merge_blocked", reason };
+  return recoveryOutcome(deps, run, "merge", `PR #${pr} is not mergeable: ${reason}`);
 }
-

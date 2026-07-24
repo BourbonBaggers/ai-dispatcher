@@ -32,9 +32,9 @@ On each scan (when no run is active):
    itself), launches the CLI under a wall-clock budget, checkpoints the plan every 60s,
    captures uncommitted work on a clean exit, opens a **draft** PR, and waits for the real
    CI verdict.
-5. **Finalize once.** Classify the terminal state, apply the failure-deferral policy,
-   release the label (unless the run is still resumable), comment on the issue, and send a
-   single notification.
+5. **Recover or finalize.** Agent/CI/merge/deploy failures retry with the assigned model,
+   then get one Opus 4.8 attempt. Only verified production success or exhausted frontier
+   failure finalizes the delivery; progress attempts do not page the operator.
 
 The dispatcher is **strictly serial**: only one agent runs at a time, guaranteed by a
 single-instance lock plus the fact that each run is driven to completion before the loop
@@ -200,45 +200,23 @@ when those files must be recreated by a hook or script. Recovery is bounded by
 `DISPATCHER_GENERATED_CONFLICT_CI_WAIT_SECONDS` (default `900`) for repaired-branch CI
 before autoship may merge.
 
-Autoship also self-heals a red-CI PR before paging a human: when the re-confirmed CI
-check fails, it relaunches the agent on the same branch (a resume, so the agent is handed
-the actual failing checks rather than guessing) instead of immediately holding. Only after
-`DISPATCHER_CI_SELF_HEAL_MAX_ATTEMPTS` (default `2`) such attempts are still red does
-autoship escalate: ONE further attempt is relaunched on `DISPATCHER_CI_ESCALATION_MODEL`
-(default `claude-opus-4-8`) — a stronger model gets one last try at a failure the default
-model got stuck on. The escalation is posted to the issue as its own comment ("Autoship:
-self-heal failed, escalating") so there is visibility into which attempt is running. Only
-once that escalation attempt is ALSO still red does autoship give up, stamp
-`autoship-held`, and notify a human — automation gets first crack (twice) at a
-known-recoverable problem, and the human is paged only once it has genuinely given up.
+Every delivery phase uses one recovery contract: agent exit/zero-commit/no-PR failures,
+red CI, mergeability or file-conflict failures, deploy failures, unhealthy/unknown
+production reports, and failure to close the shipped issue. Each phase gets
+`DISPATCHER_CI_SELF_HEAL_MAX_ATTEMPTS` (default `2`) repairs with the assigned model,
+then one automatic attempt on `DISPATCHER_CI_ESCALATION_MODEL` (default
+`claude-opus-4-8`). The resumed agent receives the exact recovery reason as data in its
+prompt, including conflicting file names and CI evidence.
 
-A **deploy** failure escalates the same way. When the ship command exits non-zero (it has,
-per its own contract, already rolled back), autoship does not immediately hold: the first
-such failure spends ONE attempt on `DISPATCHER_CI_ESCALATION_MODEL`, relaunching the agent
-on the same issue/PR to fix the code-or-deploy-path bug and re-ship (posted as an "Autoship:
-deploy failed, escalating" comment). This is a SEPARATE one-shot budget from the CI
-escalation (`deployEscalated` vs `ciEscalated`), so a run that already spent its CI
-escalation greening checks still gets a fresh frontier attempt at the deploy, and neither
-budget consumes the other. Only a second deploy failure (the escalated model's) stamps
-`autoship-held` and pages a human.
+The phase budgets are independent: spending the CI ladder does not consume the merge or
+deploy ladder. Intermediate attempts and escalation do not send operator push
+notifications. Only failure after the frontier attempt stamps `autoship-held`, retains
+the issue claim, posts the exhausted evidence, and sends one high-priority page.
 
-A PR that is not mergeable for a reason other than red CI — still a draft, requires
-review, or its mergeability could not even be read — also stamps `autoship-held`. This
-used to be a comment-only "Autoship HELD" notice with no actual label, so a
-CI-green PR stuck in draft (nobody had marked it ready for review) got silently
-re-claimed and re-run by the dispatcher every single poll cycle forever, forever
-producing an identical no-op "run complete" — indistinguishable from the CI-red
-infinite-loop bug this whole self-heal system exists to prevent, just with a different
-trigger. Clear the label once the PR is ready (or its mergeability issue is resolved) to
-let autoship re-check it.
-
-Because a held run keeps its issue claim, clearing `autoship-held` no longer re-dispatches
-a fresh agent run — the dispatcher **resumes autoship of the ready PR** instead (re-checking
-CI + the data-loss gate, then merging and deploying the PR that is already there). If the PR
-turns out to be **already merged** (for example, merged by hand instead of un-holding),
-autoship recognises that and **stands down** with a plain informational hold rather than
-running `gh pr merge` on it and misreading the "already merged" failure as a broken deploy;
-it does not close the issue, because a merge is not a verified ship (see below).
+Draft and review-required PRs are promoted and admin-merged. Mixed Markdown/source
+conflicts that the deterministic generated-file repair cannot resolve are handed to the
+agent rather than held. An already-merged PR is deployed by exact merge SHA and verified
+instead of standing down for manual production verification.
 
 **Self-shipping.** When the dispatcher ships changes to *itself*
 (`BourbonBaggers/ai-dispatcher`), point `DISPATCHER_AUTOSHIP_CMD` at this repo's
@@ -260,10 +238,8 @@ CI was never the problem — the claim was released too early.
 
 The terminal statuses:
 
-- **`shipped`** — the only TRUE success: the PR is merged and the deploy has completed
-  (or, when autoship is not configured for this repo, a human has manually taken it from
-  here — that maps to `held` below instead of fabricating a shipped result nothing
-  actually verified).
+- **`shipped`** — the only TRUE success: the PR is merged, production health passed,
+  and the linked issue was closed.
 - **`ci_pending`** — the agent finished and opened a PR, but CI had not resolved yet.
   **Parked**: the claim stays, and the next scan re-checks CI ONLY — it does not
   relaunch the agent to wait on a check that is already running.
@@ -272,19 +248,12 @@ The terminal statuses:
   above and keeps the issue claim across the relaunch. Always resolved further within the
   same finalize pass; a run should not be found sitting in this status across a scan
   boundary in normal operation.
-- **`held`** — terminal, intentionally blocked: a destructive-change guardrail, a PR that
-  cannot be merged (draft / needs review / unreadable), the self-heal+escalation ladder
-  exhausted with CI still red, a failed ship/deploy attempt, an already-merged PR autoship
-  stood down on, or (autoship not configured) a clean PR left for a human to review and
-  merge manually. Acceptable without ever shipping — a human decides next, and
-  `autoship-held` keeps it out of the queue until they clear the label. A held run **keeps
-  its issue claim**: clearing `autoship-held` **resumes autoship of the existing ready PR**
-  (merge → deploy the PR that is already there), it does **not** re-dispatch a fresh agent
-  run over work that is already done.
+- **`held`** — the assigned-model repair attempts and the final frontier attempt for a
+  delivery phase all failed. This is the sole coding/CI/merge/deploy operator-handoff
+  state. `autoship-held` and the retained claim prevent a fresh-from-scratch rerun.
 - **`failed`** — the agent itself crashed, gave up (zero commits), or exited non-zero.
-  Distinct from `ci_failed`: this is the agent's fault, not the PR's content's fault.
-  Counts toward the 3-strike failure-deferral policy; `ci_failed`/`ci_pending`/`held` do
-  not (parking or being blocked by policy isn't evidence the agent is failing).
+  This is an intermediate classification that immediately enters the same repair →
+  frontier → exhausted ladder; it is not an operator handoff or 24-hour deferral.
 
 `interrupted` / `timed_out` / `token_exhausted` are unchanged: crash/timeout recovery,
 resumed by relaunching the agent on the next scan.
@@ -344,11 +313,4 @@ npm test          # node --test over test/**/*.test.ts (zero runtime deps)
 
 ## Cutover from the embedded dispatcher
 
-Removing the monorepo's embedded dispatcher is a **human-gated** follow-up, not part of
-the extraction PR (it involves a destructive Postgres migration and would kill the running
-dispatcher mid-flight). The full procedure — proving the standalone service operational,
-then dropping the `Dispatcher*` tables and the API routes/cron — is in the target repo at
-[`docs/runbooks/ai-dispatcher-cutover.md`](https://github.com/BourbonBaggers/internal-tools/blob/main/docs/runbooks/ai-dispatcher-cutover.md).
-
-**This cutover is done.** It is retained as the historical record of how the split was
-performed.
+The cutover is complete. Its runbook remains in `internal-tools` as a historical record.

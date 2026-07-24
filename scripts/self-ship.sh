@@ -13,7 +13,8 @@
 # off to a DETACHED transient unit via `systemd-run --user`, which lives in its own cgroup
 # and survives the dispatcher restart. That detached phase owns verify + rollback + ntfy.
 #
-# Contract (env in): AUTOSHIP_PR_NUMBER, AUTOSHIP_REPO (required).
+# Contract (env in): AUTOSHIP_REPO and either AUTOSHIP_PR_NUMBER or
+#           AUTOSHIP_MERGED_SHA (required).
 # Optional: AUTOSHIP_PR_HEAD_SHA, AUTOSHIP_BASE_SHA,
 #           AUTOSHIP_DEPLOYMENT_CHECKOUT / DISPATCHER_SELFSHIP_CHECKOUT
 #           (default ~/ai-dispatcher — the checkout the systemd unit runs FROM, so a
@@ -32,11 +33,23 @@ set -euo pipefail
 # checkout for the self-instance.
 CHECKOUT="${AUTOSHIP_DEPLOYMENT_CHECKOUT:-${DISPATCHER_SELFSHIP_CHECKOUT:-$HOME/ai-dispatcher}}"
 UNIT="${DISPATCHER_SELFSHIP_UNIT:-ai-dispatcher.service}"
+DEPLOY_RESULT="$CHECKOUT/.git/dispatcher-deploy-result"
 
 log() { echo "[self-ship] $*"; }
 die() { echo "[self-ship] FAIL: $*" >&2; exit 1; }
 report() { # state health pr_head merged deployed rollback last_good
   echo "::autoship:: state=$1 health=$2 pr_head=${3:--} merged=${4:--} deployed=${5:--} rollback=${6:--} last_good=${7:--} checkout=$CHECKOUT"
+}
+healthy() {
+  local state sub
+  state="$(systemctl --user show -p ActiveState --value "$UNIT" 2>/dev/null || echo unknown)"
+  sub="$(systemctl --user show -p SubState --value "$UNIT" 2>/dev/null || echo unknown)"
+  [[ "$state" == "active" && "$sub" == "running" ]]
+}
+write_deploy_result() { # requested_sha state deployed_sha rollback_sha
+  local tmp="$DEPLOY_RESULT.tmp"
+  printf '%s %s %s %s\n' "$1" "$2" "$3" "$4" > "$tmp"
+  mv "$tmp" "$DEPLOY_RESULT"
 }
 
 # ── Detached phase: restart, verify health, roll back on self-brick. ──────────
@@ -49,16 +62,11 @@ if [[ "${1:-}" == "--restart" ]]; then
     [[ -n "$NTFY_URL" && -n "$NTFY_TOPIC" ]] || return 0
     curl -fsS -H "Title: $1" -H "Priority: ${3:-3}" -d "$2" "$NTFY_URL/$NTFY_TOPIC" >/dev/null 2>&1 || true
   }
-  healthy() { # unit is up and stably running, not crash-looping
-    local state sub
-    state="$(systemctl --user show -p ActiveState --value "$UNIT" 2>/dev/null || echo unknown)"
-    sub="$(systemctl --user show -p SubState --value "$UNIT" 2>/dev/null || echo unknown)"
-    [[ "$state" == "active" && "$sub" == "running" ]]
-  }
 
   systemctl --user restart "$UNIT" || true
   sleep 12
   if healthy; then
+    write_deploy_result "$NEW" "shipped" "$NEW" "-"
     log "self-ship healthy on $NEW"
     push "Autoship: dispatcher updated" "Restarted on $NEW and healthy." 3
     exit 0
@@ -69,26 +77,32 @@ if [[ "${1:-}" == "--restart" ]]; then
   systemctl --user restart "$UNIT" || true
   sleep 12
   if healthy; then
+    write_deploy_result "$NEW" "deployment_failed_rollback_succeeded" "-" "$LAST_GOOD"
     push "Autoship ROLLED BACK dispatcher" "New code $NEW failed to start; reverted to $LAST_GOOD and healthy." 5
   else
+    write_deploy_result "$NEW" "deployment_failed_rollback_failed" "-" "$LAST_GOOD"
     push "Autoship: DISPATCHER DOWN" "New code $NEW bricked the dispatcher AND rollback to $LAST_GOOD is not healthy. Needs a human NOW." 5
   fi
   exit 0
 fi
 
 # ── Synchronous phase: re-gate, merge, pull, smoke, hand off. ─────────────────
-PR="${AUTOSHIP_PR_NUMBER:?AUTOSHIP_PR_NUMBER is required}"
+PR="${AUTOSHIP_PR_NUMBER:-}"
+MERGED_SHA="${AUTOSHIP_MERGED_SHA:-}"
 REPO="${AUTOSHIP_REPO:?AUTOSHIP_REPO is required}"
 PR_HEAD="${AUTOSHIP_PR_HEAD_SHA:-}"
+[[ -n "$PR" || -n "$MERGED_SHA" ]] || die "AUTOSHIP_PR_NUMBER or AUTOSHIP_MERGED_SHA is required"
 
-# gh pr checks: 0 green, 8 pending, else failed. Capture explicitly (set -e safe).
-ci_rc=0
-gh pr checks "$PR" --repo "$REPO" >/dev/null 2>&1 || ci_rc=$?
-case "$ci_rc" in
-  0) log "CI green for PR #$PR" ;;
-  8) die "CI pending for PR #$PR" ;;
-  *) die "CI not green for PR #$PR (exit $ci_rc)" ;;
-esac
+if [[ -z "$MERGED_SHA" ]]; then
+  # gh pr checks: 0 green, 8 pending, else failed. Capture explicitly (set -e safe).
+  ci_rc=0
+  gh pr checks "$PR" --repo "$REPO" >/dev/null 2>&1 || ci_rc=$?
+  case "$ci_rc" in
+    0) log "CI green for PR #$PR" ;;
+    8) die "CI pending for PR #$PR" ;;
+    *) die "CI not green for PR #$PR (exit $ci_rc)" ;;
+  esac
+fi
 
 mkdir -p "$(dirname "$CHECKOUT")"
 if [[ ! -d "$CHECKOUT/.git" ]]; then
@@ -119,24 +133,57 @@ if [[ -n "$(git status --porcelain=v1)" ]]; then
   git clean -fd --quiet
 fi
 
-# The commit currently running is this checkout's HEAD; rollback returns to it.
+# The commit currently running is this checkout's HEAD; capture it BEFORE syncing
+# origin/main. An already-merged recovery arrives after origin/main advanced, and using
+# origin/main as LAST_GOOD would make rollback point at the unverified new code.
 git checkout main --quiet
-git reset --hard origin/main --quiet
 LAST_GOOD="$(git rev-parse HEAD)"
 
-gh pr ready "$PR" --repo "$REPO" >/dev/null 2>&1 || true
-merge_rc=0
-gh pr merge "$PR" --repo "$REPO" --merge --admin --delete-branch >/dev/null 2>&1 || merge_rc=$?
-[[ "$merge_rc" -eq 0 ]] || die "gh pr merge exited $merge_rc"
+if [[ -n "$MERGED_SHA" ]]; then
+  git rev-parse --verify "$MERGED_SHA^{commit}" >/dev/null 2>&1 \
+    || die "merged commit $MERGED_SHA is not available after fetch"
+  NEW="$(git rev-parse "$MERGED_SHA^{commit}")"
+  git reset --hard "$NEW" --quiet
+  log "continuing deployment of already-merged commit $NEW"
+  if [[ -f "$DEPLOY_RESULT" ]]; then
+    read -r RESULT_TARGET RESULT_STATE RESULT_DEPLOYED RESULT_ROLLBACK < "$DEPLOY_RESULT"
+    if [[ "$RESULT_TARGET" == "$NEW" ]]; then
+      case "$RESULT_STATE" in
+        shipped)
+          if healthy; then
+            report "shipped" "pass" "$PR_HEAD" "$NEW" "$RESULT_DEPLOYED" "-" "$LAST_GOOD"
+            exit 0
+          fi
+          report "deployment_state_unknown" "unknown" "$PR_HEAD" "$NEW" "$RESULT_DEPLOYED" "-" "$LAST_GOOD"
+          exit 1
+          ;;
+        deployment_failed_rollback_succeeded)
+          report "$RESULT_STATE" "pass" "$PR_HEAD" "$NEW" "-" "$RESULT_ROLLBACK" "$LAST_GOOD"
+          exit 1
+          ;;
+        deployment_failed_rollback_failed)
+          report "$RESULT_STATE" "fail" "$PR_HEAD" "$NEW" "-" "$RESULT_ROLLBACK" "$LAST_GOOD"
+          exit 1
+          ;;
+      esac
+    fi
+  fi
+else
+  git reset --hard origin/main --quiet
+  gh pr ready "$PR" --repo "$REPO" >/dev/null 2>&1 || true
+  merge_rc=0
+  gh pr merge "$PR" --repo "$REPO" --merge --admin --delete-branch >/dev/null 2>&1 || merge_rc=$?
+  [[ "$merge_rc" -eq 0 ]] || die "gh pr merge exited $merge_rc"
 
-git fetch origin --quiet
-NEW="$(git rev-parse origin/main)"
-if [[ -n "$PR_HEAD" ]] && ! git merge-base --is-ancestor "$PR_HEAD" "$NEW"; then
-  report "merge_succeeded_deployment_not_attempted" "unknown" "$PR_HEAD" "$NEW" "-" "-" "$LAST_GOOD"
-  die "merged main $NEW does not contain expected PR head $PR_HEAD"
+  git fetch origin --quiet
+  NEW="$(git rev-parse origin/main)"
+  if [[ -n "$PR_HEAD" ]] && ! git merge-base --is-ancestor "$PR_HEAD" "$NEW"; then
+    report "merge_succeeded_deployment_not_attempted" "unknown" "$PR_HEAD" "$NEW" "-" "-" "$LAST_GOOD"
+    die "merged main $NEW does not contain expected PR head $PR_HEAD"
+  fi
+  git reset --hard "$NEW" --quiet
+  log "merged PR #$PR; main is $NEW (was $LAST_GOOD)"
 fi
-git reset --hard "$NEW" --quiet
-log "merged PR #$PR; main is $NEW (was $LAST_GOOD)"
 
 # Smoke: a merge of two green branches can still be semantically broken. Typecheck the
 # merged tree before we dare restart the live service onto it. Failure aborts WITHOUT
@@ -153,10 +200,13 @@ fi
 # Hand the restart to a detached transient unit outside our cgroup, so it survives the
 # restart it is about to perform. --collect reaps the unit when it exits.
 log "handing off restart to a detached unit"
-systemd-run --user --collect --unit="selfship-$PR-$(date +%s)" \
+rm -f "$DEPLOY_RESULT"
+SHIP_ID="${PR:-${NEW:0:12}}"
+systemd-run --user --collect --unit="selfship-$SHIP_ID-$(date +%s)" \
   --setenv=NTFY_URL="${NTFY_URL:-}" --setenv=NTFY_TOPIC="${NTFY_TOPIC:-}" \
   --setenv=DISPATCHER_SELFSHIP_UNIT="$UNIT" --setenv=DISPATCHER_SELFSHIP_CHECKOUT="$CHECKOUT" \
   /bin/bash "$CHECKOUT/scripts/self-ship.sh" --restart "$LAST_GOOD" "$NEW"
 
-log "merge + smoke ok; restart handed off for PR #$PR"
+report "merge_succeeded_deployment_not_attempted" "unknown" "$PR_HEAD" "$NEW" "-" "-" "$LAST_GOOD"
+log "merge/deploy smoke ok; restart handed off for ${PR:+PR #$PR}${PR:-commit $NEW}; verification pending"
 exit 0

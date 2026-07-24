@@ -8,6 +8,16 @@ import type { GeneratedConflictRepairResult } from "../src/generated-conflict-re
 const ok: ExecResult = { ok: true, stdout: "", stderr: "", code: 0 };
 
 function succeededRun(over: Partial<RunRecord> = {}): RunRecord {
+  const recovery = over.recovery ?? {
+    ci: {
+      attempts: over.ciSelfHealAttempts ?? 0,
+      escalated: over.ciEscalated ?? false,
+    },
+    deploy: {
+      attempts: 0,
+      escalated: over.deployEscalated ?? false,
+    },
+  };
   return {
     status: "succeeded",
     prNumber: 42,
@@ -16,9 +26,7 @@ function succeededRun(over: Partial<RunRecord> = {}): RunRecord {
     issueNumber: 1,
     issueTitle: "t",
     exitCode: 0,
-    ciSelfHealAttempts: 0,
-    ciEscalated: false,
-    deployEscalated: false,
+    recovery,
     ...over,
   } as unknown as RunRecord;
 }
@@ -88,6 +96,7 @@ function harness(opts: {
         isDraft: opts.isDraft ?? false,
         mergeStateStatus: opts.mergeStateStatus ?? "CLEAN",
         reviewDecision: opts.reviewDecision ?? null,
+        mergeCommitOid: "merge789",
       }),
       prDiff: async () => (opts.diff === undefined ? "" : opts.diff),
       comment: async (_i, b) => { comments.push(b); return true; },
@@ -174,8 +183,11 @@ describe("autoshipRun — gating", () => {
 
   it("does not ship when CI has failed (self-heal and escalation budgets already exhausted)", async () => {
     const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 2 });
-    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 2, ciEscalated: true }));
-    assert.equal(r.action, "ci_not_green");
+    const r = await autoshipRun(
+      h.deps,
+      succeededRun({ recovery: { ci: { attempts: 2, escalated: true } } }),
+    );
+    assert.equal(r.action, "exhausted");
     assert.equal(h.shipped.length, 0);
   });
 });
@@ -183,70 +195,73 @@ describe("autoshipRun — gating", () => {
 describe("autoshipRun — CI self-heal", () => {
   it("attempts a self-heal relaunch on the first red CI, without holding", async () => {
     const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 2 });
-    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 0 }));
-    assert.deepEqual(r, { action: "ci_self_heal", attempt: 1, maxAttempts: 2 });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.equal(r.action, "repair");
+    assert.equal(r.action === "repair" ? r.kind : null, "ci");
+    assert.equal(r.action === "repair" ? r.attempt : null, 1);
     assert.equal(h.shipped.length, 0);
     assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL), "must not hold while self-heal budget remains");
     assert.equal(h.comments.length, 0, "no held-for-human comment yet");
-    assert.ok(h.pushes.some((p) => /self-heal 1\/2/.test(p.title) && p.priority === 3));
+    assert.equal(h.pushes.length, 0, "routine repair must not page the operator");
   });
 
   it("attempts a second self-heal when one attempt has already been made", async () => {
     const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 2 });
-    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 1 }));
-    assert.deepEqual(r, { action: "ci_self_heal", attempt: 2, maxAttempts: 2 });
+    const r = await autoshipRun(
+      h.deps,
+      succeededRun({ recovery: { ci: { attempts: 1, escalated: false } } }),
+    );
+    assert.equal(r.action, "repair");
+    assert.equal(r.action === "repair" ? r.attempt : null, 2);
     assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL));
   });
 
   it("escalates to the configured model once the self-heal budget is exhausted, without holding", async () => {
     const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 2, ciEscalationModel: "claude-opus-4-8" });
-    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 2, ciEscalated: false }));
-    assert.deepEqual(r, { action: "ci_escalate", model: "claude-opus-4-8" });
+    const r = await autoshipRun(
+      h.deps,
+      succeededRun({ recovery: { ci: { attempts: 2, escalated: false } } }),
+    );
+    assert.equal(r.action, "escalate");
+    assert.equal(r.action === "escalate" ? r.model : null, "claude-opus-4-8");
     assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL), "must not hold before the escalation attempt runs");
-    assert.match(h.comments[0]!, /self-heal failed, escalating/i);
+    assert.match(h.comments[0]!, /repair attempts exhausted, escalating/i);
     assert.match(h.comments[0]!, /claude-opus-4-8/);
-    assert.ok(h.pushes.some((p) => /escalating #1 to claude-opus-4-8/.test(p.title) && p.priority === 3));
+    assert.equal(h.pushes.length, 0, "escalation is still automation-owned");
   });
 
-  it("holds with autoship-held once BOTH self-heal and the escalation attempt are exhausted", async () => {
+  it("reports exhaustion once BOTH self-heal and the escalation attempt are exhausted", async () => {
     const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 2 });
-    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 2, ciEscalated: true }));
-    assert.deepEqual(r, { action: "ci_not_green", state: "fail" });
-    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
-    assert.match(h.comments[0]!, /still failing after self-heal and escalation/i);
-    assert.ok(h.pushes.some((p) => /HELD/.test(p.title) && p.priority === 4));
+    const r = await autoshipRun(
+      h.deps,
+      succeededRun({ recovery: { ci: { attempts: 2, escalated: true } } }),
+    );
+    assert.equal(r.action, "exhausted");
+    assert.equal(r.action === "exhausted" ? r.kind : null, "ci");
+    assert.equal(h.pushes.length, 0, "dispatcher owns the single final exhausted page");
   });
 
   it("escalates (does not hold) immediately when the self-heal budget is configured to zero", async () => {
     const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 0 });
-    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 0, ciEscalated: false }));
-    assert.equal(r.action, "ci_escalate");
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.equal(r.action, "escalate");
     assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL));
   });
 
   it("holds immediately when both budgets are zero/exhausted from the start", async () => {
     const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 0 });
-    const r = await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 0, ciEscalated: true }));
-    assert.equal(r.action, "ci_not_green");
-    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
+    const r = await autoshipRun(
+      h.deps,
+      succeededRun({ recovery: { ci: { attempts: 0, escalated: true } } }),
+    );
+    assert.equal(r.action, "exhausted");
   });
 
-  it("interpolates the PR and issue number correctly in the held comment/notification", async () => {
-    // Regression test: an earlier version of this code path had escaped template
-    // literals (`\${pr}`) that printed the literal text "${pr}" instead of the number.
-    const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 0 });
-    await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 0, ciEscalated: true, issueNumber: 366 }));
-    assert.match(h.comments[0]!, /PR #42/);
-    assert.ok(!h.comments[0]!.includes("${pr}"));
-    assert.ok(h.pushes.some((p) => p.title.includes("#366") && !p.title.includes("${")));
-  });
-
-  it("interpolates the escalation model name correctly in the escalation comment/notification", async () => {
+  it("interpolates the escalation model name correctly in the escalation comment", async () => {
     const h = harness({ ci: "fail", ciSelfHealMaxAttempts: 0, ciEscalationModel: "claude-opus-4-8" });
-    await autoshipRun(h.deps, succeededRun({ ciSelfHealAttempts: 0, ciEscalated: false, issueNumber: 366 }));
+    await autoshipRun(h.deps, succeededRun({ issueNumber: 366 }));
     assert.match(h.comments[0]!, /claude-opus-4-8/);
     assert.ok(!h.comments[0]!.includes("${deps.ciEscalationModel}"));
-    assert.ok(h.pushes.some((p) => p.title.includes("#366") && p.title.includes("claude-opus-4-8")));
   });
 
   it("treats a run that FAILED solely on red CI (exit 0) as a self-heal/ship candidate", async () => {
@@ -269,23 +284,20 @@ describe("autoshipRun — CI self-heal", () => {
 });
 
 describe("autoshipRun — already merged (#10)", () => {
-  it("stands down on an already-merged PR without running the ship command", async () => {
+  it("deploys and verifies an already-merged PR instead of holding", async () => {
     const h = harness({ prState: "merged", diff: "" });
     const r = await autoshipRun(h.deps, succeededRun());
-    assert.deepEqual(r, { action: "already_merged" });
-    assert.equal(h.shipped.length, 0, "must never run gh pr merge on an already-merged PR");
-    // Held (via autoship-held) so the issue is neither re-dispatched nor re-shipped...
-    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
-    assert.match(h.comments[0]!, /already merged/i);
-    // ...but this is not an error page: an out-of-band merge is a human action, so DEFAULT.
-    assert.ok(h.pushes.some((p) => /stood down #1/.test(p.title) && p.priority === 3));
+    assert.deepEqual(r, { action: "shipped" });
+    assert.equal(h.shipped.length, 1);
+    assert.equal(h.shipped[0]!.env.AUTOSHIP_MERGED_SHA, "merge789");
+    assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL));
   });
 
-  it("does NOT close the issue for an already-merged PR — merge is not a verified ship (#366)", async () => {
+  it("closes the issue after the already-merged commit is verified in production", async () => {
     const h = harness({ prState: "merged", diff: "" });
     const r = await autoshipRun(h.deps, succeededRun({ issueNumber: 9 } as Partial<RunRecord>));
-    assert.equal(r.action, "already_merged");
-    assert.deepEqual(h.closedIssues, [], "autoship did not deploy/verify it, so it does not close it");
+    assert.equal(r.action, "shipped");
+    assert.deepEqual(h.closedIssues, [9]);
   });
 
   it("evaluates a still-open PR normally (does not short-circuit)", async () => {
@@ -359,27 +371,24 @@ describe("autoshipRun — generated conflict recovery", () => {
     assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL), "review-required must not block");
   });
 
-  it("merge_blocked ONLY when mergeability itself cannot be read — a genuine unknown, not a policy gate", async () => {
+  it("repairs instead of holding when mergeability cannot be read", async () => {
     const h = harness({});
     h.deps.github.prMergeInfo = async () => null;
     const r = await autoshipRun(h.deps, succeededRun());
-    assert.deepEqual(r, { action: "merge_blocked", reason: "PR mergeability could not be read" });
-    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
+    assert.equal(r.action, "repair");
+    assert.equal(r.action === "repair" ? r.kind : null, "merge");
+    assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL));
   });
 
-  it("logs loudly (does not silently no-op) when the hold label itself fails to apply on a genuine merge_blocked", async () => {
-    // Regression test (#366): a failed addLabel used to be discarded uninspected, so the
-    // issue stayed fully eligible and re-dispatched forever. Exercised via the one
-    // remaining merge_blocked case — mergeability truly unreadable.
-    const h = harness({ addLabelFails: true });
+  it("escalates unreadable mergeability after ordinary repair attempts", async () => {
+    const h = harness({});
     h.deps.github.prMergeInfo = async () => null;
-    const r = await autoshipRun(h.deps, succeededRun());
-    assert.deepEqual(r, { action: "merge_blocked", reason: "PR mergeability could not be read" });
-    assert.equal(h.labels.length, 0, "the fake reports the label never actually landed");
-    assert.ok(
-      h.errors.some((e) => /failed to stamp autoship-held/.test(e)),
-      "a failed label stamp must be logged, not silently discarded",
+    const r = await autoshipRun(
+      h.deps,
+      succeededRun({ recovery: { merge: { attempts: 2, escalated: false } } }),
     );
+    assert.equal(r.action, "escalate");
+    assert.equal(r.action === "escalate" ? r.kind : null, "merge");
   });
 
   it("repairs generated-only conflicts, waits for CI, then ships", async () => {
@@ -407,12 +416,10 @@ describe("autoshipRun — generated conflict recovery", () => {
       },
     });
     const r = await autoshipRun(h.deps, succeededRun());
-    assert.equal(r.action, "conflict_recovery_failed");
+    assert.equal(r.action, "repair");
+    assert.equal(r.action === "repair" ? r.kind : null, "merge");
     assert.equal(h.shipped.length, 0);
-    assert.match(h.comments[0]!, /merge conflicts need review/i);
-    // Regression test (same #366 bug class): a "held"-sounding comment used to post
-    // without ever stamping the label, so the issue stayed eligible and got re-run.
-    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
+    assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL));
   });
 
   it("does not ship when repaired-branch CI is still pending", async () => {
@@ -437,40 +444,44 @@ describe("autoshipRun — shipping", () => {
     assert.equal(h.shipped[0]!.cwd, "/deploy/o-r");
   });
 
-  it("escalates a first deploy failure to the frontier model instead of holding", async () => {
-    // Goal 3: mirror the CI ladder for deploy failures. The FIRST ship-command failure
-    // (deployEscalated=false) gets one frontier-model attempt before a human is paged.
+  it("repairs a deploy failure with the assigned model before escalating", async () => {
     const h = harness({
       diff: "",
       shipResult: { ok: false, stdout: "", stderr: "deploy blew up", code: 1 },
       ciEscalationModel: "claude-opus-4-8",
     });
-    const r = await autoshipRun(h.deps, succeededRun({ deployEscalated: false }));
-    assert.deepEqual(r, { action: "ship_escalate", model: "claude-opus-4-8" });
-    assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL), "must not hold before the escalation attempt runs");
-    assert.match(h.comments[0]!, /deploy failed, escalating/i);
-    assert.match(h.comments[0]!, /claude-opus-4-8/);
-    // A first-attempt escalation is routine progress, not a human page: DEFAULT priority.
-    assert.ok(h.pushes.some((p) => /escalating deploy #1 to claude-opus-4-8/.test(p.title) && p.priority === 3));
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.equal(r.action, "repair");
+    assert.equal(r.action === "repair" ? r.kind : null, "deploy");
+    assert.equal(r.action === "repair" ? r.attempt : null, 1);
+    assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL));
+    assert.equal(h.pushes.length, 0);
   });
 
-  it("holds a deploy failure (autoship-held, HIGH) only after the deploy escalation is also exhausted", async () => {
+  it("escalates deploy only after the assigned-model repair budget is exhausted", async () => {
     const h = harness({ diff: "", shipResult: { ok: false, stdout: "", stderr: "deploy blew up", code: 1 } });
-    const r = await autoshipRun(h.deps, succeededRun({ deployEscalated: true }));
-    assert.equal(r.action, "ship_failed");
-    assert.equal(r.state, "deployment_state_unknown");
-    assert.ok(h.pushes.some((p) => /UNKNOWN/.test(p.title) && p.priority === 4));
-    // Regression test: a failed (and, per contract, rolled-back) deploy must hold too --
-    // without this, the same unresolved deploy problem gets retried every ~15 minutes.
-    assert.ok(h.labels.includes(AUTOSHIP_HELD_LABEL));
+    const r = await autoshipRun(
+      h.deps,
+      succeededRun({ recovery: { deploy: { attempts: 2, escalated: false } } }),
+    );
+    assert.equal(r.action, "escalate");
+    assert.equal(r.action === "escalate" ? r.model : null, "claude-opus-4-8");
+    assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL));
   });
 
   it("a spent CI escalation does not consume the deploy escalation budget", async () => {
-    // The two budgets are independent: a run that already burned ciEscalated greening
-    // checks still gets a fresh frontier attempt when the deploy fails.
     const h = harness({ diff: "", shipResult: { ok: false, stdout: "", stderr: "deploy blew up", code: 1 } });
-    const r = await autoshipRun(h.deps, succeededRun({ ciEscalated: true, deployEscalated: false }));
-    assert.equal(r.action, "ship_escalate");
+    const r = await autoshipRun(
+      h.deps,
+      succeededRun({
+        recovery: {
+          ci: { attempts: 2, escalated: true },
+          deploy: { attempts: 2, escalated: false },
+        },
+      }),
+    );
+    assert.equal(r.action, "escalate");
+    assert.equal(r.action === "escalate" ? r.kind : null, "deploy");
     assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL));
   });
 
@@ -484,12 +495,46 @@ describe("autoshipRun — shipping", () => {
         code: 1,
       },
     });
-    // deployEscalated: the frontier deploy attempt is already spent, so this failure holds
-    // rather than escalating again -- that is the branch that reports the rolled-back state.
-    const r = await autoshipRun(h.deps, succeededRun({ deployEscalated: true }));
-    assert.equal(r.action, "ship_failed");
-    assert.equal(r.state, "deployment_failed_rollback_succeeded");
-    assert.ok(h.pushes.some((p) => /rolled back/i.test(p.title) && p.priority === 4));
+    const r = await autoshipRun(
+      h.deps,
+      succeededRun({ recovery: { deploy: { attempts: 2, escalated: true } } }),
+    );
+    assert.equal(r.action, "exhausted");
+    assert.match(r.action === "exhausted" ? r.reason : "", /rollback SHA/i);
+    assert.equal(h.pushes.length, 0, "dispatcher sends the one final exhausted page");
+  });
+
+  it("parks a detached systemd deployment until production health is verified", async () => {
+    const h = harness({
+      diff: "",
+      shipResult: {
+        ok: true,
+        stdout:
+          "::autoship:: state=merge_succeeded_deployment_not_attempted health=unknown merged=merge789\n",
+        stderr: "",
+        code: 0,
+      },
+    });
+    const r = await autoshipRun(h.deps, succeededRun({ issueNumber: 366 } as Partial<RunRecord>));
+    assert.deepEqual(r, { action: "deploy_pending", mergedSha: "merge789" });
+    assert.deepEqual(h.closedIssues, [], "a restart handoff is not a verified deployment");
+    assert.equal(h.pushes.length, 0);
+  });
+
+  it("does not accept rollback health as successful deployment health on exit zero", async () => {
+    const h = harness({
+      diff: "",
+      shipResult: {
+        ok: true,
+        stdout:
+          "::autoship:: state=deployment_failed_rollback_succeeded health=pass merged=bad rollback=good\n",
+        stderr: "",
+        code: 0,
+      },
+    });
+    const r = await autoshipRun(h.deps, succeededRun({ issueNumber: 366 } as Partial<RunRecord>));
+    assert.equal(r.action, "repair");
+    assert.deepEqual(h.closedIssues, []);
   });
 
   it("closes the issue ONLY after a shipped, health-pass deploy -- never on merge alone (#366)", async () => {
@@ -505,12 +550,14 @@ describe("autoshipRun — shipping", () => {
 
   it("does NOT close the issue when the ship command fails", async () => {
     const h = harness({ diff: "", shipResult: { ok: false, stdout: "", stderr: "deploy blew up", code: 1 } });
-    // deployEscalated so this lands on the terminal ship_failed hold, not the escalation.
     const r = await autoshipRun(
       h.deps,
-      succeededRun({ issueNumber: 366, deployEscalated: true } as Partial<RunRecord>),
+      succeededRun({
+        issueNumber: 366,
+        recovery: { deploy: { attempts: 2, escalated: true } },
+      } as Partial<RunRecord>),
     );
-    assert.equal(r.action, "ship_failed");
+    assert.equal(r.action, "exhausted");
     assert.deepEqual(h.closedIssues, []);
   });
 
@@ -527,14 +574,15 @@ describe("autoshipRun — shipping", () => {
       },
     });
     const r = await autoshipRun(h.deps, succeededRun({ issueNumber: 366 } as Partial<RunRecord>));
-    assert.equal(r.action, "shipped");
-    assert.deepEqual(h.closedIssues, [], "shipped does not imply closed when health did not report pass");
+    assert.equal(r.action, "repair");
+    assert.deepEqual(h.closedIssues, [], "non-pass health never becomes shipped");
   });
 
-  it("logs loudly (does not silently drop it) when closing a shipped issue itself fails", async () => {
+  it("repairs instead of claiming success when closing the shipped issue fails", async () => {
     const h = harness({ diff: "", closeIssueOk: false });
     const r = await autoshipRun(h.deps, succeededRun({ issueNumber: 366 } as Partial<RunRecord>));
-    assert.equal(r.action, "shipped");
+    assert.equal(r.action, "repair");
+    assert.equal(r.action === "repair" ? r.kind : null, "merge");
     assert.deepEqual(h.closedIssues, []);
     assert.ok(h.errors.some((e) => /failed to close the issue/.test(e)));
   });
