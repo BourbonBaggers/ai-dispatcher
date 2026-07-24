@@ -64,6 +64,7 @@ function config(overrides: Partial<DispatcherConfig> = {}): DispatcherConfig {
     stateDir: "/home/dev/state",
     logLevel: "info",
     autoshipCmd: null,
+    autoshipTimeoutMinutes: 120,
     autoshipDeploymentDir: "/home/dev/state/autoship-deployments/acme-widgets",
     generatedConflictAllowlist: ["docs/memory.md", "docs/researcher.md"],
     generatedConflictRegenCmd: null,

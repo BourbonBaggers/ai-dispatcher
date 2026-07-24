@@ -78,9 +78,31 @@ test("parseCliConfig resolves a full config with the flag winning over env", () 
   assert.equal(c.once, true);
   assert.equal(c.pollIntervalSeconds, 120);
   assert.equal(c.maxRuntimeMinutes, 45);
+  assert.equal(c.autoshipTimeoutMinutes, 120);
   assert.equal(c.autoshipDeploymentDir, "/state/autoship-deployments/acme-widgets");
   assert.equal(c.dryRun, false);
   assert.equal(c.authorAuth.ok && c.authorAuth.mode, "author-allowlist");
+});
+
+test("parseCliConfig resolves the autoship timeout from env or flag", () => {
+  const fromEnv = parseCliConfig(["--repo", "acme/widgets"], {
+    DISPATCHER_REPO_DIR: "/mirror",
+    DISPATCHER_WORKTREE_DIR: "/worktrees",
+    DISPATCHER_AUTOSHIP_TIMEOUT_MINUTES: "75",
+  });
+  assert.equal(fromEnv.ok, true);
+  assert.equal(fromEnv.config!.autoshipTimeoutMinutes, 75);
+
+  const fromFlag = parseCliConfig(
+    ["--repo", "acme/widgets", "--autoship-timeout-minutes", "180"],
+    {
+      DISPATCHER_REPO_DIR: "/mirror",
+      DISPATCHER_WORKTREE_DIR: "/worktrees",
+      DISPATCHER_AUTOSHIP_TIMEOUT_MINUTES: "75",
+    },
+  );
+  assert.equal(fromFlag.ok, true);
+  assert.equal(fromFlag.config!.autoshipTimeoutMinutes, 180);
 });
 
 test("parseCliConfig resolves the autoship deployment checkout from env or flag", () => {

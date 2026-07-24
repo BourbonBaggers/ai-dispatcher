@@ -188,8 +188,13 @@ status line on failure when state is known:
 `::autoship:: state=<state> health=<pass|fail|unknown> pr_head=<sha> merged=<sha> deployed=<sha|-> rollback=<sha|-> last_good=<sha|-> checkout=<path>`.
 Recognized states are `merge_succeeded_deployment_not_attempted`,
 `deployment_failed_rollback_succeeded`, `deployment_failed_rollback_failed`,
-`deployment_state_unknown`, and `shipped`. Without this line, non-zero exits are reported
-as unknown production state requiring human verification.
+`deployment_state_unknown`, and `shipped`. Without this line, non-zero exits are conservatively
+reported as unknown production state and sent through the automated deploy-repair ladder.
+
+Autoship commands have a 120-minute default ceiling
+(`DISPATCHER_AUTOSHIP_TIMEOUT_MINUTES`). Timeout terminates the entire deploy process
+group—not just its wrapper shell—so no orphaned build, SSH process, or deploy lock can
+poison the recovery attempt.
 
 Autoship can repair a green PR that is blocked only by generated-file merge conflicts.
 The recoverable paths are exact and explicit: `DISPATCHER_GENERATED_CONFLICT_ALLOWLIST`
@@ -279,7 +284,8 @@ whenever the agent process happened to exit.
 All durable state is one atomically-written JSON file plus a lock, under `--state-dir`:
 
 - `state.json` — runs (status, claim, resume/progress counters, parked/ladder CI
-  state, PR/commit), provider cooldown windows, and per-issue failure deferrals. Written
+  state, PR/commit), provider cooldown windows, per-phase recovery budgets, and verified
+  frontier-exhaustion proof. Written
   temp-file-then-rename, so a crash mid-write never corrupts it; a corrupt file is
   preserved as `.corrupt-<ts>` and replaced with empty state rather than crash-looping.
 - `dispatcher.lock` — single-instance guard. A second dispatcher against the same state

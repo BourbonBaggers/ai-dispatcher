@@ -30,7 +30,7 @@ import {
   RESUMABLE_STATUSES,
 } from "./labels.ts";
 import type { DispatcherAgent, DispatcherStatus } from "./labels.ts";
-import type { RecoveryLedger } from "./recovery-policy.ts";
+import type { RecoveryKind, RecoveryLedger } from "./recovery-policy.ts";
 
 export type RunTrigger = "poll" | "manual" | "resume";
 
@@ -61,6 +61,12 @@ export interface RunRecord {
   outputSeq: number;
   /** Independent retry + frontier-escalation budgets for every owned delivery phase. */
   recovery?: RecoveryLedger;
+  /** Present only when the current hold was created after the full frontier ladder. */
+  exhaustion?: {
+    kind: RecoveryKind;
+    reason: string;
+    at: number;
+  };
   /** @deprecated Read-only compatibility with pre-ledger state/test fixtures. */
   ciSelfHealAttempts?: number;
   /** @deprecated Read-only compatibility with pre-ledger state/test fixtures. */
@@ -322,6 +328,7 @@ export class StateStore {
       | "outputSeq"
       | "remotePid"
       | "recovery"
+      | "exhaustion"
     >,
   ): RunRecord {
     if (this.activeRun()) throw new Error("a run is already active — the dispatcher is serial");

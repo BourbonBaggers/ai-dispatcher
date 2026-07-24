@@ -65,6 +65,7 @@ function harness(opts: {
   closeIssueOk?: boolean;
   /** PR lifecycle state returned by prState() -- default "open". */
   prState?: "open" | "merged" | "closed" | "unknown";
+  beforeShip?: AutoshipDeps["beforeShip"];
 }): Harness {
   const shipped: Harness["shipped"] = [];
   const comments: string[] = [];
@@ -84,6 +85,7 @@ function harness(opts: {
     generatedConflictCiWaitSeconds: 900,
     ciSelfHealMaxAttempts: opts.ciSelfHealMaxAttempts ?? 2,
     ciEscalationModel: opts.ciEscalationModel ?? "claude-opus-4-8",
+    ...(opts.beforeShip ? { beforeShip: opts.beforeShip } : {}),
     github: {
       prState: async () => opts.prState ?? "open",
       prChecksState: async () => opts.ci ?? "pass",
@@ -431,6 +433,24 @@ describe("autoshipRun — generated conflict recovery", () => {
 });
 
 describe("autoshipRun — shipping", () => {
+  it("durably checkpoints deployment before invoking the ship command", async () => {
+    const order: string[] = [];
+    const h = harness({
+      diff: "",
+      beforeShip: () => {
+        order.push("checkpoint");
+      },
+    });
+    const originalShip = h.deps.ship;
+    h.deps.ship = async (...args) => {
+      order.push("ship");
+      return originalShip(...args);
+    };
+
+    await autoshipRun(h.deps, succeededRun());
+    assert.deepEqual(order, ["checkpoint", "ship"]);
+  });
+
   it("passes exact SHA and deployment checkout context to the ship command", async () => {
     const h = harness({ diff: "" });
     await autoshipRun(h.deps, succeededRun());
@@ -456,6 +476,8 @@ describe("autoshipRun — shipping", () => {
     assert.equal(r.action === "repair" ? r.attempt : null, 1);
     assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL));
     assert.equal(h.pushes.length, 0);
+    assert.match(r.action === "repair" ? r.reason : "", /automated recovery attempt/);
+    assert.doesNotMatch(r.action === "repair" ? r.reason : "", /Human production verification/);
   });
 
   it("escalates deploy only after the assigned-model repair budget is exhausted", async () => {
