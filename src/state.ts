@@ -64,7 +64,9 @@ export interface RunRecord {
   exitCode: number | null;
   failureSummary: string | null;
   resumeCount: number;
-  /** Output sequence at the start of the last resume — progress-aware resume budget. */
+  /** Monotonic launch sequence; telemetry idempotency must not depend on clock timing. */
+  attemptNumber: number;
+  /** Output sequence at the start of the last resume — diagnostic progress evidence. */
   lastProgressSeq: number;
   /** Total output lines seen this run. */
   outputSeq: number;
@@ -110,6 +112,7 @@ interface PersistedState {
 }
 
 const STATE_FILE = "state.json";
+const STATE_BACKUP_FILE = "state.json.backup";
 const LOCK_FILE = "dispatcher.lock";
 
 function emptyState(): PersistedState {
@@ -139,6 +142,7 @@ function normalizeRunRecovery(run: RunRecord): RunRecord {
     assignedCliModel: run.assignedCliModel ?? run.cliModel,
     assignedEffortLabel: run.assignedEffortLabel ?? run.effortLabel,
     assignedCliEffort: run.assignedCliEffort ?? run.cliEffort,
+    attemptNumber: Math.max(1, run.attemptNumber ?? 1),
   };
   if (run.status === ("succeeded" as DispatcherStatus)) {
     // Old releases used `succeeded` for a PR handoff. It is not proof of deployment.
@@ -203,6 +207,13 @@ export class LockHeldError extends Error {
   }
 }
 
+export class StateCorruptionError extends Error {
+  constructor() {
+    super("dispatcher state and its recovery backup are both unreadable");
+    this.name = "StateCorruptionError";
+  }
+}
+
 function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -227,6 +238,7 @@ function processIdentity(pid: number): string | null {
 export class StateStore {
   private readonly dir: string;
   private readonly stateFilePath: string;
+  private readonly stateBackupFilePath: string;
   private readonly lockFilePath: string;
   private readonly reclaimLockFilePath: string;
   private state: PersistedState;
@@ -236,6 +248,7 @@ export class StateStore {
   private constructor(dir: string) {
     this.dir = dir;
     this.stateFilePath = join(dir, STATE_FILE);
+    this.stateBackupFilePath = join(dir, STATE_BACKUP_FILE);
     this.lockFilePath = join(dir, LOCK_FILE);
     this.reclaimLockFilePath = `${this.lockFilePath}.reclaim`;
     this.state = emptyState();
@@ -249,8 +262,13 @@ export class StateStore {
     const store = new StateStore(dir);
     mkdirSync(dir, { recursive: true });
     store.acquireLock();
-    store.load();
-    return store;
+    try {
+      store.load();
+      return store;
+    } catch (err) {
+      store.releaseLock();
+      throw err;
+    }
   }
 
   private acquireLock(): void {
@@ -377,35 +395,66 @@ export class StateStore {
 
   private load(): void {
     if (!existsSync(this.stateFilePath)) {
+      if (existsSync(this.stateBackupFilePath)) {
+        try {
+          this.state = this.readState(this.stateBackupFilePath);
+          this.persist();
+          return;
+        } catch {
+          throw new StateCorruptionError();
+        }
+      }
       this.persist();
       return;
     }
     try {
-      const parsed = JSON.parse(readFileSync(this.stateFilePath, "utf8")) as PersistedState;
-      this.state = {
-        version: 1,
-        settings: {
-          claudeSuppressedUntil: parsed.settings?.claudeSuppressedUntil ?? null,
-          codexSuppressedUntil: parsed.settings?.codexSuppressedUntil ?? null,
-        },
-        runs: Array.isArray(parsed.runs)
-          ? collapseLegacyFinalizations(parsed.runs.map((run) => normalizeRunRecovery(run)))
-          : [],
-      };
+      this.state = this.readState(this.stateFilePath);
+      if (!existsSync(this.stateBackupFilePath)) this.persistBackup();
     } catch {
-      // A corrupt state file is worse than an empty one only if it silently drops work.
-      // Preserve it for inspection and start clean rather than crash-loop.
+      // Never turn unreadable durable claims into an empty queue: that redispatches open
+      // issues from scratch. Preserve the bad primary and recover the last atomic backup.
       renameSync(this.stateFilePath, `${this.stateFilePath}.corrupt-${Date.now()}`);
-      this.state = emptyState();
+      try {
+        this.state = this.readState(this.stateBackupFilePath);
+      } catch {
+        throw new StateCorruptionError();
+      }
       this.persist();
     }
   }
 
-  /** Atomic write: temp file + rename, so a crash mid-write never truncates state. */
+  private readState(path: string): PersistedState {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<PersistedState> | null;
+    // Syntactically valid JSON such as `{}` is still corrupt state. Treating missing
+    // runs as an empty array would silently discard every claim just as surely as a
+    // parse error.
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.runs)) {
+      throw new StateCorruptionError();
+    }
+    return {
+      version: 1,
+      settings: {
+        claudeSuppressedUntil: parsed.settings?.claudeSuppressedUntil ?? null,
+        codexSuppressedUntil: parsed.settings?.codexSuppressedUntil ?? null,
+      },
+      runs: Array.isArray(parsed.runs)
+        ? collapseLegacyFinalizations(parsed.runs.map((run) => normalizeRunRecovery(run)))
+        : [],
+    };
+  }
+
+  private persistBackup(): void {
+    const tmp = `${this.stateBackupFilePath}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(this.state, null, 2), "utf8");
+    renameSync(tmp, this.stateBackupFilePath);
+  }
+
+  /** Atomic primary + recovery copy: corruption never silently drops active claims. */
   private persist(): void {
     const tmp = `${this.stateFilePath}.tmp-${process.pid}`;
     writeFileSync(tmp, JSON.stringify(this.state, null, 2), "utf8");
     renameSync(tmp, this.stateFilePath);
+    this.persistBackup();
   }
 
   // ── settings / cooldowns ──────────────────────────────────────────────────
@@ -499,6 +548,7 @@ export class StateStore {
       | "exitCode"
       | "failureSummary"
       | "resumeCount"
+      | "attemptNumber"
       | "lastProgressSeq"
       | "outputSeq"
       | "remotePid"
@@ -527,6 +577,7 @@ export class StateStore {
       exitCode: null,
       failureSummary: null,
       resumeCount: 0,
+      attemptNumber: 1,
       lastProgressSeq: 0,
       outputSeq: 0,
       assignedAgent: data.agent,

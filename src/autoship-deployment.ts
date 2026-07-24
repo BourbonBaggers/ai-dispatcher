@@ -102,9 +102,13 @@ export function decideDeploymentCheckout(
 }
 
 export function parseAutoshipStatusReport(output: string): AutoshipStatusReport | null {
-  const line = output
+  const lines = output
     .split(/\r?\n/)
-    .find((candidate) => candidate.startsWith("::autoship:: "));
+    .filter((candidate) => candidate.startsWith("::autoship:: "));
+  // A ship command may report intermediate state before its terminal verdict. The last
+  // control line is authoritative; accepting the first can preserve a stale "pending"
+  // or, worse, ignore a final rollback failure.
+  const line = lines.at(-1);
   if (!line) return null;
 
   const fields = new Map<string, string>();
@@ -184,6 +188,18 @@ export function classifyShipResult(result: ExecResult): ClassifiedShipResult {
     parseAutoshipStatusReport(output) ??
     parseLegacyAutoshipStatusReport(output);
   if (report) {
+    if (
+      report.state === "shipped" &&
+      report.health === "pass" &&
+      (!report.mergedSha || !report.deployedSha)
+    ) {
+      return {
+        state: "deployment_state_unknown",
+        health: "unknown",
+        report,
+        detail: "Ship command claimed success without both merged and deployed SHA evidence.",
+      };
+    }
     return {
       state: report.state,
       health: report.health,
@@ -192,15 +208,9 @@ export function classifyShipResult(result: ExecResult): ClassifiedShipResult {
     };
   }
 
-  if (result.code === 0) {
-    return {
-      state: "shipped",
-      health: "pass",
-      report: null,
-      detail: summarizeShipDetail(result),
-    };
-  }
-
+  // Exit zero is process completion, not production evidence. Every supported ship
+  // implementation emits either ::autoship:: or the legacy AUTOSHIP_STATUS contract.
+  // Missing control output must repair/retry instead of closing the issue as shipped.
   return {
     state: "deployment_state_unknown",
     health: "unknown",

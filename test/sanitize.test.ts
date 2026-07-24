@@ -28,6 +28,7 @@ test("::result:: parses all fields, defaulting a missing/invalid ci to none", ()
     plan: "docs/plans/p.md",
     commits: 3,
     ci: "pass",
+    disposition: "normal",
   });
 });
 
@@ -35,6 +36,13 @@ test("::result:: with an unknown ci token falls back to none, not a crash", () =
   const parsed = parseControlLine("::result:: exit=1 pr= commit= plan= commits=0 ci=weird");
   assert.equal(parsed?.result?.ci, "none");
   assert.equal(parsed?.result?.exit, 1);
+});
+
+test("::result:: carries a trusted closed-issue retirement disposition", () => {
+  const parsed = parseControlLine(
+    "::result:: exit=0 pr= commit= plan= commits=0 ci=none disposition=abandoned",
+  );
+  assert.equal(parsed?.result?.disposition, "abandoned");
 });
 
 test("ordinary output is not mistaken for a control line", () => {

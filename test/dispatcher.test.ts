@@ -14,7 +14,12 @@ import {
   recheckParkedRun,
   recheckHeldRun,
   runScanOnce,
+  finalizeRun,
   assignedIdentity,
+  nextResumeCount,
+  nextRecoveryLaunch,
+  isOwnedLauncherCommand,
+  checkpointLadderRun,
   MAX_AUTO_RESUMES,
   type DispatcherDeps,
 } from "../src/dispatcher.ts";
@@ -55,6 +60,7 @@ function run(overrides: Partial<RunRecord>): RunRecord {
     exitCode: null,
     failureSummary: null,
     resumeCount: 0,
+    attemptNumber: 1,
     lastProgressSeq: 0,
     outputSeq: 0,
     recovery: {},
@@ -80,7 +86,7 @@ test("attemptRecordFromRun maps a terminal run honestly", () => {
   });
   const rec = attemptRecordFromRun(r, 5000);
   assert.equal(rec.issueNumber, 1);
-  assert.equal(rec.attemptId, "run-x#0@4000"); // terminal timestamp keeps resumes distinct
+  assert.equal(rec.attemptId, "run-x#1");
   assert.equal(rec.provider, "anthropic"); // derived from the registry, not hard-coded
   assert.equal(rec.modelRequested, "claude-opus-4-8");
   assert.equal(rec.selectedModelLabel, "model:claude-opus-4.8");
@@ -96,10 +102,17 @@ test("attemptRecordFromRun maps a terminal run honestly", () => {
 
 test("attemptRecordFromRun disambiguates resumes and marks the retry reason", () => {
   const rec = attemptRecordFromRun(
-    run({ id: "run-y", trigger: "resume", resumeCount: 2, status: "interrupted", finishedAt: null }),
+    run({
+      id: "run-y",
+      trigger: "resume",
+      resumeCount: 2,
+      attemptNumber: 4,
+      status: "interrupted",
+      finishedAt: null,
+    }),
     9000,
   );
-  assert.equal(rec.attemptId, "run-y#2@9000"); // no finishedAt → falls back to nowMs
+  assert.equal(rec.attemptId, "run-y#4");
   assert.equal(rec.retryReason, "resume");
   assert.equal(rec.activeDurationMs, null); // no finishedAt → unknown duration
 });
@@ -149,6 +162,37 @@ test("selectResumable skips a run that has hit the auto-resume cap", () => {
   assert.equal(selectResumable(runs, none, MAX_AUTO_RESUMES), null);
 });
 
+test("provider output never resets the finite resume budget", () => {
+  assert.equal(nextResumeCount(run({ resumeCount: 2, outputSeq: 500, lastProgressSeq: 1 })), 3);
+});
+
+test("frontier and repair rungs receive a fresh finite resume budget", () => {
+  assert.deepEqual(nextRecoveryLaunch(run({ resumeCount: 3, outputSeq: 500, attemptNumber: 7 })), {
+    resumeCount: 0,
+    lastProgressSeq: 500,
+    attemptNumber: 8,
+  });
+});
+
+test("orphan process ownership requires the exact issue and branch arguments", () => {
+  const r = run({ issueNumber: 12, branch: "issue-12-fix-ci" });
+  assert.equal(
+    isOwnedLauncherCommand(
+      "bash /srv/scripts/dispatch-agent.sh --issue 12 --agent codex --branch issue-12-fix-ci",
+      r,
+    ),
+    true,
+  );
+  assert.equal(
+    isOwnedLauncherCommand(
+      "bash /srv/scripts/dispatch-agent.sh --issue 120 --branch issue-12-fix-ci",
+      r,
+    ),
+    false,
+  );
+  assert.equal(isOwnedLauncherCommand("node unrelated.js", r), false);
+});
+
 // ── parked (ci_pending) selection ───────────────────────────────────────────────
 
 test("selectParked returns the oldest parked run", () => {
@@ -183,6 +227,27 @@ test("shouldReleaseClaim marks a run done-working (drops agent-working, no resum
   assert.equal(shouldReleaseClaim("held"), true);
   assert.equal(shouldReleaseClaim("failed"), true);
   assert.equal(shouldReleaseClaim("abandoned"), true);
+});
+
+test("a pre-launch closed issue clears its working label without spending recovery", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const created = parkedRun(store);
+    const abandoned = store.updateRun(created.id, {
+      status: "abandoned",
+      finalizationPending: true,
+    });
+    const { deps, removedLabels } = parkedDeps(store, {});
+
+    await finalizeRun(deps, abandoned);
+
+    assert.deepEqual(removedLabels, ["agent-working"]);
+    assert.equal(store.getRun(abandoned.id)?.finalizationPending, false);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── issue comment ─────────────────────────────────────────────────────────────
@@ -354,6 +419,41 @@ test("reconcile leaves already-terminal runs untouched", () => {
   }
 });
 
+test("reconcile kills a verified orphan launcher before making its run resumable", () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const created = store.createRun({
+      issueNumber: 18,
+      issueTitle: "orphan process",
+      issueUrl: "https://x/18",
+      agent: "codex",
+      modelLabel: "model:gpt-5.5",
+      cliModel: "gpt-5.5",
+      effortLabel: "effort:medium",
+      cliEffort: "medium",
+      branch: "issue-18-orphan-process",
+      checkoutPath: "/w/issue-18-orphan-process",
+      planPath: null,
+      trigger: "poll",
+    });
+    store.updateRun(created.id, { status: "running", remotePid: 4242 });
+    const killed: number[] = [];
+    reconcile({
+      ...depsWith(store),
+      processCommand: () =>
+        "bash /srv/dispatch-agent.sh --issue 18 --branch issue-18-orphan-process",
+      terminateOrphan: (pid) => killed.push(pid),
+    });
+    assert.deepEqual(killed, [4242]);
+    assert.equal(store.getRun(created.id)?.remotePid, null);
+    assert.equal(store.getRun(created.id)?.status, "interrupted");
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 
 // ── recheckParkedRun / evaluateAutoship (#366: park on CI-pending, don't relaunch) ──
 
@@ -387,16 +487,18 @@ function parkedDeps(store: StateStore, opts: {
   removedLabels: string[];
   ships: { count: number };
   reads: { issueLabels: number };
+  reopened: { count: number };
   notifications: { count: number };
-  outcomes: Array<{ issue: number; productionStatus?: string }>;
+  outcomes: Array<{ issue: number; productionStatus?: string; finalCompletingModel?: string | null }>;
 } {
   const comments: string[] = [];
   const labels: string[] = [];
   const removedLabels: string[] = [];
   const ships = { count: 0 };
   const reads = { issueLabels: 0 };
+  const reopened = { count: 0 };
   const notifications = { count: 0 };
-  const outcomes: Array<{ issue: number; productionStatus?: string }> = [];
+  const outcomes: Array<{ issue: number; productionStatus?: string; finalCompletingModel?: string | null }> = [];
   const deps: DispatcherDeps = {
     config: autoshipConfig(),
     store,
@@ -426,24 +528,35 @@ function parkedDeps(store: StateStore, opts: {
       },
       markPrReady: async () => true,
       closeIssue: async () => true,
+      reopenIssue: async () => { reopened.count += 1; return true; },
     } as unknown as DispatcherDeps["github"],
     notifier: { send: async () => { notifications.count += 1; } },
     telemetry: {
-      setIssueOutcome: (issue: number, outcome: { productionStatus?: string }) => {
-        outcomes.push(
-          outcome.productionStatus === undefined
-            ? { issue }
-            : { issue, productionStatus: outcome.productionStatus },
-        );
+      setIssueOutcome: (
+        issue: number,
+        outcome: { productionStatus?: string; finalCompletingModel?: string | null },
+      ) => {
+        outcomes.push({
+          issue,
+          ...(outcome.productionStatus === undefined ? {} : { productionStatus: outcome.productionStatus }),
+          ...(outcome.finalCompletingModel === undefined
+            ? {}
+            : { finalCompletingModel: outcome.finalCompletingModel }),
+        });
       },
     } as unknown as NonNullable<DispatcherDeps["telemetry"]>,
     ship: async () => {
       ships.count += 1;
-      return opts.shipResult ?? { ok: true, stdout: "", stderr: "", code: 0 };
+      return opts.shipResult ?? {
+        ok: true,
+        stdout: "::autoship:: state=shipped health=pass merged=merged deployed=merged\n",
+        stderr: "",
+        code: 0,
+      };
     },
     now: () => 5000,
   };
-  return { deps, comments, labels, removedLabels, ships, reads, notifications, outcomes };
+  return { deps, comments, labels, removedLabels, ships, reads, reopened, notifications, outcomes };
 }
 
 function parkedRun(store: StateStore): RunRecord {
@@ -512,6 +625,22 @@ test("recheckParkedRun parks unknown GitHub state without burning a repair budge
   }
 });
 
+test("parked-CI recovery checkpoints replay before relaunch", () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run1 = parkedRun(store);
+    checkpointLadderRun(store, run1);
+    const after = store.getRun(run1.id);
+    assert.equal(after?.status, "ci_failed");
+    assert.equal(after?.finalizationPending, true);
+    assert.equal(store.pendingFinalizations()[0]?.id, run1.id);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("recheckParkedRun ships once CI has resolved to green, without relaunching the agent", async () => {
   const dir = tmp();
   try {
@@ -524,7 +653,11 @@ test("recheckParkedRun ships once CI has resolved to green, without relaunching 
     const after = store.getRun(run1.id);
     assert.equal(after?.status, "shipped");
     assert.equal(ships.count, 1, "the ship command runs exactly once");
-    assert.deepEqual(outcomes, [{ issue: 1, productionStatus: "deployed" }]);
+    assert.deepEqual(outcomes, [{
+      issue: 1,
+      productionStatus: "deployed",
+      finalCompletingModel: "claude-sonnet-5",
+    }]);
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -627,31 +760,59 @@ function heldRun(store: StateStore): RunRecord {
   const created = parkedRun(store);
   return store.updateRun(created.id, {
     status: "held",
-    exhaustion: { kind: "ci", reason: "frontier failed", at: 1000 },
+    exhaustion: { kind: "ci", reason: "frontier failed", at: 1000, labelApplied: true },
   });
 }
 
-test("recheckHeldRun retires a closed issue without autoship, labels, comments, or notifications", async () => {
+test("recheckHeldRun reopens a prematurely closed exhausted issue and retains its hold", async () => {
   const dir = tmp();
   try {
     const store = StateStore.open(dir);
     const run1 = heldRun(store);
-    const { deps, comments, labels, removedLabels, ships, reads, notifications } = parkedDeps(store, {
+    const { deps, comments, labels, removedLabels, ships, reads, reopened, notifications } = parkedDeps(store, {
       ci: "pass",
       issueState: "CLOSED",
       prState: "merged",
+      issueLabels: ["autoship-held"],
     });
 
     const { rechecked } = await recheckHeldRun(deps, run1);
 
     assert.equal(rechecked, false);
-    assert.equal(store.getRun(run1.id)?.status, "abandoned", "closed issue releases the stale held claim");
-    assert.equal(reads.issueLabels, 0, "closed issue is terminal before the hold-label read");
+    assert.equal(store.getRun(run1.id)?.status, "held");
+    assert.equal(reopened.count, 1, "closure without verified production is repaired");
+    assert.equal(reads.issueLabels, 1);
     assert.equal(ships.count, 0);
     assert.equal(comments.length, 0);
     assert.equal(labels.length, 0);
     assert.equal(removedLabels.length, 0);
     assert.equal(notifications.count, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recheckHeldRun reopens and ships a closed legacy hold without exhaustion proof", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const created = parkedRun(store);
+    const legacy = store.updateRun(created.id, { status: "held" });
+    const { deps, removedLabels, ships, reopened } = parkedDeps(store, {
+      ci: "pass",
+      issueState: "CLOSED",
+      prState: "merged",
+      issueLabels: ["autoship-held"],
+    });
+
+    const { rechecked } = await recheckHeldRun(deps, legacy);
+
+    assert.equal(rechecked, true);
+    assert.equal(reopened.count, 1);
+    assert.deepEqual(removedLabels, ["autoship-held"]);
+    assert.equal(ships.count, 1);
+    assert.equal(store.getRun(legacy.id)?.status, "shipped");
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });

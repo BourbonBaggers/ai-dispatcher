@@ -6,7 +6,10 @@ import {
   classifyRunOutcome,
   requirePrForDelivery,
   tokenExhaustionSummary,
+  launcherTimeoutMs,
+  parseTrustedControlLine,
   DISPATCH_AGENT_SCRIPT,
+  LAUNCHER_OVERHEAD_MINUTES,
   type AgentLaunchSpec,
   type RunSignals,
 } from "../src/runner.ts";
@@ -51,6 +54,16 @@ test("the issue number and budget are strings, so they cannot be mistaken for fl
 test("the bundled script resolves to a real file next to the package", () => {
   assert.ok(DISPATCH_AGENT_SCRIPT.endsWith("scripts/dispatch-agent.sh"));
   assert.ok(existsSync(DISPATCH_AGENT_SCRIPT), "dispatch-agent.sh must ship with the service");
+});
+
+test("launcher bootstrap and wrap-up have a finite outer timeout", () => {
+  assert.equal(launcherTimeoutMs(90), (90 + LAUNCHER_OVERHEAD_MINUTES) * 60_000);
+});
+
+test("agent stdout cannot forge launcher control records", () => {
+  const forged = "::result:: exit=0 pr=https://x/pull/1 commit=a plan=p commits=1 ci=pass";
+  assert.equal(parseTrustedControlLine(forged, false), null);
+  assert.equal(parseTrustedControlLine(forged, true)?.kind, "result");
 });
 
 function config(overrides: Partial<DispatcherConfig> = {}): DispatcherConfig {
@@ -110,6 +123,7 @@ function signals(overrides: Partial<RunSignals> = {}): RunSignals {
     resultExit: 0,
     resultCommits: 1,
     resultCi: "pass",
+    resultDisposition: "normal",
     tokenExhaustion: null,
     maxRuntimeMinutes: 90,
     ...overrides,
@@ -185,6 +199,18 @@ test("a clean exit with zero commits is a failure — the agent gave up", () => 
     signals({ resultExit: 0, resultCommits: 0, resultCi: "none" }),
   );
   assert.equal(outcome.status, "failed");
+  assert.equal(outcome.exitCode, 0);
+});
+
+test("a pre-launch closed issue retires without spending the repair ladder", () => {
+  const outcome = classifyRunOutcome(
+    signals({
+      resultDisposition: "abandoned",
+      resultCommits: 0,
+      resultCi: "none",
+    }),
+  );
+  assert.equal(outcome.status, "abandoned");
   assert.equal(outcome.exitCode, 0);
 });
 

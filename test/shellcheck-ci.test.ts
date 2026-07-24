@@ -140,6 +140,25 @@ test("shellcheck-ci preserves shellcheck failures as failing checks", async () =
   }
 });
 
+test("shellcheck-ci remains bounded on hosts without coreutils timeout", async () => {
+  const fixture = await makeFixture();
+  try {
+    const result = await execFileAsync("bash", [shellcheckCi], {
+      cwd: fixture.cwd,
+      env: {
+        ...process.env,
+        PATH: fixture.path,
+        FAKE_SHELLCHECK_LOG: fixture.logPath,
+        SHELLCHECK_TIMEOUT_COMMAND: "perl",
+      },
+    });
+
+    assert.match(result.stdout, /Checked 3\/3 files/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("shellcheck-ci reports an actionable message when the bounded check times out", async () => {
   const fixture = await makeFixture();
   try {

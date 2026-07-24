@@ -9,6 +9,7 @@ set -euo pipefail
 
 TIMEOUT_SECONDS="${SHELLCHECK_TIMEOUT_SECONDS:-300}"
 BATCH_SIZE="${SHELLCHECK_BATCH_SIZE:-20}"
+TIMEOUT_COMMAND="${SHELLCHECK_TIMEOUT_COMMAND:-auto}"
 
 EXCLUDED_DIRS=(
   .cache
@@ -86,10 +87,19 @@ run_shellcheck_batch() {
   fi
 
   rc=0
-  timeout "${remaining}s" shellcheck --severity=error --shell=bash "$@" || rc=$?
+  case "$TIMEOUT_COMMAND" in
+    timeout|gtimeout)
+      "$TIMEOUT_COMMAND" "${remaining}s" shellcheck --severity=error --shell=bash "$@" || rc=$?
+      ;;
+    perl)
+      # macOS has no coreutils timeout by default. Perl's alarm survives exec, so this
+      # keeps the same hard bound without silently making local validation unbounded.
+      perl -e 'alarm shift; exec @ARGV' "$remaining" shellcheck --severity=error --shell=bash "$@" || rc=$?
+      ;;
+  esac
   case "$rc" in
     0) return 0 ;;
-    124|137)
+    124|137|142)
       die "ShellCheck timed out after ${TIMEOUT_SECONDS}s while checking a batch of ${batch_count} file(s). Reproduce locally with: SHELLCHECK_TIMEOUT_SECONDS=${TIMEOUT_SECONDS} scripts/shellcheck-ci.sh"
       ;;
     *) return "$rc" ;;
@@ -98,9 +108,27 @@ run_shellcheck_batch() {
 
 command -v git >/dev/null || die "git not found"
 command -v shellcheck >/dev/null || die "shellcheck not found"
-command -v timeout >/dev/null || die "timeout not found"
 [[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "SHELLCHECK_TIMEOUT_SECONDS must be a positive integer"
 [[ "$BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] || die "SHELLCHECK_BATCH_SIZE must be a positive integer"
+case "$TIMEOUT_COMMAND" in
+  auto)
+    if command -v timeout >/dev/null; then
+      TIMEOUT_COMMAND=timeout
+    elif command -v gtimeout >/dev/null; then
+      TIMEOUT_COMMAND=gtimeout
+    elif command -v perl >/dev/null; then
+      TIMEOUT_COMMAND=perl
+    else
+      die "no bounded execution command found (tried timeout, gtimeout, perl)"
+    fi
+    ;;
+  timeout|gtimeout|perl)
+    command -v "$TIMEOUT_COMMAND" >/dev/null || die "$TIMEOUT_COMMAND not found"
+    ;;
+  *)
+    die "SHELLCHECK_TIMEOUT_COMMAND must be auto, timeout, gtimeout, or perl"
+    ;;
+esac
 
 log "ShellCheck version: $(shellcheck --version | awk -F': ' '/^version:/ { print $2; exit }')"
 
