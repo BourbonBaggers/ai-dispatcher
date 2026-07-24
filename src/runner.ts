@@ -31,6 +31,7 @@ import type { Logger } from "./logger.ts";
 import type { Notifier } from "./notify.ts";
 import { terminateProcessTree } from "./exec.ts";
 import { appendRunOutputEntry } from "./run-output.ts";
+import { DISPATCHER_TARGET_POLICY_ENV } from "./target-policy.ts";
 
 /** The bundled script the runner launches — resolved relative to this module. */
 export const DISPATCH_AGENT_SCRIPT = fileURLToPath(
@@ -100,6 +101,7 @@ export function dispatchAgentEnv(
     DISPATCHER_REPO_SLUG: config.repo.slug,
     DISPATCHER_REPO_DIR: config.repoDir,
     DISPATCHER_WORKTREE_DIR: config.worktreeDir,
+    [DISPATCHER_TARGET_POLICY_ENV]: "1",
   };
   if (config.envSourceDir) env.DISPATCHER_ENV_SOURCE_DIR = config.envSourceDir;
   if (recoveryReason) env.DISPATCHER_RECOVERY_REASON = recoveryReason.slice(0, 4_000);
