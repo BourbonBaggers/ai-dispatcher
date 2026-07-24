@@ -38,3 +38,13 @@ installation, discovery, and analysis without guesswork.
 - Commit each completed milestone with `milestone(N): ...`.
 - Push the branch and open a ready-for-review PR referencing `Issue: #12` without
   auto-close keywords.
+
+## [DONE] Milestone 5: Add wrapper regression tests
+
+- Exercise `scripts/shellcheck-ci.sh` in a temporary git repository with fake
+  `shellcheck` and `timeout` binaries.
+- Prove discovery is limited to tracked, non-symlink shell files outside excluded
+  directories.
+- Prove bounded batching is used and timeout exits produce the actionable failure
+  message.
+- Run `npm test` and `npm run typecheck`.
