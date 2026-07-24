@@ -2,9 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   resolveAssignment,
+  resolveRoutingOverride,
+  assignmentForModel,
+  isDispatchRequested,
   resolvePriorityTier,
   branchNameFor,
 } from "../src/labels.ts";
+import { modelByLabel } from "../src/models.ts";
 
 test("resolveAssignment maps a valid claude pair to CLI values", () => {
   const r = resolveAssignment(["agent:claude", "model:claude-opus-4.8"]);
@@ -54,6 +58,53 @@ test("resolveAssignment rejects unknown model and conflicting effort labels", ()
     false,
   );
   assert.equal(resolveAssignment(["agent:codex", "model:gpt-5.5", "effort:turbo"]).ok, false);
+});
+
+test("ordinary assignment labels are non-authoritative without the override marker", () => {
+  assert.deepEqual(
+    resolveRoutingOverride(["agent:claude", "model:claude-sonnet-5", "effort:high"]),
+    { ok: true, value: null },
+  );
+  assert.deepEqual(
+    resolveRoutingOverride(["agent:claude", "agent:codex", "model:gpt-5.5"]),
+    { ok: true, value: null },
+  );
+});
+
+test("an explicit override validates model ownership and optionally pins effort", () => {
+  const valid = resolveRoutingOverride([
+    "route:human-override",
+    "agent:codex",
+    "model:gpt-5.5",
+    "effort:high",
+  ]);
+  assert.equal(valid.ok, true);
+  if (valid.ok) {
+    assert.equal(valid.value?.model.modelLabel, "model:gpt-5.5");
+    assert.equal(valid.value?.effortLabel, "effort:high");
+  }
+  assert.equal(
+    resolveRoutingOverride([
+      "route:human-override",
+      "agent:claude",
+      "model:gpt-5.5",
+    ]).ok,
+    false,
+  );
+});
+
+test("assignmentForModel maps derived effort through the selected provider", () => {
+  const codex = assignmentForModel(modelByLabel("model:gpt-5.5")!, "effort:max");
+  assert.equal(codex.ok, true);
+  if (codex.ok) assert.equal(codex.value.cliEffort, "high");
+});
+
+test("dispatch:ready admits provider-neutral work and legacy assignment labels remain compatible", () => {
+  assert.equal(isDispatchRequested(["dispatch:ready"]), true);
+  assert.equal(isDispatchRequested(["agent:claude"]), true);
+  assert.equal(isDispatchRequested(["model:gpt-5.5"]), true);
+  assert.equal(isDispatchRequested(["complexity:moderate"]), true);
+  assert.equal(isDispatchRequested(["bug"]), false);
 });
 
 test("resolvePriorityTier honours queue jump then technical debt then regular", () => {

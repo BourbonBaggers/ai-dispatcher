@@ -2,6 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { selectEligibleIssue, type SelectionContext } from "../src/selection.ts";
 import { resolveAuthorAuthConfig } from "../src/author-auth.ts";
+import {
+  assignmentForModel,
+  resolveAssignment,
+  resolveRoutingOverride,
+} from "../src/labels.ts";
+import { modelByLabel } from "../src/models.ts";
 import type { GithubIssue } from "../src/github.ts";
 
 function issue(
@@ -15,8 +21,13 @@ function issue(
 
 function ctx(overrides: Partial<SelectionContext> = {}): SelectionContext {
   return {
-    providerSuppressed: () => false,
-    suppressedReason: (a) => `${a} is out of tokens`,
+    assignmentForIssue: (candidate) => {
+      const override = resolveRoutingOverride(candidate.labels);
+      if (!override.ok) return override;
+      const legacy = resolveAssignment(candidate.labels);
+      if (legacy.ok) return legacy;
+      return assignmentForModel(modelByLabel("model:gpt-5.5")!, "effort:medium");
+    },
     claimedByIssue: new Map(),
     ...overrides,
   };
@@ -93,14 +104,14 @@ test("none author auth mode preserves unrestricted author behavior", () => {
   assert.equal(target?.issue.number, 1);
 });
 
-test("unlabelled / conflicting issues are ineligible with a reason", () => {
+test("unlabelled backlog issues stay out, while conflicting legacy labels do not wedge queued work", () => {
   const { target, candidates } = selectEligibleIssue(
     [issue(1, []), issue(2, ["agent:claude", "agent:codex", "model:gpt-5.5"])],
     ctx(),
   );
-  assert.equal(target, null);
-  assert.equal(candidates[0]!.reason, "no agent:* label");
-  assert.match(candidates[1]!.reason, /conflicting agent labels/);
+  assert.equal(target?.issue.number, 2);
+  assert.match(candidates[0]!.reason, /missing dispatch:ready/);
+  assert.equal(candidates[1]!.eligible, true);
 });
 
 test("held (needs-input / blocked) issues are skipped", () => {
@@ -111,14 +122,23 @@ test("held (needs-input / blocked) issues are skipped", () => {
   }
 });
 
-test("a suppressed provider makes its issues ineligible but not the other provider's", () => {
+test("a currently unroutable issue does not block the next issue", () => {
   const context = ctx({
-    providerSuppressed: (a) => a === "claude",
-    suppressedReason: () => "Claude is out of tokens — paused until 4am",
+    assignmentForIssue: (candidate) =>
+      candidate.labels.includes("agent:claude")
+        ? { ok: false, reason: "Claude is currently exhausted" }
+        : resolveAssignment(candidate.labels),
   });
   const { target, candidates } = selectEligibleIssue([issue(1, CLAUDE), issue(2, CODEX)], context);
   assert.equal(target?.issue.number, 2); // codex still flows
-  assert.match(candidates.find((c) => c.issueNumber === 1)!.reason, /out of tokens/);
+  assert.match(candidates.find((c) => c.issueNumber === 1)!.reason, /exhausted/);
+});
+
+test("an invalid explicit human override remains visibly ineligible", () => {
+  const labels = ["route:human-override", "agent:claude", "model:gpt-5.5"];
+  const { target, candidates } = selectEligibleIssue([issue(1, labels)], ctx());
+  assert.equal(target, null);
+  assert.match(candidates[0]!.reason, /codex model.*agent:claude/);
 });
 
 test("an issue with an existing claiming run is skipped, not restarted", () => {
