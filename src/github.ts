@@ -29,6 +29,7 @@ export interface GithubPrMergeInfo {
   isDraft: boolean;
   mergeStateStatus: string;
   reviewDecision: string | null;
+  mergeCommitOid: string | null;
 }
 
 /** Issues are pulled newest-last so the scan can prefer the oldest actionable one. */
@@ -95,7 +96,7 @@ export function prMergeInfoArgs(slug: string, pr: number): string[] {
     "--repo",
     slug,
     "--json",
-    "baseRefName,baseRefOid,headRefName,headRefOid,isDraft,mergeStateStatus,reviewDecision",
+    "baseRefName,baseRefOid,headRefName,headRefOid,isDraft,mergeStateStatus,reviewDecision,mergeCommit",
   ];
 }
 
@@ -246,7 +247,9 @@ export class GithubClient {
     const result = await this.exec("gh", prMergeInfoArgs(this.repo.slug, pr));
     if (!result.ok) return null;
     try {
-      const raw = JSON.parse(result.stdout.trim()) as Partial<GithubPrMergeInfo>;
+      const raw = JSON.parse(result.stdout.trim()) as Partial<GithubPrMergeInfo> & {
+        mergeCommit?: { oid?: unknown } | null;
+      };
       if (
         typeof raw.baseRefName !== "string" ||
         typeof raw.baseRefOid !== "string" ||
@@ -265,6 +268,10 @@ export class GithubClient {
         isDraft: raw.isDraft,
         mergeStateStatus: raw.mergeStateStatus,
         reviewDecision: typeof raw.reviewDecision === "string" ? raw.reviewDecision : null,
+        mergeCommitOid:
+          raw.mergeCommit && typeof raw.mergeCommit.oid === "string"
+            ? raw.mergeCommit.oid
+            : null,
       };
     } catch {
       return null;

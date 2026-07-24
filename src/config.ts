@@ -104,16 +104,11 @@ export interface DispatcherConfig {
   generatedConflictMaxAttempts: number;
   /** How long autoship waits for CI after pushing a repaired branch. */
   generatedConflictCiWaitSeconds: number;
-  /**
-   * Maximum times autoship relaunches the agent to fix a red-CI PR before giving up and
-   * holding the issue for a human (autoship-held). Default 2: a fix attempt, then one
-   * retry if CI is still red, then escalate.
-   */
+  /** Assigned-model repair attempts per agent/CI/merge/deploy phase before escalation. */
   ciSelfHealMaxAttempts: number;
   /**
-   * The model autoship escalates to for ONE last attempt after ciSelfHealMaxAttempts is
-   * exhausted and CI is still red, before giving up and holding for a human. A CLI model
-   * identifier (models.ts `cliModel`), not a model:* label.
+   * Model for the single final automated attempt after a phase's repair budget is spent.
+   * A CLI model identifier (models.ts `cliModel`), not a model:* label.
    */
   ciEscalationModel: string;
   authorAuth: DispatcherAuthorAuthConfig;

@@ -7,9 +7,8 @@
  * eligible issue by priority tier (queue-jump, then regular, then technical-debt),
  * preserving oldest-first order within a tier.
  *
- * This module is deliberately pure: the caller supplies the already-resolved
- * suppression / deferral / claim facts (and their human reasons), so selection has no
- * dependency on the token-exhaustion or failure-policy internals and is trivially
+ * This module is deliberately pure: the caller supplies already-resolved provider
+ * suppression and claim facts, so selection has no IO dependency and is trivially
  * testable.
  */
 
@@ -47,8 +46,6 @@ export interface SelectionContext {
   suppressedReason(agent: "codex" | "claude"): string;
   /** issueNumber → status of an existing claiming run (claimed/running/interrupted/…). */
   claimedByIssue: Map<number, string>;
-  /** issueNumber → human reason a failure deferral is currently blocking it. */
-  deferredByIssue: Map<number, string>;
   authorAuth?: DispatcherAuthorAuthConfig;
 }
 
@@ -96,12 +93,6 @@ export function selectEligibleIssue(
       candidates.push(
         ineligible(issue, `held for a human (${held.join(", ")}) — moving on to the next issue`),
       );
-      continue;
-    }
-
-    const deferralReason = context.deferredByIssue.get(issue.number);
-    if (deferralReason) {
-      candidates.push(ineligible(issue, deferralReason));
       continue;
     }
 
