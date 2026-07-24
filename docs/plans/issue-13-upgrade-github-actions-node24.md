@@ -13,7 +13,7 @@ own Node 24 test version and dependency caching intact.
 - Add `cache: npm` to the `setup-node` step since `package-lock.json` is committed,
   making `npm ci` caching explicit rather than implicit/absent.
 
-## Milestone 2: Validate and PR
+## [DONE] Milestone 2: Validate and PR
 
 - Run `npm test` and `npm run typecheck`.
 - Commit with `milestone(N): ...` and open a ready-for-review PR referencing
