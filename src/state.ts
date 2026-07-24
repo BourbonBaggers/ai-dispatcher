@@ -39,6 +39,35 @@ import type { ProviderCapacityKind } from "./token-exhaustion.ts";
 
 export type RunTrigger = "poll" | "manual" | "resume";
 
+export interface RoutingCapacityEvidence {
+  pool: string;
+  state: "available" | "exhausted" | "unknown";
+  confidence:
+    | "provider-reported"
+    | "cli-reported"
+    | "persisted-limit"
+    | "unconfirmed-limit"
+    | "estimated"
+    | "unknown";
+  observedAt: number | null;
+  resetAt: number | null;
+  headroomPercent: number | null;
+  reason: string;
+}
+
+export interface RoutingAssignmentEvidence {
+  source: "automatic" | "human-override";
+  minimumTier: "fast" | "general" | "complex" | "frontier";
+  characteristicLabels: string[];
+  rationaleLabels: string[];
+  confidence: "high" | "medium" | "low";
+  capacitySelection: "live-headroom" | "rotation" | "only-capable" | "human-override";
+  selectedPool: string;
+  effortReason: string;
+  capacity: RoutingCapacityEvidence[];
+  assignedAt: number;
+}
+
 export interface RunRecord {
   id: string;
   issueNumber: number;
@@ -55,6 +84,8 @@ export interface RunRecord {
   assignedCliModel: string;
   assignedEffortLabel: string;
   assignedCliEffort: string;
+  /** Sanitized evidence for the immutable pickup-time assignment. */
+  routing?: RoutingAssignmentEvidence;
   branch: string;
   checkoutPath: string;
   planPath: string | null;
@@ -124,6 +155,8 @@ export interface ProviderSuppressionRecord {
 export interface SettingsRecord {
   claudeSuppression: ProviderSuppressionRecord | null;
   codexSuppression: ProviderSuppressionRecord | null;
+  /** Durable cursor used when live provider headroom is unavailable or effectively tied. */
+  lastInitialCapacityPool: string | null;
 }
 
 interface PersistedState {
@@ -139,7 +172,11 @@ const LOCK_FILE = "dispatcher.lock";
 function emptyState(): PersistedState {
   return {
     version: 1,
-    settings: { claudeSuppression: null, codexSuppression: null },
+    settings: {
+      claudeSuppression: null,
+      codexSuppression: null,
+      lastInitialCapacityPool: null,
+    },
     runs: [],
   };
 }
@@ -499,6 +536,10 @@ export class StateStore {
       settings: {
         claudeSuppression: normalizeSuppression(parsed.settings, "claude"),
         codexSuppression: normalizeSuppression(parsed.settings, "codex"),
+        lastInitialCapacityPool:
+          typeof parsed.settings?.lastInitialCapacityPool === "string"
+            ? parsed.settings.lastInitialCapacityPool
+            : null,
       },
       runs: Array.isArray(parsed.runs)
         ? collapseLegacyFinalizations(parsed.runs.map((run) => normalizeRunRecovery(run)))
@@ -533,6 +574,11 @@ export class StateStore {
   setProviderSuppression(agent: DispatcherAgent, record: ProviderSuppressionRecord | null): void {
     if (agent === "claude") this.state.settings.claudeSuppression = record;
     else this.state.settings.codexSuppression = record;
+    this.persist();
+  }
+
+  setLastInitialCapacityPool(pool: string): void {
+    this.state.settings.lastInitialCapacityPool = pool;
     this.persist();
   }
 
