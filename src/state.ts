@@ -36,6 +36,7 @@ import {
 } from "./labels.ts";
 import type { DispatcherAgent, DispatcherStatus } from "./labels.ts";
 import type { RecoveryKind, RecoveryLedger } from "./recovery-policy.ts";
+import type { ProviderCapacityKind } from "./token-exhaustion.ts";
 
 export type RunTrigger = "poll" | "manual" | "resume";
 
@@ -54,6 +55,35 @@ export const RUN_PHASES = [
 
 export type RunPhase = (typeof RUN_PHASES)[number];
 
+export interface RoutingCapacityEvidence {
+  pool: string;
+  state: "available" | "exhausted" | "unknown";
+  confidence:
+    | "provider-reported"
+    | "cli-reported"
+    | "persisted-limit"
+    | "unconfirmed-limit"
+    | "estimated"
+    | "unknown";
+  observedAt: number | null;
+  resetAt: number | null;
+  headroomPercent: number | null;
+  reason: string;
+}
+
+export interface RoutingAssignmentEvidence {
+  source: "automatic" | "human-override";
+  minimumTier: "fast" | "general" | "complex" | "frontier";
+  characteristicLabels: string[];
+  rationaleLabels: string[];
+  confidence: "high" | "medium" | "low";
+  capacitySelection: "live-headroom" | "rotation" | "only-capable" | "human-override";
+  selectedPool: string;
+  effortReason: string;
+  capacity: RoutingCapacityEvidence[];
+  assignedAt: number;
+}
+
 export interface RunRecord {
   id: string;
   issueNumber: number;
@@ -70,6 +100,8 @@ export interface RunRecord {
   assignedCliModel: string;
   assignedEffortLabel: string;
   assignedCliEffort: string;
+  /** Sanitized evidence for the immutable pickup-time assignment. */
+  routing?: RoutingAssignmentEvidence;
   branch: string;
   checkoutPath: string;
   planPath: string | null;
@@ -118,9 +150,30 @@ export interface RunRecord {
   finishedAt: number | null;
 }
 
+/**
+ * Durable, redacted evidence behind an active provider-capacity suppression (#32): what
+ * kind of signal was seen, whether it carried a provider-reported reset (`authoritative`)
+ * or is an unconfirmed guess pending automatic revalidation, when it was detected, and a
+ * bounded/redacted excerpt of the provider text — enough to explain the decision after a
+ * restart without persisting secrets or unbounded raw output.
+ */
+export interface ProviderSuppressionRecord {
+  kind: ProviderCapacityKind;
+  /** Epoch ms the pool is paused / should be revalidated until. */
+  until: number;
+  /** True only when a concrete provider-reported reset was found. */
+  authoritative: boolean;
+  detectedAt: number;
+  reportedResetLabel: string | null;
+  /** Bounded, already-redacted excerpt of the matched provider output. */
+  excerpt: string;
+}
+
 export interface SettingsRecord {
-  claudeSuppressedUntil: number | null;
-  codexSuppressedUntil: number | null;
+  claudeSuppression: ProviderSuppressionRecord | null;
+  codexSuppression: ProviderSuppressionRecord | null;
+  /** Durable cursor used when live provider headroom is unavailable or effectively tied. */
+  lastInitialCapacityPool: string | null;
 }
 
 export interface PersistedState {
@@ -137,9 +190,45 @@ export const RUN_OUTPUT_DIR = "run-output";
 function emptyState(): PersistedState {
   return {
     version: 1,
-    settings: { claudeSuppressedUntil: null, codexSuppressedUntil: null },
+    settings: {
+      claudeSuppression: null,
+      codexSuppression: null,
+      lastInitialCapacityPool: null,
+    },
     runs: [],
   };
+}
+
+/**
+ * State files written before #32 stored a bare `claudeSuppressedUntil`/
+ * `codexSuppressedUntil` epoch with no evidence. Migrate that legacy shape into a record
+ * on read so a restart with an old state file does not lose an active cooldown; the
+ * legacy epoch carried no kind/reset information, so it is preserved as an authoritative
+ * (fail-safe: honor the deadline the old code already committed to) unknown-kind record
+ * rather than guessed apart after the fact.
+ */
+function normalizeSuppression(
+  settings: Partial<SettingsRecord> | undefined,
+  agent: DispatcherAgent,
+): ProviderSuppressionRecord | null {
+  const key = agent === "claude" ? "claudeSuppression" : "codexSuppression";
+  const current = (settings as Record<string, unknown> | undefined)?.[key];
+  if (current && typeof current === "object" && typeof (current as ProviderSuppressionRecord).until === "number") {
+    return current as ProviderSuppressionRecord;
+  }
+  const legacyKey = agent === "claude" ? "claudeSuppressedUntil" : "codexSuppressedUntil";
+  const legacyUntil = (settings as Record<string, unknown> | undefined)?.[legacyKey];
+  if (typeof legacyUntil === "number") {
+    return {
+      kind: "unknown",
+      until: legacyUntil,
+      authoritative: true,
+      detectedAt: legacyUntil,
+      reportedResetLabel: null,
+      excerpt: "(migrated from a pre-evidence suppression record)",
+    };
+  }
+  return null;
 }
 
 /**
@@ -254,8 +343,12 @@ function readPersistedState(path: string): PersistedState {
   return {
     version: 1,
     settings: {
-      claudeSuppressedUntil: parsed.settings?.claudeSuppressedUntil ?? null,
-      codexSuppressedUntil: parsed.settings?.codexSuppressedUntil ?? null,
+      claudeSuppression: normalizeSuppression(parsed.settings, "claude"),
+      codexSuppression: normalizeSuppression(parsed.settings, "codex"),
+      lastInitialCapacityPool:
+        typeof parsed.settings?.lastInitialCapacityPool === "string"
+          ? parsed.settings.lastInitialCapacityPool
+          : null,
     },
     runs: collapseLegacyFinalizations(parsed.runs.map((run) => normalizeRunRecovery(run))),
   };
@@ -592,15 +685,24 @@ export class StateStore {
     this.persistBackup();
   }
 
-  // ── settings / cooldowns ──────────────────────────────────────────────────
+  // ── settings / provider-capacity suppression ────────────────────────────────
 
   getSettings(): SettingsRecord {
     return { ...this.state.settings };
   }
 
-  setSuppressedUntil(agent: DispatcherAgent, until: number | null): void {
-    if (agent === "claude") this.state.settings.claudeSuppressedUntil = until;
-    else this.state.settings.codexSuppressedUntil = until;
+  getProviderSuppression(agent: DispatcherAgent): ProviderSuppressionRecord | null {
+    return agent === "claude" ? this.state.settings.claudeSuppression : this.state.settings.codexSuppression;
+  }
+
+  setProviderSuppression(agent: DispatcherAgent, record: ProviderSuppressionRecord | null): void {
+    if (agent === "claude") this.state.settings.claudeSuppression = record;
+    else this.state.settings.codexSuppression = record;
+    this.persist();
+  }
+
+  setLastInitialCapacityPool(pool: string): void {
+    this.state.settings.lastInitialCapacityPool = pool;
     this.persist();
   }
 

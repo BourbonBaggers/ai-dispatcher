@@ -1,7 +1,8 @@
 # ai-dispatcher
 
 Standalone AI issue dispatcher. Polls a GitHub repository, claims one open issue carrying
-an `agent:*` + `model:*` label pair, and runs Codex or Claude Code against it in an
+workload-characteristic labels, chooses provider/model/effort from live capacity at pickup,
+and runs Codex or Claude Code against it in an
 isolated checkout — serially, with retries, provider cooldowns, and durable file-backed
 state. Without autoship its handoff is a ready-for-review pull request. With autoship configured,
 the output is a merged PR, verified production deployment, and closed issue.
@@ -52,14 +53,15 @@ continues.
 
 ## The label contract
 
-An issue is eligible only with exactly one supported agent label and one supported model
-label (a mismatched pair is rejected, not guessed):
+An authorized issue does not need assignment labels. The dispatcher derives provider,
+model, and effort atomically at pickup:
 
 | Label                           | Meaning                                                                            |
 | ------------------------------- | ---------------------------------------------------------------------------------- |
-| `agent:claude` / `agent:codex`  | which CLI to launch                                                                |
-| `model:*`                       | the exact `--model` string; must match the agent — the curated set below           |
-| `effort:low\|medium\|high\|max` | per-agent reasoning effort (`max` caps Codex at `high`); default `effort:medium`   |
+| `dispatch:ready`                | explicit provider-neutral admission when relying on all default characteristics    |
+| workload characteristics        | admit planned work and drive tier/effort; missing axes use conservative defaults    |
+| `agent:*` / `model:*` / `effort:*` | dispatcher output for visibility; non-authoritative unless explicitly overridden |
+| `route:human-override`          | makes one compatible agent/model pair and optional effort an explicit initial pin  |
 | `queue jump` / `technical debt` | move the issue between priority tiers                                              |
 | `agent-working`                 | the dispatcher is actively on it (added on claim, cleared on non-resumable finish) |
 | `needs-input` / `blocked`       | held for a human — skipped, not worked                                             |
@@ -70,22 +72,22 @@ The `model:*` allowlist is **data-driven**: it is derived from the curated regis
 and `model:claude-opus-4.8` (frontier reserve). A disabled or future-provider registry
 entry is documentation and is not dispatchable.
 
-Labels are never passed to a shell; they are only ever looked up in frozen maps
-(`src/labels.ts`), and the constant they resolve to is what reaches the CLI. An unknown
-label simply fails to resolve and the issue is skipped with a visible reason.
+Labels are never passed to a shell. The dispatcher looks up its selected registry entry
+and effort in frozen maps; only those constants reach the CLI. Missing, partial, stale,
+or conflicting ordinary assignment labels cannot wedge an issue. An invalid explicit
+human override is rejected visibly rather than silently violated.
 
 ## Capacity-aware routing & evidence (#319)
 
-The dispatcher validates and obeys the `model:*` label on each issue; it does not choose
-or rewrite that label at dispatch time. Issue authors and planning automation use the
-deterministic, data-driven rubric to choose the **minimum viable model**, prefer dormant
-subscription capacity, and protect the frontier reserve. The full decision table and its
-pure decision-support functions are described in [`ROUTING.md`](ROUTING.md).
+At pickup the dispatcher derives minimum model tier and effort, then reads live Codex and
+Claude usage windows. It balances constrained subscription headroom, falls back to a
+durable round-robin cursor when evidence is unavailable or close, and protects frontier.
+The complete decision and failure policy is in [`ROUTING.md`](ROUTING.md).
 
 Every terminal run records an **attempt** into `telemetry.json` (alongside dispatcher
 state); attempts fold into per-issue records. The model is honest about what it can't
-measure: token counts are `unavailable` (the launcher emits none), capacity is `unknown`
-unless a cooldown proves exhaustion, and an issue is _successful_ only when merged **and**
+measure: token counts are `unavailable` (the launcher emits none), capacity falls back to
+`unknown` when the bounded live readers fail, and an issue is _successful_ only when merged **and**
 deployed **and** free of material human repair — never on a clean exit or a PR alone.
 
 ```bash
@@ -161,7 +163,8 @@ of `output`, `phase`, or `lifecycle`.
   **This service never stores a GitHub, OpenAI, or Anthropic token.** For a headless box,
   the operator's credentials go in `~/.dispatcher/env` (chmod 600, never committed), which
   `dispatch-agent.sh` sources; this is where `CLAUDE_CODE_OAUTH_TOKEN` (from
-  `claude setup-token`) or an `ANTHROPIC_API_KEY` belongs.
+  `claude setup-token`) or an `ANTHROPIC_API_KEY` belongs. The Claude capacity adapter
+  reads only the OAuth assignment as inert data; it never sources, logs, or persists it.
 
 ## Configuration
 

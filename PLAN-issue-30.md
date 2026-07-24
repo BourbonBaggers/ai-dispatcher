@@ -37,3 +37,11 @@
 - Push `issue-30-add-deterministic-status-history-and-agent-output`.
 - Open a ready-for-review pull request against `main` with `Issue: #30` in the body and
   no GitHub auto-close keyword.
+
+## [DONE] Milestone 6: Merge Conflict Repair
+
+- Merge current `origin/main` into the issue branch.
+- Resolve source conflicts in `src/dispatcher.ts`, `src/runner.ts`, and `src/state.ts`
+  by preserving deterministic status/output history while incorporating pickup-time
+  routing and provider-capacity evidence changes.
+- Re-run validation and push the repaired PR branch.

@@ -16,7 +16,7 @@ import {
   DISPATCHER_PRIORITY_TIERS,
   HOLD_LABELS,
   WORKING_LABEL,
-  resolveAssignment,
+  isDispatchRequested,
   resolvePriorityTier,
   type DispatcherPriorityTier,
   type ResolvedAssignment,
@@ -40,10 +40,13 @@ export interface SelectionTarget {
 }
 
 export interface SelectionContext {
-  /** True when the given agent's provider is currently in a token cooldown. */
-  providerSuppressed(agent: "codex" | "claude"): boolean;
-  /** Human reason for a suppressed provider (e.g. "Claude is out of tokens — paused until …"). */
-  suppressedReason(agent: "codex" | "claude"): string;
+  /**
+   * Claim-time routing callback. It may reject one issue for current capacity while the
+   * selector continues down the queue instead of idling the whole dispatcher.
+   */
+  assignmentForIssue(issue: GithubIssue):
+    | { ok: true; value: ResolvedAssignment }
+    | { ok: false; reason: string };
   /** issueNumber → status of an existing claiming run (claimed/running/interrupted/…). */
   claimedByIssue: Map<number, string>;
   authorAuth?: DispatcherAuthorAuthConfig;
@@ -61,15 +64,6 @@ export function selectEligibleIssue(
   const targets: SelectionTarget[] = [];
 
   for (const [issueIndex, issue] of issues.entries()) {
-    const assignment = resolveAssignment(issue.labels);
-
-    if (!assignment.ok) {
-      candidates.push(ineligible(issue, assignment.reason));
-      continue;
-    }
-
-    const agent = assignment.value.agent;
-
     const author = authorizeIssueAuthor(
       issue.authorLogin,
       context.authorAuth ?? {
@@ -83,8 +77,13 @@ export function selectEligibleIssue(
       continue;
     }
 
-    if (context.providerSuppressed(agent)) {
-      candidates.push(ineligible(issue, context.suppressedReason(agent)));
+    if (!isDispatchRequested(issue.labels)) {
+      candidates.push(
+        ineligible(
+          issue,
+          "not queued for dispatch (missing dispatch:ready, workload characteristics, or a legacy assignment label)",
+        ),
+      );
       continue;
     }
 
@@ -106,6 +105,13 @@ export function selectEligibleIssue(
       );
       continue;
     }
+
+    const assignment = context.assignmentForIssue(issue);
+    if (!assignment.ok) {
+      candidates.push(ineligible(issue, assignment.reason));
+      continue;
+    }
+    const agent = assignment.value.agent;
 
     const staleWorkingLabel = issue.labels.includes(WORKING_LABEL);
     const priorityTier = resolvePriorityTier(issue.labels);
