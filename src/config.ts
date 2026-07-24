@@ -94,6 +94,8 @@ export interface DispatcherConfig {
   logLevel: LogLevel;
   /** Optional repo-specific autoship command; null when disabled (the default). */
   autoshipCmd: string | null;
+  /** Wall-clock ceiling for one merge/deploy/verify/rollback command. */
+  autoshipTimeoutMinutes: number;
   /** Dedicated checkout used only by autoship deployment/rollback commands. */
   autoshipDeploymentDir: string;
   /** Exact generated paths the autoship merge-conflict repair may discard/regenerate. */
@@ -155,6 +157,9 @@ Options:
                              Dedicated autoship deployment checkout (default:
                              DISPATCHER_AUTOSHIP_DEPLOYMENT_DIR or
                              <state-dir>/autoship-deployments/<owner>-<repo>).
+  --autoship-timeout-minutes <minutes>
+                             Merge/deploy/verify/rollback ceiling (default:
+                             DISPATCHER_AUTOSHIP_TIMEOUT_MINUTES or 120).
   --author-auth <mode>       Issue author authorization: author-allowlist | none
                              (default: DISPATCHER_ISSUE_AUTHOR_AUTH_MODE or author-allowlist).
   --trusted-authors <list>   Comma-separated trusted GitHub usernames for author-allowlist
@@ -195,6 +200,7 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
         "repo-dir": { type: "string" },
         "worktree-dir": { type: "string" },
         "autoship-deploy-dir": { type: "string" },
+        "autoship-timeout-minutes": { type: "string" },
         "author-auth": { type: "string" },
         "trusted-authors": { type: "string" },
         "log-level": { type: "string" },
@@ -285,6 +291,11 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
     stateDir,
     logLevel: logLevelRaw,
     autoshipCmd: autoship && autoship.trim() !== "" ? autoship : null,
+    autoshipTimeoutMinutes: positiveInt(
+      (values["autoship-timeout-minutes"] as string | undefined) ??
+        env.DISPATCHER_AUTOSHIP_TIMEOUT_MINUTES,
+      120,
+    ),
     autoshipDeploymentDir:
       autoshipDeploymentDir && autoshipDeploymentDir.trim() !== ""
         ? expandHome(autoshipDeploymentDir)

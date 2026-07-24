@@ -325,6 +325,7 @@ function autoshipConfig(overrides: Partial<DispatcherConfig> = {}): DispatcherCo
   return {
     repo: { owner: "o", repo: "r", slug: "o/r" },
     autoshipCmd: "ship.sh",
+    autoshipTimeoutMinutes: 120,
     autoshipDeploymentDir: "/deploy/o-r",
     generatedConflictAllowlist: [],
     generatedConflictRegenCmd: null,
@@ -550,7 +551,10 @@ test("recheckParkedRun pages only after CI repairs and frontier escalation are e
 
 function heldRun(store: StateStore): RunRecord {
   const created = parkedRun(store);
-  return store.updateRun(created.id, { status: "held" });
+  return store.updateRun(created.id, {
+    status: "held",
+    exhaustion: { kind: "ci", reason: "frontier failed", at: 1000 },
+  });
 }
 
 test("recheckHeldRun retires a closed issue without autoship, labels, comments, or notifications", async () => {
@@ -609,7 +613,7 @@ test("recheckHeldRun is a no-op while the issue still carries autoship-held", as
   try {
     const store = StateStore.open(dir);
     const run1 = heldRun(store);
-    // Still held by a human: the approval signal (label removed) has not happened.
+    // A current-version hold has durable proof that the full ladder was exhausted.
     const { deps, comments, labels, ships } = parkedDeps(store, {
       ci: "pass",
       issueLabels: ["autoship-held"],
@@ -622,6 +626,29 @@ test("recheckHeldRun is a no-op while the issue still carries autoship-held", as
     assert.equal(ships.count, 0, "the ship command must not run while still held");
     assert.equal(comments.length, 0);
     assert.equal(labels.length, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recheckHeldRun automatically clears a legacy hold with no exhaustion proof", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const created = parkedRun(store);
+    const legacy = store.updateRun(created.id, { status: "held" });
+    const { deps, removedLabels, ships } = parkedDeps(store, {
+      ci: "pass",
+      issueLabels: ["autoship-held"],
+    });
+
+    const { rechecked } = await recheckHeldRun(deps, legacy);
+
+    assert.equal(rechecked, true);
+    assert.ok(removedLabels.includes("autoship-held"));
+    assert.equal(ships.count, 1);
+    assert.equal(store.getRun(legacy.id)?.status, "shipped");
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });

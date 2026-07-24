@@ -34,6 +34,7 @@ set -euo pipefail
 CHECKOUT="${AUTOSHIP_DEPLOYMENT_CHECKOUT:-${DISPATCHER_SELFSHIP_CHECKOUT:-$HOME/ai-dispatcher}}"
 UNIT="${DISPATCHER_SELFSHIP_UNIT:-ai-dispatcher.service}"
 DEPLOY_RESULT="$CHECKOUT/.git/dispatcher-deploy-result"
+RUNNING_SHA_FILE="$CHECKOUT/.git/dispatcher-running-sha"
 
 log() { echo "[self-ship] $*"; }
 die() { echo "[self-ship] FAIL: $*" >&2; exit 1; }
@@ -51,6 +52,11 @@ write_deploy_result() { # requested_sha state deployed_sha rollback_sha
   printf '%s %s %s %s\n' "$1" "$2" "$3" "$4" > "$tmp"
   mv "$tmp" "$DEPLOY_RESULT"
 }
+read_deploy_result() {
+  RESULT_TARGET="" RESULT_STATE="" RESULT_DEPLOYED="" RESULT_ROLLBACK=""
+  [[ -f "$DEPLOY_RESULT" ]] || return 1
+  read -r RESULT_TARGET RESULT_STATE RESULT_DEPLOYED RESULT_ROLLBACK < "$DEPLOY_RESULT"
+}
 
 # ── Detached phase: restart, verify health, roll back on self-brick. ──────────
 # Invoked as `self-ship.sh --restart <last_good_sha> <new_sha>` by systemd-run, OUTSIDE
@@ -64,8 +70,11 @@ if [[ "${1:-}" == "--restart" ]]; then
   }
 
   systemctl --user restart "$UNIT" || true
+  sleep 2
+  STARTED_PID="$(systemctl --user show -p MainPID --value "$UNIT" 2>/dev/null || echo 0)"
   sleep 12
-  if healthy; then
+  CURRENT_PID="$(systemctl --user show -p MainPID --value "$UNIT" 2>/dev/null || echo 0)"
+  if healthy && [[ "$STARTED_PID" != "0" && "$CURRENT_PID" == "$STARTED_PID" ]]; then
     write_deploy_result "$NEW" "shipped" "$NEW" "-"
     log "self-ship healthy on $NEW"
     push "Autoship: dispatcher updated" "Restarted on $NEW and healthy." 3
@@ -143,10 +152,15 @@ if [[ -n "$MERGED_SHA" ]]; then
   git rev-parse --verify "$MERGED_SHA^{commit}" >/dev/null 2>&1 \
     || die "merged commit $MERGED_SHA is not available after fetch"
   NEW="$(git rev-parse "$MERGED_SHA^{commit}")"
-  git reset --hard "$NEW" --quiet
-  log "continuing deployment of already-merged commit $NEW"
-  if [[ -f "$DEPLOY_RESULT" ]]; then
-    read -r RESULT_TARGET RESULT_STATE RESULT_DEPLOYED RESULT_ROLLBACK < "$DEPLOY_RESULT"
+  if read_deploy_result && [[ "$RESULT_TARGET" == "$NEW" ]]; then
+    if [[ "$RESULT_STATE" == "pending" ]]; then
+      log "detached deployment for $NEW is still pending; waiting for its verifier"
+      for _ in $(seq 1 45); do
+        sleep 2
+        read_deploy_result || continue
+        [[ "$RESULT_TARGET" == "$NEW" && "$RESULT_STATE" != "pending" ]] && break
+      done
+    fi
     if [[ "$RESULT_TARGET" == "$NEW" ]]; then
       case "$RESULT_STATE" in
         shipped)
@@ -165,9 +179,23 @@ if [[ -n "$MERGED_SHA" ]]; then
           report "$RESULT_STATE" "fail" "$PR_HEAD" "$NEW" "-" "$RESULT_ROLLBACK" "$LAST_GOOD"
           exit 1
           ;;
+        pending)
+          report "deployment_state_unknown" "unknown" "$PR_HEAD" "$NEW" "-" "-" "$LAST_GOOD"
+          die "detached deployment verifier did not finish within 90 seconds"
+          ;;
       esac
     fi
   fi
+  RUNNING_SHA="$(tr -d '[:space:]' < "$RUNNING_SHA_FILE" 2>/dev/null || true)"
+  if [[ "$RUNNING_SHA" =~ ^[0-9a-f]{40}$ ]] \
+    && git merge-base --is-ancestor "$NEW" "$RUNNING_SHA" \
+    && healthy; then
+    log "merged commit $NEW is already included in running dispatcher $RUNNING_SHA"
+    report "shipped" "pass" "$PR_HEAD" "$NEW" "$RUNNING_SHA" "-" "$LAST_GOOD"
+    exit 0
+  fi
+  git reset --hard "$NEW" --quiet
+  log "continuing deployment of already-merged commit $NEW"
 else
   git reset --hard origin/main --quiet
   gh pr ready "$PR" --repo "$REPO" >/dev/null 2>&1 || true
@@ -200,7 +228,7 @@ fi
 # Hand the restart to a detached transient unit outside our cgroup, so it survives the
 # restart it is about to perform. --collect reaps the unit when it exits.
 log "handing off restart to a detached unit"
-rm -f "$DEPLOY_RESULT"
+write_deploy_result "$NEW" "pending" "-" "-"
 SHIP_ID="${PR:-${NEW:0:12}}"
 systemd-run --user --collect --unit="selfship-$SHIP_ID-$(date +%s)" \
   --setenv=NTFY_URL="${NTFY_URL:-}" --setenv=NTFY_TOPIC="${NTFY_TOPIC:-}" \

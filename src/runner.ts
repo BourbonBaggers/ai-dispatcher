@@ -28,7 +28,7 @@ import type { DispatcherAgent } from "./labels.ts";
 import type { DispatcherConfig } from "./config.ts";
 import type { StateStore, RunRecord } from "./state.ts";
 import type { Logger } from "./logger.ts";
-import { NOTIFY_PRIORITY_HIGH, type Notifier } from "./notify.ts";
+import type { Notifier } from "./notify.ts";
 
 /** The bundled script the runner launches — resolved relative to this module. */
 export const DISPATCH_AGENT_SCRIPT = fileURLToPath(
@@ -220,7 +220,7 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
     // CI says the PR is broken. The agent's own opinion of its tests is not the deciding
     // vote — it has claimed a green suite while CI was red. Distinct from `failed`: the
     // agent DID its job (produced a PR); the PR's content is what's broken, and that
-    // drives the self-heal -> escalate -> held ladder, not the 3-strike failure deferral.
+    // drives the self-heal -> escalate -> exhausted ladder.
     return {
       status: "ci_failed",
       exitCode: 0,
@@ -304,7 +304,7 @@ export interface RunnerDeps {
  * scan), so this returns the terminal record rather than accounting for it here.
  */
 export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> {
-  const { config, store, logger, notifier } = deps;
+  const { config, store, logger } = deps;
   const now = deps.now ?? (() => Date.now());
 
   const spec: AgentLaunchSpec = {
@@ -406,13 +406,6 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
         );
         summary = exhaustionSummary;
         store.setSuppressedUntil(run.agent, until.getTime());
-        notifier
-          .send(
-            `Dispatcher: ${run.agent === "claude" ? "Claude" : "Codex"} out of tokens`,
-            exhaustionSummary,
-            NOTIFY_PRIORITY_HIGH,
-          )
-          .catch(() => undefined);
       } else {
         summary = effectiveOutcome.summary;
       }

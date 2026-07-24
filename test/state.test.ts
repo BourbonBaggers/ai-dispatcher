@@ -228,3 +228,26 @@ test("legacy CI/deploy recovery fields migrate into the unified ledger", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("frontier exhaustion proof persists across restart", () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run = store.createRun(claimData(9));
+    store.updateRun(run.id, {
+      status: "held",
+      exhaustion: { kind: "deploy", reason: "rollback failed", at: 12345 },
+    });
+    store.releaseLock();
+
+    const reopened = StateStore.open(dir);
+    assert.deepEqual(reopened.getRun(run.id)?.exhaustion, {
+      kind: "deploy",
+      reason: "rollback failed",
+      at: 12345,
+    });
+    reopened.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

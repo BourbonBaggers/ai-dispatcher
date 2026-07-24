@@ -38,7 +38,7 @@ import {
 } from "./generated-conflict-repair.ts";
 import type { RunRecord } from "./state.ts";
 import type { ExecResult } from "./exec.ts";
-import { NOTIFY_PRIORITY_DEFAULT, NOTIFY_PRIORITY_HIGH, type Notifier } from "./notify.ts";
+import { NOTIFY_PRIORITY_DEFAULT, type Notifier } from "./notify.ts";
 import type { Logger } from "./logger.ts";
 import type { GithubPrMergeInfo } from "./github.ts";
 import {
@@ -97,6 +97,11 @@ export interface AutoshipDeps {
    * Final stronger-model attempt after ordinary repairs are spent.
    */
   ciEscalationModel: string;
+  /**
+   * Durable checkpoint called immediately before a ship command can merge or restart.
+   * The dispatcher uses it to park the claim before a self-restart can kill its parent.
+   */
+  beforeShip?: (context: { pr: number; mergedSha: string | null }) => void | Promise<void>;
   repairGeneratedConflicts?: (
     request: GeneratedConflictRepairRequest,
   ) => Promise<GeneratedConflictRepairResult>;
@@ -197,6 +202,7 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
     baseSha: mergeInfo.baseRefOid,
     deploymentCheckout: deps.autoshipDeploymentCheckout,
   });
+  await deps.beforeShip?.({ pr, mergedSha: null });
   const result = await deps.ship(deps.autoshipCmd, {
     AUTOSHIP_PR_NUMBER: String(pr),
     AUTOSHIP_ISSUE_NUMBER: String(run.issueNumber),
@@ -334,7 +340,7 @@ function autoshipFailureBody(
   ].filter((line): line is string => line !== null);
 
   if (classified.state === "deployment_state_unknown") {
-    facts.push("Human production verification is required.");
+    facts.push("The automated recovery attempt must re-read production state before redeploying.");
   }
 
   return facts.join(" ");
@@ -445,6 +451,7 @@ async function alreadyMerged(deps: AutoshipDeps, run: RunRecord, pr: number): Pr
     );
   }
 
+  await deps.beforeShip?.({ pr, mergedSha: mergeInfo.mergeCommitOid });
   const result = await deps.ship(
     deps.autoshipCmd!,
     {
