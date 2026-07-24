@@ -90,11 +90,26 @@ test("deriveMinimumTier: general is the default and fast requires a complete exe
   );
 });
 
-test("deriveMinimumTier: residual uncertainty raises the floor", () => {
-  assert.equal(deriveMinimumTier(chars({ complexity: "trivial", risk: "high" })), "complex");
+test("deriveMinimumTier: residual implementation uncertainty raises the floor", () => {
+  assert.equal(deriveMinimumTier(chars({ complexity: "trivial", risk: "high" })), "general");
   assert.equal(deriveMinimumTier(chars({ complexity: "simple", reasoningDepth: "deep" })), "complex");
   assert.equal(deriveMinimumTier(chars({ ambiguity: "high" })), "complex");
   assert.equal(deriveMinimumTier(chars({ requirementsQuality: "poor" })), "complex");
+});
+
+test("deriveMinimumTier: importance and production adjacency alone do not buy a stronger model", () => {
+  const boundedSafetyChange = chars({
+    complexity: "moderate",
+    risk: "high",
+    contextSize: "medium",
+    ambiguity: "clear",
+    requirementsQuality: "good",
+    reasoningDepth: "moderate",
+    verificationStrength: "strong",
+    recoverability: "high",
+  });
+  assert.equal(deriveMinimumTier(boundedSafetyChange), "general");
+  assert.equal(deriveEffort(boundedSafetyChange).effortLabel, "effort:medium");
 });
 
 test("deriveMinimumTier: frontier requires severe uncertainty and weak safeguards", () => {
@@ -156,6 +171,26 @@ test("deriveMinimumTier discounts one tier only when verification and recovery a
     deriveMinimumTier({ ...recoverable, ambiguity: "high" }),
     "complex",
   );
+  assert.equal(
+    deriveMinimumTier({ ...recoverable, risk: "high" }),
+    "general",
+  );
+});
+
+test("deriveMinimumTier: calibrated dispatcher feature work stays in the general lane", () => {
+  const dispatcherFeature = chars({
+    taskType: "feature",
+    complexity: "moderate",
+    risk: "medium",
+    contextSize: "medium",
+    ambiguity: "clear",
+    requirementsQuality: "good",
+    reasoningDepth: "moderate",
+    verificationStrength: "strong",
+    recoverability: "high",
+  });
+  assert.equal(deriveMinimumTier(dispatcherFeature), "general");
+  assert.equal(deriveEffort(dispatcherFeature).effortLabel, "effort:medium");
 });
 
 test("deriveMinimumTier protects frontier when a failed first attempt is costly", () => {
