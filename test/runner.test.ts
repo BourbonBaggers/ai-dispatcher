@@ -5,7 +5,6 @@ import {
   dispatchAgentEnv,
   classifyRunOutcome,
   requirePrForDelivery,
-  tokenExhaustionSummary,
   launcherTimeoutMs,
   parseTrustedControlLine,
   DISPATCH_AGENT_SCRIPT,
@@ -15,7 +14,7 @@ import {
 } from "../src/runner.ts";
 import type { DispatcherConfig } from "../src/config.ts";
 import { resolveAuthorAuthConfig } from "../src/author-auth.ts";
-import type { TokenExhaustionSignal } from "../src/token-exhaustion.ts";
+import { resolveCapacitySuppression, type ProviderCapacitySignal } from "../src/token-exhaustion.ts";
 import { existsSync } from "node:fs";
 
 const SPEC: AgentLaunchSpec = {
@@ -130,7 +129,21 @@ function signals(overrides: Partial<RunSignals> = {}): RunSignals {
   };
 }
 
-const exhaustion: TokenExhaustionSignal = { resetAt: null, wallClock: null, resetLabel: null };
+const exhaustion: ProviderCapacitySignal = {
+  kind: "unconfirmed-quota",
+  resetAt: null,
+  wallClock: null,
+  resetLabel: null,
+  excerpt: "usage limit reached",
+};
+
+const contextExhaustion: ProviderCapacitySignal = {
+  kind: "context-exhaustion",
+  resetAt: null,
+  wallClock: null,
+  resetLabel: null,
+  excerpt: "maximum context length exceeded",
+};
 
 test("a clean exit with commits and green CI is an honest PR-ready handoff", () => {
   const outcome = classifyRunOutcome(signals());
@@ -152,6 +165,14 @@ test("token exhaustion beats a generic non-zero exit and is reported as recovera
     signals({ resultExit: 1, resultCommits: 0, resultCi: "none", tokenExhaustion: exhaustion }),
   );
   assert.equal(outcome.status, "token_exhausted");
+});
+
+test("context exhaustion does NOT suppress the provider pool — falls through to the ordinary failure ladder", () => {
+  const outcome = classifyRunOutcome(
+    signals({ resultExit: 1, resultCommits: 0, resultCi: "none", tokenExhaustion: contextExhaustion }),
+  );
+  assert.notEqual(outcome.status, "token_exhausted");
+  assert.equal(outcome.status, "failed");
 });
 
 test("a stray exhaustion match on a CLEAN exit does NOT trip a cooldown", () => {
@@ -242,30 +263,38 @@ test("the result line's exit code wins over the child's close code", () => {
   assert.equal(outcome.status, "failed");
 });
 
-// ── token-exhaustion summary + cooldown window ────────────────────────────────
+// ── capacity resolution used by the runner at finalization ─────────────────────
+//
+// `launchRun`'s finish() calls resolveCapacitySuppression directly (see token-exhaustion
+// tests for full policy coverage); these confirm the runner's own inputs (the
+// RunSignals/observed-run shape) plug into it the way finish() actually calls it.
 
-test("tokenExhaustionSummary uses a reported future reset verbatim", () => {
+test("resolveCapacitySuppression reports a reported future reset verbatim, not the fallback wording", () => {
   const now = 1_000_000_000_000;
   const resetAt = now + 3_600_000;
-  const { summary, until } = tokenExhaustionSummary(
+  const resolution = resolveCapacitySuppression(
     "claude",
-    { resetAt, wallClock: null, resetLabel: "4am (UTC)" },
+    { kind: "unconfirmed-quota", resetAt, wallClock: null, resetLabel: "4am (UTC)", excerpt: "" },
+    { resultCommits: 0, resultCi: "none", prNumber: null },
     now,
   );
-  assert.equal(until.getTime(), resetAt);
-  assert.match(summary, /Claude is out of tokens/);
-  assert.match(summary, /4am \(UTC\)/);
-  assert.doesNotMatch(summary, /safety fallback/);
+  assert.equal(resolution.status, "token_exhausted");
+  assert.equal(resolution.evidence.until, resetAt);
+  assert.match(resolution.summary, /Claude/);
+  assert.match(resolution.summary, /4am \(UTC\)/);
+  assert.doesNotMatch(resolution.summary, /unconfirmed/);
 });
 
-test("tokenExhaustionSummary falls back to the safety window when nothing parses", () => {
+test("resolveCapacitySuppression falls back to a bounded window when nothing parses (Codex, non-rolling-window)", () => {
   const now = 1_000_000_000_000;
-  const { summary, until } = tokenExhaustionSummary(
+  const resolution = resolveCapacitySuppression(
     "codex",
-    { resetAt: null, wallClock: null, resetLabel: null },
+    { kind: "unconfirmed-quota", resetAt: null, wallClock: null, resetLabel: null, excerpt: "" },
+    { resultCommits: 0, resultCi: "none", prNumber: null },
     now,
   );
-  assert.ok(until.getTime() > now);
-  assert.match(summary, /Codex is out of tokens/);
-  assert.match(summary, /safety fallback/);
+  assert.equal(resolution.status, "token_exhausted");
+  assert.ok(resolution.evidence.until > now);
+  assert.match(resolution.summary, /Codex/);
+  assert.match(resolution.summary, /unconfirmed/);
 });
