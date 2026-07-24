@@ -13,6 +13,7 @@ import {
   prChecksArgs,
   prMergeInfoArgs,
   prStateArgs,
+  prTitleBodyArgs,
   GithubClient,
 } from "../src/github.ts";
 import type { ExecFn, ExecResult } from "../src/exec.ts";
@@ -34,6 +35,7 @@ test("every gh argv builder threads --repo <slug> through", () => {
     prChecksArgs(SLUG, 7),
     prMergeInfoArgs(SLUG, 7),
     prStateArgs(SLUG, 7),
+    prTitleBodyArgs(SLUG, 7),
   ];
   for (const args of builders) {
     const idx = args.indexOf("--repo");
@@ -184,6 +186,31 @@ test("prState fails safe (unknown, treated like open) on a gh read failure", asy
   const { fn } = fakeExec(() => ({ ok: false, stdout: "", stderr: "boom", code: 1 }));
   const client = new GithubClient(repo.ok ? repo.value : (undefined as never), fn);
   assert.equal(await client.prState(4), "unknown");
+});
+
+test("prTitleAndBody parses the PR's title and body", async () => {
+  const repo = parseRepoSlug(SLUG);
+  const { fn } = fakeExec(() => ok(JSON.stringify({ title: "Add widgets", body: "Issue: #4" })));
+  const client = new GithubClient(repo.ok ? repo.value : (undefined as never), fn);
+  assert.deepEqual(await client.prTitleAndBody(4), { title: "Add widgets", body: "Issue: #4" });
+});
+
+test("prTitleAndBody treats a missing body as empty rather than failing closed", async () => {
+  const repo = parseRepoSlug(SLUG);
+  const { fn } = fakeExec(() => ok(JSON.stringify({ title: "Add widgets" })));
+  const client = new GithubClient(repo.ok ? repo.value : (undefined as never), fn);
+  assert.deepEqual(await client.prTitleAndBody(4), { title: "Add widgets", body: "" });
+});
+
+test("prTitleAndBody fails closed on a gh read failure or malformed JSON", async () => {
+  const repo = parseRepoSlug(SLUG);
+  const { fn: failFn } = fakeExec(() => ({ ok: false, stdout: "", stderr: "boom", code: 1 }));
+  const failClient = new GithubClient(repo.ok ? repo.value : (undefined as never), failFn);
+  assert.equal(await failClient.prTitleAndBody(4), null);
+
+  const { fn: badFn } = fakeExec(() => ok("not json"));
+  const badClient = new GithubClient(repo.ok ? repo.value : (undefined as never), badFn);
+  assert.equal(await badClient.prTitleAndBody(4), null);
 });
 
 test("issueLabels parses label names from the issue", async () => {
