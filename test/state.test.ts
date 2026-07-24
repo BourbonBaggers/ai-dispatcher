@@ -1,10 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  readdirSync,
+} from "node:fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { StateStore, LockHeldError } from "../src/state.ts";
+import { StateStore, LockHeldError, StateCorruptionError } from "../src/state.ts";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "ai-dispatcher-state-"));
@@ -351,16 +358,52 @@ test("duplicate legacy successes collapse to the newest delivery verification pe
   }
 });
 
-test("a corrupt state file is preserved and replaced with empty state", () => {
+test("a corrupt primary state recovers durable claims from its atomic backup", () => {
   const dir = tmp();
   try {
+    const original = StateStore.open(dir);
+    const run = original.createRun(claimData(99));
+    original.updateRun(run.id, { status: "ci_pending" });
+    original.releaseLock();
     writeFileSync(join(dir, "state.json"), "{ not valid json ");
-    const store = StateStore.open(dir);
-    assert.equal(store.allRuns().length, 0);
-    // the corrupt file was moved aside, not deleted
-    const preserved = existsSync(join(dir, "state.json"));
-    assert.equal(preserved, true);
-    store.releaseLock();
+    const recovered = StateStore.open(dir);
+    assert.equal(recovered.getRun(run.id)?.status, "ci_pending");
+    assert.ok(readdirSync(dir).some((name) => name.startsWith("state.json.corrupt-")));
+    recovered.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("valid JSON with no runs ledger is corruption, not an empty queue", () => {
+  const dir = tmp();
+  try {
+    const original = StateStore.open(dir);
+    const run = original.createRun(claimData(101));
+    original.updateRun(run.id, { status: "ci_pending" });
+    original.releaseLock();
+    writeFileSync(join(dir, "state.json"), "{}");
+
+    const recovered = StateStore.open(dir);
+
+    assert.equal(recovered.getRun(run.id)?.status, "ci_pending");
+    recovered.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("unrecoverable state corruption fails closed and releases the instance lock", () => {
+  const dir = tmp();
+  try {
+    const original = StateStore.open(dir);
+    original.createRun(claimData(100));
+    original.releaseLock();
+    writeFileSync(join(dir, "state.json"), "{ bad primary ");
+    writeFileSync(join(dir, "state.json.backup"), "{ bad backup ");
+    assert.throws(() => StateStore.open(dir), StateCorruptionError);
+    assert.equal(existsSync(join(dir, "dispatcher.lock")), false);
+    assert.throws(() => StateStore.open(dir), StateCorruptionError);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

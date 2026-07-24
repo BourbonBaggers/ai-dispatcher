@@ -33,11 +33,14 @@ set -euo pipefail
 # checkout for the self-instance.
 CHECKOUT="${AUTOSHIP_DEPLOYMENT_CHECKOUT:-${DISPATCHER_SELFSHIP_CHECKOUT:-$HOME/ai-dispatcher}}"
 UNIT="${DISPATCHER_SELFSHIP_UNIT:-ai-dispatcher.service}"
+ROLLBACK_RESTART_ATTEMPTS="${DISPATCHER_SELFSHIP_ROLLBACK_RESTART_ATTEMPTS:-3}"
 DEPLOY_RESULT="$CHECKOUT/.git/dispatcher-deploy-result"
 RUNNING_SHA_FILE="$CHECKOUT/.git/dispatcher-running-sha"
 
 log() { echo "[self-ship] $*"; }
 die() { echo "[self-ship] FAIL: $*" >&2; exit 1; }
+[[ "$ROLLBACK_RESTART_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] \
+  || die "DISPATCHER_SELFSHIP_ROLLBACK_RESTART_ATTEMPTS must be a positive integer"
 report() { # state health pr_head merged deployed rollback last_good
   echo "::autoship:: state=$1 health=$2 pr_head=${3:--} merged=${4:--} deployed=${5:--} rollback=${6:--} last_good=${7:--} checkout=$CHECKOUT"
 }
@@ -84,9 +87,9 @@ if [[ "${1:-}" == "--restart" ]]; then
   log "new code unhealthy — rolling back to $LAST_GOOD"
   ( cd "$CHECKOUT" && git reset --hard "$LAST_GOOD" --quiet ) || true
   rollback_attempt=0
-  until healthy; do
+  while ! healthy && (( rollback_attempt < ROLLBACK_RESTART_ATTEMPTS )); do
     rollback_attempt=$((rollback_attempt + 1))
-    log "rollback restart attempt $rollback_attempt for $LAST_GOOD"
+    log "rollback restart attempt $rollback_attempt/$ROLLBACK_RESTART_ATTEMPTS for $LAST_GOOD"
     systemctl --user reset-failed "$UNIT" >/dev/null 2>&1 || true
     systemctl --user daemon-reload >/dev/null 2>&1 || true
     systemctl --user restart "$UNIT" || true
@@ -95,9 +98,17 @@ if [[ "${1:-}" == "--restart" ]]; then
   # A failed new-code start is still automation-owned. Report the healthy rollback to the
   # restarted dispatcher; its normal deploy-repair ledger retries assigned model work,
   # escalates to frontier, and is the only place allowed to page the operator.
-  write_deploy_result "$NEW" "deployment_failed_rollback_succeeded" "-" "$LAST_GOOD"
-  log "rollback healthy on $LAST_GOOD after $rollback_attempt restart attempt(s)"
-  exit 0
+  if healthy; then
+    write_deploy_result "$NEW" "deployment_failed_rollback_succeeded" "-" "$LAST_GOOD"
+    log "rollback healthy on $LAST_GOOD after $rollback_attempt restart attempt(s)"
+    exit 0
+  fi
+  # Do not leave a detached restart loop fighting the next assigned-model repair. A
+  # terminal rollback-failed record lets the restarted/current dispatcher spend the
+  # bounded deploy ladder and ultimately produce durable exhaustion evidence.
+  write_deploy_result "$NEW" "deployment_failed_rollback_failed" "-" "$LAST_GOOD"
+  log "rollback remained unhealthy after $rollback_attempt restart attempt(s)"
+  exit 1
 fi
 
 # ── Synchronous phase: re-gate, merge, pull, smoke, hand off. ─────────────────

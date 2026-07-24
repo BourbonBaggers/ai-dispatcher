@@ -87,5 +87,7 @@ test("self-ship does not bypass durable exhaustion with an operator page", () =>
   const script = readFileSync(resolve(root, "scripts/self-ship.sh"), "utf8");
   assert.doesNotMatch(script, /push\s+"[^"]+"\s+"[^"]+"\s+[45]\b/);
   assert.doesNotMatch(script, /Needs a human/i);
-  assert.match(script, /until healthy/);
+  assert.doesNotMatch(script, /until healthy/);
+  assert.match(script, /ROLLBACK_RESTART_ATTEMPTS/);
+  assert.match(script, /deployment_failed_rollback_failed/);
 });

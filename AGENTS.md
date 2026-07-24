@@ -7,7 +7,7 @@ the agents it launches). Read it before changing code here.
 
 A standalone, self-contained extraction of the AI Issue Dispatcher that used to live
 inside `BourbonBaggers/internal-tools` (issue #320). It polls a GitHub repo and runs Codex
-/ Claude Code on labelled issues. Without autoship it hands off a draft PR; with autoship
+/ Claude Code on labelled issues. Without autoship it hands off a ready PR; with autoship
 configured it owns the entire path through merge, deploy, health verification, rollback,
 and issue closure. This repository is its only home: the embedded copy in
 `internal-tools` has been removed.
@@ -107,7 +107,7 @@ test/                     node:test suites, one per module
   `shellcheck --severity=error` for every changed shell file; run
   `scripts/shellcheck-ci.sh` for the repository-wide check.
 - **Comments explain WHY.** The non-obvious safety invariants (terminal-classification
-  precedence, resume budget resetting on progress, capture only on a clean exit, one alert
+  precedence, finite resume budgets, capture only on a clean exit, one alert
   per cooldown window) are load-bearing — document the reason when you touch them.
 
 ## Capacity-aware routing (#319)
@@ -153,14 +153,29 @@ support for *choosing* that label (the planning-repo rubric) and for *planning a
 - The runner persists `finalizationPending` with every terminal observation before
   returning it. A restart must finish that exact run's recovery/autoship before selecting
   fresh work; replayed telemetry is idempotent.
-- Self-ship failure resets to last-known-good and keeps restarting until healthy. The
-  shell must not page on an intermediate new-code or rollback start failure; the
-  restarted dispatcher’s durable recovery ledger owns escalation and exhaustion.
+- Launcher control records travel on a dedicated file descriptor that is closed in the
+  provider process. Agent stdout is untrusted output and can never manufacture a PID,
+  result, PR, CI verdict, or closed-issue disposition.
+- Self-ship failure resets to last-known-good and makes bounded restart attempts. The
+  shell records terminal rollback failure; it must
+  not leave a detached infinite restart loop or page directly. The restarted dispatcher’s
+  durable recovery ledger owns escalation and exhaustion.
 - Ship-command timeout must terminate the whole process tree, retain output without a
   `maxBuffer` abort, and return a repairable timeout. The default ceiling is 120 minutes.
 - A GitHub read failure is `unknown`, never fabricated red CI or proof that an exhausted
   hold label was removed. Unknown state parks and rechecks without spending model budget.
+- Exit zero from a ship command is not production evidence. A terminal structured status
+  with merged and deployed SHA evidence plus passing health is required for `shipped`.
+- Every agent relaunch consumes finite resume budget even when the provider emits output;
+  startup chatter is not durable progress. A new repair/frontier rung resets its own
+  resume allowance.
+- The state store keeps an atomic recovery copy. It restores claims from that copy after
+  primary corruption and fails closed if neither copy is readable; it never starts with
+  an empty queue and redispatches claimed issues.
 - A historical merged SHA that production already contains is delivered. Never deploy it
   exactly over a newer production SHA; that would be an automated rollback.
+- Issue closure is not an alternate terminal signal. If an issue closes before verified
+  production (including via an accidental PR auto-close keyword), reopen it and retain
+  the claim until autoship proves delivery.
 - `shipped` means merge + production health + issue closure. Merge alone, green CI, a PR,
   or exit zero is not shipped.

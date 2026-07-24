@@ -93,6 +93,16 @@ describe("autoship status report parsing", () => {
     assert.equal(parseAutoshipStatusReport("::autoship:: state=rolled_back health=pass"), null);
   });
 
+  it("uses the last control line as the terminal ship verdict", () => {
+    const report = parseAutoshipStatusReport(
+      [
+        "::autoship:: state=merge_succeeded_deployment_not_attempted health=unknown merged=new",
+        "::autoship:: state=deployment_failed_rollback_failed health=fail merged=new rollback=old",
+      ].join("\n"),
+    );
+    assert.equal(report?.state, "deployment_failed_rollback_failed");
+  });
+
   it("parses the internal-tools AUTOSHIP_STATUS contract", () => {
     assert.deepEqual(
       parseLegacyAutoshipStatusReport(
@@ -140,9 +150,20 @@ describe("ship result classification", () => {
     assert.equal(result.health, "unknown");
   });
 
-  it("keeps legacy zero-exit ship commands compatible", () => {
+  it("treats zero exit without structured production evidence as unknown", () => {
     const result = classifyShipResult({ ok: true, code: 0, stdout: "ok", stderr: "" });
-    assert.equal(result.state, "shipped");
-    assert.equal(result.health, "pass");
+    assert.equal(result.state, "deployment_state_unknown");
+    assert.equal(result.health, "unknown");
+  });
+
+  it("rejects a shipped report that omits merged or deployed SHA evidence", () => {
+    const result = classifyShipResult({
+      ok: true,
+      code: 0,
+      stdout: "::autoship:: state=shipped health=pass merged=- deployed=-\n",
+      stderr: "",
+    });
+    assert.equal(result.state, "deployment_state_unknown");
+    assert.equal(result.health, "unknown");
   });
 });

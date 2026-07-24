@@ -27,6 +27,7 @@ import { untrustedAuthorComment, UNTRUSTED_AUTHOR_LABEL } from "./author-auth.ts
 import { isProviderSuppressed, formatResetTime } from "./token-exhaustion.ts";
 import { launchRun } from "./runner.ts";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { NOTIFY_PRIORITY_HIGH, type Notifier } from "./notify.ts";
 import { autoshipRun, AUTOSHIP_HELD_LABEL, type ShipRunner } from "./autoship.ts";
 import { modelByCliModel } from "./models.ts";
@@ -40,6 +41,7 @@ import {
   updateRecovery,
   type RecoveryKind,
 } from "./recovery-policy.ts";
+import { terminateProcessTree } from "./exec.ts";
 
 /**
  * How many times the dispatcher relaunches a run by itself before leaving it for a
@@ -63,6 +65,11 @@ export interface DispatcherDeps {
   telemetry?: TelemetryStore;
   /** Injectable clock for deterministic tests. */
   now?: () => number;
+  /** Injectable orphan inspection/termination for startup reconciliation tests. */
+  processCommand?: (pid: number) => string | null;
+  terminateOrphan?: (pid: number) => void;
+  /** Injectable agent launcher for crash-boundary tests. */
+  launch?: typeof launchRun;
 }
 
 export interface ScanResult {
@@ -135,6 +142,55 @@ export function shouldReleaseClaim(status: string): boolean {
  */
 export function selectParked(parked: RunRecord[]): RunRecord | null {
   return parked[0] ?? null;
+}
+
+/** Every relaunch consumes budget; repeated provider startup output is not durable progress. */
+export function nextResumeCount(run: Pick<RunRecord, "resumeCount">): number {
+  return run.resumeCount + 1;
+}
+
+/** A new repair rung gets its own finite resume budget and monotonic attempt id. */
+export function nextRecoveryLaunch(
+  run: Pick<RunRecord, "outputSeq" | "attemptNumber">,
+): Pick<RunRecord, "resumeCount" | "lastProgressSeq" | "attemptNumber"> {
+  return {
+    resumeCount: 0,
+    lastProgressSeq: run.outputSeq,
+    attemptNumber: run.attemptNumber + 1,
+  };
+}
+
+export function checkpointLadderRun(store: StateStore, run: RunRecord): RunRecord {
+  return store.updateRun(run.id, { status: "ci_failed", finalizationPending: true });
+}
+
+export function isOwnedLauncherCommand(command: string | null, run: RunRecord): boolean {
+  if (!command || !command.includes("dispatch-agent.sh")) return false;
+  const argument = (name: string, value: string): boolean =>
+    new RegExp(`(?:^|\\s)--${name}\\s+${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`).test(
+      command,
+    );
+  return (
+    argument("issue", String(run.issueNumber)) &&
+    argument("branch", run.branch)
+  );
+}
+
+function processCommand(pid: number): string | null {
+  try {
+    return execFileSync("ps", ["-o", "args=", "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: 5_000,
+    }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function terminateOrphan(pid: number): void {
+  terminateProcessTree(pid, "SIGTERM");
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+  terminateProcessTree(pid, "SIGKILL");
 }
 
 /** Immutable assignment restored for every non-frontier repair, regardless of prior phases. */
@@ -363,7 +419,7 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   // Label after claiming: the state row is the authoritative lock, and a failed label
   // write must not leave us thinking the claim failed.
   await github.addLabel(issue.number, WORKING_LABEL);
-  const terminal = await launchRun(run, { config, store, logger, notifier, now });
+  const terminal = await (deps.launch ?? launchRun)(run, { config, store, logger, notifier, now });
   await finalizeRun(deps, terminal);
   pruneOldRuns(deps);
 
@@ -375,16 +431,16 @@ export async function resumeRun(deps: DispatcherDeps, run: RunRecord): Promise<R
   const { config, store, github, logger, notifier } = deps;
   const now = deps.now ?? (() => Date.now());
 
-  // Did the last attempt DO anything? A run that produced output was working and got
-  // killed; a run that produced nothing is dying on the launchpad. Only the second kind
-  // burns tokens for nothing, so only it counts against the resume cap — otherwise a run
-  // of restarts strands real work (embedded #193).
+  // Output is diagnostic evidence, not a safe budget reset: provider startup banners
+  // and repeated tool chatter let a wedged process emit one line per launch forever.
+  // Checkout artifacts remain preserved, but every relaunch consumes this rung's budget.
   const madeProgress = run.outputSeq > run.lastProgressSeq;
 
   const reentered = store.updateRun(run.id, {
     status: "claimed",
     trigger: "resume",
-    resumeCount: madeProgress ? 0 : run.resumeCount + 1,
+    resumeCount: nextResumeCount(run),
+    attemptNumber: run.attemptNumber + 1,
     lastProgressSeq: run.outputSeq,
     exitCode: null,
     failureSummary: null,
@@ -402,7 +458,7 @@ export async function resumeRun(deps: DispatcherDeps, run: RunRecord): Promise<R
 
   await github.addLabel(run.issueNumber, WORKING_LABEL);
 
-  const terminal = await launchRun(reentered, { config, store, logger, notifier, now });
+  const terminal = await (deps.launch ?? launchRun)(reentered, { config, store, logger, notifier, now });
   await finalizeRun(deps, terminal);
   return terminal;
 }
@@ -429,6 +485,7 @@ async function repairRun(
     trigger: "resume",
     ...assignedIdentity(run),
     recovery: updateRecovery(run.recovery, kind, { attempts: attempt }),
+    ...nextRecoveryLaunch(run),
     exitCode: null,
     failureSummary: reason,
     finishedAt: null,
@@ -445,7 +502,7 @@ async function repairRun(
 
   await github.addLabel(run.issueNumber, WORKING_LABEL);
 
-  const terminal = await launchRun(reentered, { config, store, logger, notifier, now });
+  const terminal = await (deps.launch ?? launchRun)(reentered, { config, store, logger, notifier, now });
   await finalizeRun(deps, terminal);
 }
 
@@ -489,6 +546,7 @@ async function escalateRun(
     effortLabel: "effort:max",
     cliEffort,
     recovery: updateRecovery(run.recovery, kind, { escalated: true }),
+    ...nextRecoveryLaunch(run),
     exitCode: null,
     failureSummary: reason,
     finishedAt: null,
@@ -505,7 +563,7 @@ async function escalateRun(
 
   await github.addLabel(run.issueNumber, WORKING_LABEL);
 
-  const terminal = await launchRun(reentered, { config, store, logger, notifier, now });
+  const terminal = await (deps.launch ?? launchRun)(reentered, { config, store, logger, notifier, now });
   await finalizeRun(deps, terminal);
 }
 
@@ -583,6 +641,7 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
   const now = deps.now ?? (() => Date.now());
 
   if (run.status === "abandoned") {
+    await github.removeLabel(run.issueNumber, WORKING_LABEL);
     store.updateRun(run.id, { finalizationPending: false });
     return;
   }
@@ -738,6 +797,7 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
             ciStatus: "pass",
             mergeStatus: "merged",
             productionStatus: "deployed",
+            finalCompletingModel: run.cliModel,
           });
         } catch (err) {
           // Evidence must never turn a verified production success into a deploy repair.
@@ -789,11 +849,11 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
           return { relaunched: false };
         }
       case "repair":
-        store.updateRun(run.id, { status: "ci_failed" });
+        checkpointLadderRun(store, run);
         await repairRun(deps, run, outcome.kind, outcome.attempt, outcome.reason);
         return { relaunched: true };
       case "escalate":
-        store.updateRun(run.id, { status: "ci_failed" });
+        checkpointLadderRun(store, run);
         await escalateRun(deps, run, outcome.model, outcome.kind, outcome.reason);
         return { relaunched: true };
       case "exhausted":
@@ -842,8 +902,8 @@ export async function recheckParkedRun(deps: DispatcherDeps, run: RunRecord): Pr
  * `autoship-held`. Legacy holds have no such proof, so the dispatcher clears their label and
  * resumes them automatically instead of preserving obsolete manual gates forever. A held run
  * keeps its issue claim (HELD_STATUSES ⊂ CLAIMING_STATUSES), so it is never re-dispatched from
- * scratch while it waits. A closed issue retires the held run before any label or autoship
- * work because closure is terminal. An OPEN, un-held issue resumes through the exact same
+ * scratch while it waits. A premature closed issue is reopened because closure without
+ * verified production is not terminal. An un-held issue resumes through the exact same
  * `evaluateAutoship` pipeline a fresh or parked run goes through — merge + deploy the PR that
  * is already there — rather than relaunching the agent to redo work that is already done
  * (issue #10). Like `recheckParkedRun`, it deliberately does NOT go through `finalizeRun`:
@@ -852,21 +912,21 @@ export async function recheckParkedRun(deps: DispatcherDeps, run: RunRecord): Pr
  * knows whether this counts as the scan's action.
  */
 export async function recheckHeldRun(deps: DispatcherDeps, run: RunRecord): Promise<{ rechecked: boolean }> {
-  // A human closing the issue is a terminal resolution. Retire the historical hold so
-  // it releases its claim, becomes prunable, and cannot emit the same "already merged"
-  // alert on every poll. UNKNOWN also fails closed: a transient GitHub read failure is
-  // not evidence that a human approved shipping.
+  // Issue closure is an effect of verified shipping, not an alternate success signal.
+  // Auto-close keywords and agent mistakes can close immediately on merge, while
+  // production is still old or broken. Reopen and retain the claim until autoship proves
+  // delivery. UNKNOWN fails closed and simply retries the read later.
   const issueState = await deps.github.issueState(run.issueNumber);
   if (issueState === "CLOSED") {
-    deps.store.updateRun(run.id, { status: "abandoned" });
-    deps.logger.info("closed issue — retiring held run", {
+    const reopened = await deps.github.reopenIssue(run.issueNumber);
+    if (!reopened) return { rechecked: false };
+    deps.logger.warn("reopened issue that closed before verified production", {
       runId: run.id,
       issue: run.issueNumber,
       pr: run.prNumber ?? undefined,
     });
-    return { rechecked: false };
   }
-  if (issueState !== "OPEN") {
+  if (issueState !== "OPEN" && issueState !== "CLOSED") {
     return { rechecked: false };
   }
 
@@ -917,13 +977,13 @@ export async function recheckHeldRun(deps: DispatcherDeps, run: RunRecord): Prom
  * by the terminal timestamp — `resumeCount` alone is not unique because a resume that made
  * progress resets it to 0, which would collide with the first attempt.
  */
-export function attemptRecordFromRun(run: RunRecord, nowMs: number): AttemptRecord {
+export function attemptRecordFromRun(run: RunRecord, _nowMs: number): AttemptRecord {
   const model = modelByCliModel(run.cliModel);
   const activeDurationMs =
     run.finishedAt !== null ? Math.max(0, run.finishedAt - run.startedAt) : null;
   return {
     issueNumber: run.issueNumber,
-    attemptId: `${run.id}#${run.resumeCount}@${run.finishedAt ?? nowMs}`,
+    attemptId: `${run.id}#${run.attemptNumber}`,
     provider: model?.provider ?? run.agent,
     modelRequested: run.cliModel,
     modelUsed: null,
@@ -1004,12 +1064,30 @@ export function reconcile(deps: DispatcherDeps): void {
 
   for (const run of store.allRuns()) {
     if (run.status !== "claimed" && run.status !== "running") continue;
+    if (run.remotePid !== null) {
+      const command = (deps.processCommand ?? processCommand)(run.remotePid);
+      if (isOwnedLauncherCommand(command, run)) {
+        (deps.terminateOrphan ?? terminateOrphan)(run.remotePid);
+        logger.warn("terminated orphaned launcher process tree before resume", {
+          runId: run.id,
+          issue: run.issueNumber,
+          pid: run.remotePid,
+        });
+      } else {
+        logger.warn("refused to signal stale/reused remote pid", {
+          runId: run.id,
+          issue: run.issueNumber,
+          pid: run.remotePid,
+        });
+      }
+    }
     store.updateRun(run.id, {
       status: "interrupted",
       exitCode: null,
       failureSummary:
         "The dispatcher restarted while this run was in flight. Its branch and checkout are preserved — it will resume on the next scan.",
       finishedAt: now(),
+      remotePid: null,
     });
     logger.warn("reconciled an orphaned run as interrupted", {
       runId: run.id,

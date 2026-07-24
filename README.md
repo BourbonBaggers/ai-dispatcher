@@ -3,7 +3,7 @@
 Standalone AI issue dispatcher. Polls a GitHub repository, claims one open issue carrying
 an `agent:*` + `model:*` label pair, and runs Codex or Claude Code against it in an
 isolated checkout — serially, with retries, provider cooldowns, and durable file-backed
-state. Without autoship its handoff is a draft pull request. With autoship configured,
+state. Without autoship its handoff is a ready-for-review pull request. With autoship configured,
 the output is a merged PR, verified production deployment, and closed issue.
 
 It is extracted from the AI Issue Dispatcher that lived inside the
@@ -34,7 +34,7 @@ On each scan (when no run is active):
 4. **Launch and supervise.** The bundled `dispatch-agent.sh` clones an isolated checkout,
    writes a bootstrap prompt (the issue body is never interpolated — the agent fetches it
    itself), launches the CLI under a wall-clock budget, checkpoints the plan every 60s,
-   captures uncommitted work on a clean exit, opens a **draft** PR, and waits for the real
+   captures uncommitted work on a clean exit, opens a **ready** PR, and waits for the real
    CI verdict.
 5. **Recover or finalize.** Agent/CI/merge/deploy failures retry with the assigned model,
    then get one Opus 4.8 attempt. Only verified production success or exhausted frontier
@@ -185,8 +185,9 @@ ExecStart=/home/<operator>/.nvm/versions/node/<ver>/bin/node bin/ai-dispatcher.m
 Restart=on-failure
 RestartSec=30
 # SIGTERM triggers a graceful shutdown: the in-flight run finishes its current agent,
-# state is flushed, and the lock is released. An orphaned run is reconciled to
-# `interrupted` (resumable) on the next start.
+# state is flushed, and the lock is released. On restart a surviving launcher whose
+# command exactly matches the durable run is terminated as a process tree before that
+# run is reconciled to `interrupted` (resumable).
 
 [Install]
 WantedBy=multi-user.target
@@ -208,12 +209,13 @@ that directory. It also passes exact immutable context:
 `AUTOSHIP_PR_HEAD_SHA`, `AUTOSHIP_BASE_SHA`, `AUTOSHIP_PR_NUMBER`, `AUTOSHIP_ISSUE_NUMBER`,
 `AUTOSHIP_BRANCH`, and `AUTOSHIP_REPO`. Repo-specific commands should deploy the exact
 merged SHA they produce, record last-known-good before changing production, and emit one
-status line on failure when state is known:
+terminal status line on every completion:
 `::autoship:: state=<state> health=<pass|fail|unknown> pr_head=<sha> merged=<sha> deployed=<sha|-> rollback=<sha|-> last_good=<sha|-> checkout=<path>`.
 Recognized states are `merge_succeeded_deployment_not_attempted`,
 `deployment_failed_rollback_succeeded`, `deployment_failed_rollback_failed`,
-`deployment_state_unknown`, and `shipped`. Without this line, non-zero exits are conservatively
-reported as unknown production state and sent through the automated deploy-repair ladder.
+`deployment_state_unknown`, and `shipped`. Missing control output is always reported as
+unknown production state, including on exit zero. A `shipped` report is accepted only
+with both merged and deployed SHAs plus passing health.
 If production already contains an older requested merge, the command must report it
 delivered without deploying that older SHA over newer production.
 
@@ -278,7 +280,7 @@ CI was never the problem — the claim was released too early.
 The terminal statuses:
 
 - **`pr_ready`** — the agent exited cleanly with a PR and green CI at handoff. This is
-  the terminal draft-PR output when autoship is disabled; with autoship configured it is
+  the terminal ready-PR output when autoship is disabled; with autoship configured it is
   immediately re-gated and cannot become `shipped` until production is verified. It
   retains the issue claim (but not the `agent-working` label), preventing redispatch.
 - **`shipped`** — the only TRUE success: the PR is merged, production health passed,
@@ -305,8 +307,9 @@ resumed by relaunching the agent on the next scan.
 never carry a GitHub auto-close keyword (`Closes`/`Fixes`/`Resolves #n`) -- merging
 closes the issue instantly, before the deploy that follows the merge has even started,
 let alone passed its health check. `autoshipRun` calls `github.closeIssue` itself, once,
-only after the ship command's own exit code AND its parsed `::autoship::` status line
-(when present) agree the deploy is healthy -- not merely on reaching the success branch.
+only after the ship command's own exit code AND its mandatory terminal `::autoship::`
+status line prove the exact merged/deployed SHA is healthy -- not merely on reaching the
+success branch.
 This is what the #366 postmortem calls "merge is not shipped": an issue auto-closed on
 merge read as done while the deploy was still mid-build and prod was still on the
 previous release.
@@ -323,8 +326,10 @@ All durable state is one atomically-written JSON file plus a lock, under `--stat
 - `state.json` — runs (status, claim, resume/progress counters, parked/ladder CI
   state, PR/commit), provider cooldown windows, per-phase recovery budgets, and verified
   frontier-exhaustion proof. Written
-  temp-file-then-rename, so a crash mid-write never corrupts it; a corrupt file is
-  preserved as `.corrupt-<ts>` and replaced with empty state rather than crash-looping.
+  temp-file-then-rename, so a crash mid-write never corrupts it. Each successful write
+  also refreshes an atomic backup. A corrupt primary is preserved as `.corrupt-<ts>` and
+  restored from that backup; if neither copy is readable, startup fails closed rather
+  than discarding every durable claim.
 - `dispatcher.lock` — single-instance guard. A second dispatcher against the same state
   dir refuses to start. Creation is atomic, a lock from a dead process is reclaimed, and
   process identity prevents PID reuse from turning a stale lock into a permanent block.
@@ -343,13 +348,14 @@ plus serial execution (one run driven to completion at a time).
 ## Stopping / interrupting
 
 `SIGINT` / `SIGTERM` abort the poll loop and release the lock. A run that was mid-agent
-when the process died is reconciled to `interrupted` on the next start and resumed from the
-first milestone without a `[DONE]` marker — completed work is never redone, and the
+when the process died has any surviving, exactly matched launcher process tree terminated,
+then is reconciled to `interrupted` on the next start and resumed from the first
+milestone without a `[DONE]` marker — completed work is never redone, and the
 per-run branch/checkout are always preserved.
 
 ## Limits and non-goals
 
-- **Default path ends at a draft PR.** It never merges, closes issues, or deploys unless
+- **Default path ends at a ready PR.** It never merges, closes issues, or deploys unless
   an operator explicitly configures `DISPATCHER_AUTOSHIP_CMD`.
 - **No web UI / SSE.** The embedded version's dashboard is intentionally dropped; the
   interface is the CLI, the logs, and the issue comments it posts.
