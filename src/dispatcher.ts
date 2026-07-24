@@ -239,10 +239,10 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
     };
   }
 
-  const settings = store.getSettings();
+  const suppressionFor = (agent: DispatcherAgent) => store.getProviderSuppression(agent);
   const suppressedUntil = (agent: DispatcherAgent): Date | null => {
-    const raw = agent === "claude" ? settings.claudeSuppressedUntil : settings.codexSuppressedUntil;
-    return raw === null ? null : new Date(raw);
+    const record = suppressionFor(agent);
+    return record === null ? null : new Date(record.until);
   };
   const isSuppressed = (agent: DispatcherAgent): boolean =>
     isProviderSuppressed(suppressedUntil(agent), nowMs);
@@ -358,9 +358,15 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   const { candidates, target } = selectEligibleIssue(listing.issues, {
     providerSuppressed: (agent) => isSuppressed(agent),
     suppressedReason: (agent) => {
-      const until = suppressedUntil(agent);
+      const record = suppressionFor(agent);
       const provider = agent === "claude" ? "Claude" : "Codex";
-      return `${provider} is out of tokens — paused until ${until ? formatResetTime(until) : "reset"}`;
+      if (!record) return `${provider} capacity is paused`;
+      const when = formatResetTime(new Date(record.until));
+      // Honesty: an unconfirmed no-reset signal must never read like proven exhaustion
+      // (#32 requirement 11) — say so, and that it self-revalidates automatically.
+      return record.authoritative
+        ? `${provider} is out of tokens — paused until ${when}`
+        : `${provider} capacity is unconfirmed (${record.kind}) — revalidating automatically at ${when}`;
     },
     claimedByIssue,
     authorAuth: config.authorAuth,
