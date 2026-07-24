@@ -175,6 +175,16 @@ describe("autoshipRun — gating", () => {
     assert.equal(r.action, "skipped");
   });
 
+  it("ships artifact-proven pr_ready work after a later provider-capacity exit", async () => {
+    const h = harness({});
+    const r = await autoshipRun(
+      h.deps,
+      succeededRun({ status: "pr_ready", exitCode: 75 } as Partial<RunRecord>),
+    );
+    assert.equal(r.action, "shipped");
+    assert.equal(h.shipped.length, 1);
+  });
+
   it("skips a success with no PR", async () => {
     const h = harness({});
     const r = await autoshipRun(h.deps, succeededRun({ prNumber: null } as Partial<RunRecord>));

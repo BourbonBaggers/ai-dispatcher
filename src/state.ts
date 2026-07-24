@@ -36,7 +36,10 @@ import {
 } from "./labels.ts";
 import type { DispatcherAgent, DispatcherStatus } from "./labels.ts";
 import type { RecoveryKind, RecoveryLedger } from "./recovery-policy.ts";
-import type { ProviderCapacityKind } from "./token-exhaustion.ts";
+import type {
+  ProviderCapacityKind,
+  ProviderCapacitySignalSource,
+} from "./token-exhaustion.ts";
 
 export type RunTrigger = "poll" | "manual" | "resume";
 
@@ -165,6 +168,14 @@ export interface ProviderSuppressionRecord {
   authoritative: boolean;
   detectedAt: number;
   reportedResetLabel: string | null;
+  /** Trusted provider-output shape that produced the signal; absent on legacy records. */
+  source?: ProviderCapacitySignalSource;
+  /** Original child-process stream; diagnostic only, never sufficient provenance alone. */
+  stream?: "stdout" | "stderr";
+  /** Rendered output sequence nearest the match; absent on pre-provenance records. */
+  outputSeq?: number;
+  /** Actual provider/launcher exit associated with the suppression decision. */
+  providerExitCode?: number;
   /** Bounded, already-redacted excerpt of the matched provider output. */
   excerpt: string;
 }
@@ -740,6 +751,11 @@ export class StateStore {
   /** Runs parked on a PR whose CI has not resolved yet — recheck-only, never relaunched. */
   parkedRuns(): RunRecord[] {
     return this.runsByStatus(PARKED_STATUSES);
+  }
+
+  /** Ready PR handoffs retained for autoship recovery after a restart or older bug. */
+  prReadyRuns(): RunRecord[] {
+    return this.runsByStatus(["pr_ready"]);
   }
 
   /**

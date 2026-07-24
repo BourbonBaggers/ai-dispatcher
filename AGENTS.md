@@ -152,7 +152,10 @@ optional effort authoritative for the initial launch.
   **must** precede the commit/CI branches, or a blind kill is misjudged as a hard failure
   and its resumable work is dropped.
 - A provider-capacity signal requires a non-zero exit AND provider-owned output — issue
-  text an agent echoes must never manufacture a cooldown.
+  text, repository fixtures, test names, diffs, and command output an agent echoes must
+  never manufacture a cooldown. Codex runs in JSONL mode because its plain mode mixes
+  provider diagnostics and untrusted tool output on stderr; only structured error events
+  or narrowly anchored provider banners are capacity evidence.
 - Provider suppression is evidence-driven and self-revalidating (#32): the signal kind
   (authoritative reset / unconfirmed quota / throttling / context-exhaustion / billing /
   unknown) and provider are both load-bearing — Claude's documented rolling-window
@@ -163,7 +166,9 @@ optional effort authoritative for the initial launch.
   restart. A run whose own evidence already proves delivery-ready (commits + PR + green
   CI) is reconciled to `pr_ready` rather than stranded behind a cooldown that no longer
   matters for that issue — but the suppression itself is still recorded, since it can
-  still block new launches on that provider.
+  still block new launches on that provider. That reconciled `pr_ready` state is valid
+  autoship evidence despite the non-zero provider exit, and a restart must re-enter
+  autoship for any retained `pr_ready` claim when autoship is configured.
 - Capture uncommitted work only on `exit==0 && commitsAhead==0 && dirty`; a timeout/crash
   may have left the tree half-written.
 - A resumable run keeps both `agent-working` and its durable issue claim.

@@ -934,6 +934,28 @@ test("runScanOnce completes a crash-interrupted PR finalization before fresh wor
   }
 });
 
+test("runScanOnce resumes autoship for a stranded pr_ready capacity exit", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const ready = store.updateRun(parkedRun(store).id, {
+      status: "pr_ready",
+      exitCode: 75,
+      finalizationPending: false,
+    });
+    const harness = parkedDeps(store, { ci: "pass" });
+
+    const result = await runScanOnce(harness.deps);
+
+    assert.match(result.message, /Resumed autoship for ready issue/);
+    assert.equal(store.getRun(ready.id)?.status, "shipped");
+    assert.equal(harness.ships.count, 1);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runScanOnce derives model and effort from an unassigned issue after reading live capacity", async () => {
   const dir = tmp();
   try {
