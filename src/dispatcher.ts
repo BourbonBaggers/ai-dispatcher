@@ -137,6 +137,20 @@ export function selectParked(parked: RunRecord[]): RunRecord | null {
   return parked[0] ?? null;
 }
 
+/** Immutable assignment restored for every non-frontier repair, regardless of prior phases. */
+export function assignedIdentity(run: RunRecord): Pick<
+  RunRecord,
+  "agent" | "modelLabel" | "cliModel" | "effortLabel" | "cliEffort"
+> {
+  return {
+    agent: run.assignedAgent,
+    modelLabel: run.assignedModelLabel,
+    cliModel: run.assignedCliModel,
+    effortLabel: run.assignedEffortLabel,
+    cliEffort: run.assignedCliEffort,
+  };
+}
+
 /** Runs a single scan: resume first, else claim and launch at most one fresh issue. */
 export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   const { config, store, github, logger, notifier } = deps;
@@ -148,6 +162,25 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   const active = store.activeRun();
   if (active) {
     return { started: null, message: `A run is already active (issue #${active.issueNumber}).` };
+  }
+
+  // The runner checkpoints its terminal observation before finalizeRun applies recovery
+  // or autoship. A SIGKILL in that narrow window used to strand pr_ready/ci_failed rows
+  // forever (or release a failed row for a destructive fresh redispatch). Finish that
+  // exact run record before considering any other work.
+  const pendingFinalization = store.pendingFinalizations()[0];
+  if (pendingFinalization) {
+    if (config.dryRun) {
+      return {
+        started: null,
+        message: `[dry-run] would finalize interrupted bookkeeping for issue #${pendingFinalization.issueNumber}.`,
+      };
+    }
+    await finalizeRun(deps, pendingFinalization);
+    return {
+      started: store.getRun(pendingFinalization.id),
+      message: `Recovered finalization for issue #${pendingFinalization.issueNumber}.`,
+    };
   }
 
   const settings = store.getSettings();
@@ -356,6 +389,8 @@ export async function resumeRun(deps: DispatcherDeps, run: RunRecord): Promise<R
     exitCode: null,
     failureSummary: null,
     finishedAt: null,
+    startedAt: now(),
+    finalizationPending: false,
   });
 
   logger.info("resuming run", {
@@ -392,10 +427,13 @@ async function repairRun(
   const reentered = store.updateRun(run.id, {
     status: "claimed",
     trigger: "resume",
+    ...assignedIdentity(run),
     recovery: updateRecovery(run.recovery, kind, { attempts: attempt }),
     exitCode: null,
     failureSummary: reason,
     finishedAt: null,
+    startedAt: now(),
+    finalizationPending: false,
   });
 
   logger.info("self-heal: relaunching agent to repair delivery failure", {
@@ -454,6 +492,8 @@ async function escalateRun(
     exitCode: null,
     failureSummary: reason,
     finishedAt: null,
+    startedAt: now(),
+    finalizationPending: false,
   });
 
   logger.info(`self-heal: escalating ${kind} to a stronger model`, {
@@ -481,17 +521,25 @@ async function exhaustRun(
   kind: RecoveryKind,
   reason: string,
 ): Promise<void> {
-  const finalRun = deps.store.updateRun(run.id, {
+  const exhaustedAt = (deps.now ?? (() => Date.now()))();
+  let finalRun = deps.store.updateRun(run.id, {
     status: "held",
     failureSummary: `${kind} recovery exhausted: ${reason}`,
     exhaustion: {
       kind,
       reason,
-      at: (deps.now ?? (() => Date.now()))(),
+      at: exhaustedAt,
+      labelApplied: false,
     },
-    finishedAt: (deps.now ?? (() => Date.now()))(),
+    finishedAt: exhaustedAt,
+    finalizationPending: false,
   });
-  await deps.github.addLabel(run.issueNumber, AUTOSHIP_HELD_LABEL);
+  const labelApplied = await deps.github.addLabel(run.issueNumber, AUTOSHIP_HELD_LABEL);
+  if (labelApplied) {
+    finalRun = deps.store.updateRun(run.id, {
+      exhaustion: { ...finalRun.exhaustion!, labelApplied: true },
+    });
+  }
   await deps.github.removeLabel(run.issueNumber, WORKING_LABEL);
   await deps.github.comment(
     run.issueNumber,
@@ -534,7 +582,10 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
   const { store, github, logger } = deps;
   const now = deps.now ?? (() => Date.now());
 
-  if (run.status === "abandoned") return;
+  if (run.status === "abandoned") {
+    store.updateRun(run.id, { finalizationPending: false });
+    return;
+  }
 
   // Record the attempt-level evidence for this terminal run (#319). Best-effort: an
   // evidence-store failure must never break the dispatch loop, exactly like notifications.
@@ -597,6 +648,8 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
   // (ci_failed) that is already stale by the time this line runs, would just be a
   // misleading extra push moments before the accurate one.
   if (relaunched) return;
+
+  store.updateRun(run.id, { finalizationPending: false });
 
   // No progress/failure push here. Autoship owns the one verified-success notification,
   // token exhaustion owns its cooldown notification, and exhaustRun owns the only
@@ -702,7 +755,7 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
         store.updateRun(run.id, { status: "ci_pending" });
         return { relaunched: false };
       case "ci_not_green":
-        if (outcome.state === "pending") {
+        if (outcome.state === "pending" || outcome.state === "unknown") {
           // Only touch the record on the TRANSITION into parked -- a recheck that finds
           // it still pending must stay silent and cheap, not re-write every ~15 minutes
           // while nothing has actually changed.
@@ -818,6 +871,19 @@ export async function recheckHeldRun(deps: DispatcherDeps, run: RunRecord): Prom
   }
 
   const labels = await deps.github.issueLabels(run.issueNumber);
+  if (labels === null) {
+    // A read failure is not evidence that the operator removed the hold.
+    return { rechecked: false };
+  }
+  if (run.exhaustion?.labelApplied === false) {
+    const applied = await deps.github.addLabel(run.issueNumber, AUTOSHIP_HELD_LABEL);
+    if (applied) {
+      deps.store.updateRun(run.id, {
+        exhaustion: { ...run.exhaustion, labelApplied: true },
+      });
+    }
+    return { rechecked: false };
+  }
   if (labels.includes(AUTOSHIP_HELD_LABEL) && run.exhaustion) {
     // A current-version hold carries durable proof that the full ladder was spent.
     return { rechecked: false };

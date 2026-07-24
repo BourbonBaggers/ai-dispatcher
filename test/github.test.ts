@@ -169,7 +169,10 @@ test("prState maps gh pr view state to a lowercase lifecycle value", async () =>
   ];
   for (const [raw, expected] of cases) {
     const { fn } = fakeExec(() => ok(`${raw}\n`));
-    const client = new GithubClient(repo.ok ? repo.value : (undefined as never), fn);
+    const client: GithubClient = new GithubClient(
+      repo.ok ? repo.value : (undefined as never),
+      fn,
+    );
     assert.equal(await client.prState(4), expected);
   }
 });
@@ -190,15 +193,35 @@ test("issueLabels parses label names from the issue", async () => {
   assert.deepEqual(await client.issueLabels(6), ["human-review-required", "bug"]);
 });
 
-test("issueLabels fails safe (empty) on a gh failure or malformed JSON", async () => {
+test("issueLabels preserves unknown on a gh failure or malformed JSON", async () => {
   const repo = parseRepoSlug(SLUG);
   const failing = fakeExec(() => ({ ok: false, stdout: "", stderr: "boom", code: 1 }));
   const failingClient = new GithubClient(repo.ok ? repo.value : (undefined as never), failing.fn);
-  assert.deepEqual(await failingClient.issueLabels(6), []);
+  assert.equal(await failingClient.issueLabels(6), null);
 
   const malformed = fakeExec(() => ok("not json"));
   const malformedClient = new GithubClient(repo.ok ? repo.value : (undefined as never), malformed.fn);
-  assert.deepEqual(await malformedClient.issueLabels(6), []);
+  assert.equal(await malformedClient.issueLabels(6), null);
+});
+
+test("prChecksState separates red, pending, green, and unreadable GitHub state", async () => {
+  const repo = parseRepoSlug(SLUG);
+  assert.equal(repo.ok, true);
+  const cases: Array<[ExecResult, "pass" | "pending" | "fail" | "unknown"]> = [
+    [ok(JSON.stringify([{ bucket: "pass" }, { bucket: "skipping" }])), "pass"],
+    [{ ok: false, stdout: JSON.stringify([{ bucket: "pending" }]), stderr: "", code: 8 }, "pending"],
+    [{ ok: false, stdout: JSON.stringify([{ bucket: "fail" }]), stderr: "", code: 1 }, "fail"],
+    [{ ok: false, stdout: "", stderr: "network unavailable", code: 1 }, "unknown"],
+    [ok("[]"), "unknown"],
+  ];
+  for (const [result, expected] of cases) {
+    const { fn } = fakeExec(() => result);
+    const client: GithubClient = new GithubClient(
+      repo.ok ? repo.value : (undefined as never),
+      fn,
+    );
+    assert.equal(await client.prChecksState(7), expected);
+  }
 });
 
 test("markPrReady runs gh pr ready and reports success/failure", async () => {

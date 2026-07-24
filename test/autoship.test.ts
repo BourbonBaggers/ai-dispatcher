@@ -45,8 +45,8 @@ interface Harness {
 
 function harness(opts: {
   autoshipCmd?: string | null;
-  ci?: "pass" | "pending" | "fail";
-  waitedCi?: "pass" | "pending" | "fail";
+  ci?: "pass" | "pending" | "fail" | "unknown";
+  waitedCi?: "pass" | "pending" | "fail" | "unknown";
   mergeStateStatus?: string;
   isDraft?: boolean;
   reviewDecision?: string | null;
@@ -373,24 +373,26 @@ describe("autoshipRun — generated conflict recovery", () => {
     assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL), "review-required must not block");
   });
 
-  it("repairs instead of holding when mergeability cannot be read", async () => {
+  it("parks without spending recovery when mergeability cannot be read", async () => {
     const h = harness({});
     h.deps.github.prMergeInfo = async () => null;
     const r = await autoshipRun(h.deps, succeededRun());
-    assert.equal(r.action, "repair");
-    assert.equal(r.action === "repair" ? r.kind : null, "merge");
+    assert.deepEqual(r, { action: "ci_not_green", state: "unknown" });
     assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL));
   });
 
-  it("escalates unreadable mergeability after ordinary repair attempts", async () => {
-    const h = harness({});
-    h.deps.github.prMergeInfo = async () => null;
-    const r = await autoshipRun(
-      h.deps,
-      succeededRun({ recovery: { merge: { attempts: 2, escalated: false } } }),
-    );
-    assert.equal(r.action, "escalate");
-    assert.equal(r.action === "escalate" ? r.kind : null, "merge");
+  it("parks an unreadable PR lifecycle instead of fabricating a merge failure", async () => {
+    const h = harness({ prState: "unknown" });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.deepEqual(r, { action: "ci_not_green", state: "unknown" });
+    assert.equal(h.shipped.length, 0);
+  });
+
+  it("repairs a PR confirmed closed without merging", async () => {
+    const h = harness({ prState: "closed" });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.equal(r.action, "repair");
+    assert.equal(r.action === "repair" ? r.kind : null, "merge");
   });
 
   it("repairs generated-only conflicts, waits for CI, then ships", async () => {

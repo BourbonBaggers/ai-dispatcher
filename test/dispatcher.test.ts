@@ -13,6 +13,8 @@ import {
   reconcile,
   recheckParkedRun,
   recheckHeldRun,
+  runScanOnce,
+  assignedIdentity,
   MAX_AUTO_RESUMES,
   type DispatcherDeps,
 } from "../src/dispatcher.ts";
@@ -37,6 +39,11 @@ function run(overrides: Partial<RunRecord>): RunRecord {
     cliModel: "claude-opus-4-8",
     effortLabel: "effort:high",
     cliEffort: "high",
+    assignedAgent: "claude",
+    assignedModelLabel: "model:claude-opus-4.8",
+    assignedCliModel: "claude-opus-4-8",
+    assignedEffortLabel: "effort:high",
+    assignedCliEffort: "high",
     branch: "issue-1-a-thing",
     checkoutPath: "/w/issue-1-a-thing",
     planPath: null,
@@ -95,6 +102,28 @@ test("attemptRecordFromRun disambiguates resumes and marks the retry reason", ()
   assert.equal(rec.attemptId, "run-y#2@9000"); // no finishedAt → falls back to nowMs
   assert.equal(rec.retryReason, "resume");
   assert.equal(rec.activeDurationMs, null); // no finishedAt → unknown duration
+});
+
+test("later-phase repairs restore the immutable assigned model after frontier use", () => {
+  const escalated = run({
+    agent: "claude",
+    modelLabel: "model:claude-opus-4.8",
+    cliModel: "claude-opus-4-8",
+    effortLabel: "effort:max",
+    cliEffort: "xhigh",
+    assignedAgent: "codex",
+    assignedModelLabel: "model:gpt-5.5",
+    assignedCliModel: "gpt-5.5",
+    assignedEffortLabel: "effort:medium",
+    assignedCliEffort: "medium",
+  });
+  assert.deepEqual(assignedIdentity(escalated), {
+    agent: "codex",
+    modelLabel: "model:gpt-5.5",
+    cliModel: "gpt-5.5",
+    effortLabel: "effort:medium",
+    cliEffort: "medium",
+  });
 });
 
 // ── resume selection ──────────────────────────────────────────────────────────
@@ -345,10 +374,10 @@ function autoshipConfig(overrides: Partial<DispatcherConfig> = {}): DispatcherCo
 }
 
 function parkedDeps(store: StateStore, opts: {
-  ci?: "pass" | "pending" | "fail";
+  ci?: "pass" | "pending" | "fail" | "unknown";
   isDraft?: boolean;
   issueState?: "OPEN" | "CLOSED" | "UNKNOWN";
-  issueLabels?: string[];
+  issueLabels?: string[] | null;
   prState?: "open" | "merged" | "closed" | "unknown";
   shipResult?: { ok: boolean; stdout: string; stderr: string; code: number | null };
 }): {
@@ -391,7 +420,10 @@ function parkedDeps(store: StateStore, opts: {
       addLabel: async (_i: number, l: string) => { labels.push(l); return true; },
       removeLabel: async (_i: number, l: string) => { removedLabels.push(l); return true; },
       issueState: async () => opts.issueState ?? "OPEN",
-      issueLabels: async () => { reads.issueLabels += 1; return opts.issueLabels ?? []; },
+      issueLabels: async () => {
+        reads.issueLabels += 1;
+        return opts.issueLabels === undefined ? [] : opts.issueLabels;
+      },
       markPrReady: async () => true,
       closeIssue: async () => true,
     } as unknown as DispatcherDeps["github"],
@@ -451,6 +483,29 @@ test("recheckParkedRun stays parked, silently, when CI is still pending", async 
     assert.equal(after?.status, "ci_pending", "still parked -- no agent relaunch, no status churn");
     assert.equal(comments.length, 0, "a still-pending recheck must not post a new comment");
     assert.equal(labels.length, 0, "a still-pending recheck must not touch labels");
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recheckParkedRun parks unknown GitHub state without burning a repair budget", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run1 = parkedRun(store);
+    const { deps, ships, notifications } = parkedDeps(store, {
+      ci: "unknown",
+      prState: "unknown",
+    });
+
+    await recheckParkedRun(deps, run1);
+
+    const after = store.getRun(run1.id);
+    assert.equal(after?.status, "ci_pending");
+    assert.deepEqual(after?.recovery, {});
+    assert.equal(ships.count, 0);
+    assert.equal(notifications.count, 0);
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -621,6 +676,46 @@ test("recheckHeldRun fails closed when the issue state cannot be read", async ()
     assert.equal(ships.count, 0);
     assert.equal(comments.length, 0);
     assert.equal(labels.length, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recheckHeldRun does not mistake a failed label read for operator approval", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run1 = heldRun(store);
+    const { deps, ships } = parkedDeps(store, { issueLabels: null, ci: "pass" });
+
+    const { rechecked } = await recheckHeldRun(deps, run1);
+
+    assert.equal(rechecked, false);
+    assert.equal(store.getRun(run1.id)?.status, "held");
+    assert.equal(ships.count, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runScanOnce completes a crash-interrupted PR finalization before fresh work", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const pending = store.updateRun(parkedRun(store).id, {
+      status: "pr_ready",
+      finalizationPending: true,
+    });
+    const harness = parkedDeps(store, { ci: "pass" });
+
+    const result = await runScanOnce(harness.deps);
+
+    assert.match(result.message, /Recovered finalization/);
+    assert.equal(store.getRun(pending.id)?.status, "shipped");
+    assert.equal(store.getRun(pending.id)?.finalizationPending, false);
+    assert.equal(harness.ships.count, 1);
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });

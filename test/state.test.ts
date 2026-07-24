@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StateStore, LockHeldError } from "../src/state.ts";
@@ -93,6 +94,44 @@ test("a stale lock from a dead pid is reclaimed", () => {
     writeFileSync(join(dir, "dispatcher.lock"), JSON.stringify({ pid: 2147483646 }));
     const store = StateStore.open(dir); // should not throw
     store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a lock whose pid was reused by another process identity is reclaimed", () => {
+  const dir = tmp();
+  try {
+    writeFileSync(
+      join(dir, "dispatcher.lock"),
+      JSON.stringify({ pid: process.pid, processIdentity: "not-this-process" }),
+    );
+    const store = StateStore.open(dir);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("concurrent stale-lock reclaimers cannot both become dispatchers", async () => {
+  const dir = tmp();
+  const winners = join(dir, "winners");
+  const fixture = join(import.meta.dirname, "fixtures", "lock-contender.mjs");
+  try {
+    writeFileSync(join(dir, "dispatcher.lock"), JSON.stringify({ pid: 2147483646 }));
+    const launch = () =>
+      new Promise<number | null>((resolve, reject) => {
+        const child = spawn(process.execPath, [fixture, dir, winners], { stdio: "ignore" });
+        child.once("error", reject);
+        child.once("close", resolve);
+      });
+    const exits = await Promise.all([launch(), launch(), launch(), launch()]);
+    const acquired = existsSync(winners)
+      ? readFileSync(winners, "utf8").trim().split("\n").filter(Boolean)
+      : [];
+    assert.equal(acquired.length, 1);
+    assert.equal(exits.filter((code) => code === 0).length, 1);
+    assert.equal(exits.filter((code) => code === 2).length, 3);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -197,6 +236,98 @@ test("pr_ready retains its issue claim without becoming resumable or parked", ()
     assert.deepEqual(store.resumableRuns(), []);
     assert.deepEqual(store.parkedRuns(), []);
     store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("terminal finalization checkpoints and immutable assignment survive restart", () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run = store.createRun(claimData(8));
+    assert.equal(run.assignedCliModel, "gpt-5.5");
+    store.updateRun(run.id, {
+      status: "pr_ready",
+      cliModel: "claude-opus-4-8",
+      finalizationPending: true,
+    });
+    store.releaseLock();
+
+    const reopened = StateStore.open(dir);
+    assert.equal(reopened.pendingFinalizations()[0]?.id, run.id);
+    assert.equal(reopened.getRun(run.id)?.assignedCliModel, "gpt-5.5");
+    reopened.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("legacy succeeded rows are re-finalized as unverified PR handoffs", () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run = store.createRun(claimData(10));
+    store.releaseLock();
+    const statePath = join(dir, "state.json");
+    const raw = JSON.parse(readFileSync(statePath, "utf8")) as {
+      runs: Array<Record<string, unknown>>;
+    };
+    raw.runs[0]!.status = "succeeded";
+    writeFileSync(statePath, JSON.stringify(raw));
+
+    const reopened = StateStore.open(dir);
+    assert.equal(reopened.getRun(run.id)?.status, "pr_ready");
+    assert.equal(reopened.getRun(run.id)?.finalizationPending, true);
+    reopened.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("legacy shipped rows without a recovery ledger are reverified after closure races", () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run = store.createRun(claimData(11));
+    store.releaseLock();
+    const statePath = join(dir, "state.json");
+    const raw = JSON.parse(readFileSync(statePath, "utf8")) as {
+      runs: Array<Record<string, unknown>>;
+    };
+    raw.runs[0]!.status = "shipped";
+    delete raw.runs[0]!.recovery;
+    writeFileSync(statePath, JSON.stringify(raw));
+
+    const reopened = StateStore.open(dir);
+    assert.equal(reopened.getRun(run.id)?.status, "pr_ready");
+    assert.equal(reopened.getRun(run.id)?.finalizationPending, true);
+    reopened.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("duplicate legacy successes collapse to the newest delivery verification per issue", () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const older = store.createRun(claimData(12));
+    store.updateRun(older.id, { status: "shipped", createdAt: 1 });
+    const newer = store.createRun(claimData(12));
+    store.updateRun(newer.id, { status: "shipped", createdAt: 2 });
+    store.releaseLock();
+    const statePath = join(dir, "state.json");
+    const raw = JSON.parse(readFileSync(statePath, "utf8")) as {
+      runs: Array<Record<string, unknown>>;
+    };
+    for (const row of raw.runs) delete row.recovery;
+    writeFileSync(statePath, JSON.stringify(raw));
+
+    const reopened = StateStore.open(dir);
+    assert.deepEqual(reopened.pendingFinalizations().map((run) => run.id), [newer.id]);
+    assert.equal(reopened.getRun(older.id)?.status, "abandoned");
+    reopened.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -54,14 +54,14 @@ export const AUTOSHIP_HELD_LABEL = "autoship-held";
 export interface AutoshipGithub {
   /** PR lifecycle state — used to recognise an already-merged PR and stand down (#10). */
   prState(pr: number): Promise<"open" | "merged" | "closed" | "unknown">;
-  prChecksState(pr: number): Promise<"pass" | "pending" | "fail">;
-  waitForPrChecks(pr: number, timeoutSeconds: number): Promise<"pass" | "pending" | "fail">;
+  prChecksState(pr: number): Promise<"pass" | "pending" | "fail" | "unknown">;
+  waitForPrChecks(pr: number, timeoutSeconds: number): Promise<"pass" | "pending" | "fail" | "unknown">;
   prMergeInfo(pr: number): Promise<GithubPrMergeInfo | null>;
   prDiff(pr: number): Promise<string | null>;
   comment(issue: number, body: string): Promise<boolean>;
   addLabel(issue: number, label: string): Promise<boolean>;
   /** The issue's current labels; retained as part of the GitHub surface for diagnostics. */
-  issueLabels(issue: number): Promise<string[]>;
+  issueLabels(issue: number): Promise<string[] | null>;
   /** `gh pr ready <pr>`: promotes a draft PR to ready for review. */
   markPrReady(pr: number): Promise<boolean>;
   /** `gh issue close <n>`: the ONLY place an issue closes -- see the shipped path below. */
@@ -108,7 +108,7 @@ export interface AutoshipDeps {
 
 export type AutoshipOutcome =
   | { action: "skipped"; reason: string }
-  | { action: "ci_not_green"; state: "pending" | "fail" }
+  | { action: "ci_not_green"; state: "pending" | "fail" | "unknown" }
   | { action: "repair"; kind: RecoveryKind; attempt: number; maxAttempts: number; reason: string }
   | { action: "escalate"; kind: RecoveryKind; model: string; reason: string }
   | { action: "exhausted"; kind: RecoveryKind; reason: string }
@@ -140,8 +140,19 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
 
   // 1b. Already merged? Deploy its exact merge SHA instead of retrying `gh pr merge` or
   // standing down for manual verification. Merge is not shipped; verified production is.
-  if ((await github.prState(pr)) === "merged") {
+  const prState = await github.prState(pr);
+  if (prState === "merged") {
     return await alreadyMerged(deps, run, pr);
+  }
+  if (prState === "unknown") {
+    logger.warn("autoship: PR state could not be read; parking without spending recovery", {
+      issue: run.issueNumber,
+      pr,
+    });
+    return { action: "ci_not_green", state: "unknown" };
+  }
+  if (prState === "closed") {
+    return mergeBlocked(deps, run, pr, "PR is closed without merging");
   }
 
   // 2. Re-confirm CI now. A verdict from when the run ended is not trusted.
@@ -161,7 +172,11 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
 
   const mergeInfo = await github.prMergeInfo(pr);
   if (!mergeInfo) {
-    return await mergeBlocked(deps, run, pr, "PR mergeability could not be read");
+    logger.warn("autoship: PR mergeability could not be read; parking without spending recovery", {
+      issue: run.issueNumber,
+      pr,
+    });
+    return { action: "ci_not_green", state: "unknown" };
   }
   if (mergeInfo.isDraft) {
     // POLICY (2026-07-23): no human-review gate. Always promote a draft to ready and

@@ -101,7 +101,7 @@ export function prMergeInfoArgs(slug: string, pr: number): string[] {
 }
 
 export function prChecksArgs(slug: string, pr: number): string[] {
-  return ["pr", "checks", String(pr), "--repo", slug];
+  return ["pr", "checks", String(pr), "--repo", slug, "--json", "bucket"];
 }
 
 export function prStateArgs(slug: string, pr: number): string[] {
@@ -163,16 +163,15 @@ export class GithubClient {
     return result.ok ? result.stdout.trim() || "UNKNOWN" : "UNKNOWN";
   }
 
-  /** The issue's current label names. Empty on any read failure -- fail safe (callers
-   * treat "no labels read" the same as "label absent", never as "label present"). */
-  async issueLabels(issue: number): Promise<string[]> {
+  /** The issue's current label names, or null when absence cannot be proven. */
+  async issueLabels(issue: number): Promise<string[] | null> {
     const result = await this.exec("gh", issueLabelsArgs(this.repo.slug, issue));
-    if (!result.ok) return [];
+    if (!result.ok) return null;
     try {
       const raw = JSON.parse(result.stdout.trim()) as { labels?: Array<{ name: string }> };
       return (raw.labels ?? []).map((l) => l.name);
     } catch {
-      return [];
+      return null;
     }
   }
 
@@ -197,22 +196,31 @@ export class GithubClient {
    * any are still pending, and non-zero-non-8 when one has failed. Autoship gates on this
    * fresh reading at ship time; a verdict observed minutes earlier is not trusted.
    */
-  async prChecksState(pr: number): Promise<"pass" | "pending" | "fail"> {
+  async prChecksState(pr: number): Promise<"pass" | "pending" | "fail" | "unknown"> {
     const result = await this.exec("gh", prChecksArgs(this.repo.slug, pr));
-    if (result.code === 0) return "pass";
-    if (result.code === 8) return "pending";
-    return "fail";
+    try {
+      const checks = JSON.parse(result.stdout.trim()) as Array<{ bucket?: unknown }>;
+      if (!Array.isArray(checks) || checks.length === 0) return "unknown";
+      const buckets = checks.map((check) => check.bucket);
+      if (buckets.some((bucket) => bucket === "fail" || bucket === "cancel")) return "fail";
+      if (buckets.some((bucket) => bucket === "pending")) return "pending";
+      if (buckets.every((bucket) => bucket === "pass" || bucket === "skipping")) return "pass";
+      return "unknown";
+    } catch {
+      // Exit 8 is a documented pending result even if an older gh omitted JSON.
+      return result.code === 8 ? "pending" : "unknown";
+    }
   }
 
   async waitForPrChecks(
     pr: number,
     timeoutSeconds: number,
     pollSeconds = 20,
-  ): Promise<"pass" | "pending" | "fail"> {
+  ): Promise<"pass" | "pending" | "fail" | "unknown"> {
     const deadline = Date.now() + Math.max(1, timeoutSeconds) * 1000;
     for (;;) {
       const state = await this.prChecksState(pr);
-      if (state !== "pending") return state;
+      if (state !== "pending" && state !== "unknown") return state;
       if (Date.now() >= deadline) return "pending";
       await new Promise((resolve) =>
         setTimeout(resolve, Math.max(1, pollSeconds) * 1000),
