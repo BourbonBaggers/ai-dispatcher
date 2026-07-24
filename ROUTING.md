@@ -116,9 +116,19 @@ model*. The two are independent by construction.
 ## Capacity honesty
 
 Capacity is assessed on a descending confidence ladder (`provider-reported` →
-`cli-reported` → `persisted-limit` → `estimated` → `unknown`). No CLI exposes a remaining
-quota today, so the system reports `persisted-limit` (from an active cooldown) or
-`estimated`/`unknown` — it never fabricates a precise remaining-capacity number.
+`cli-reported` → `persisted-limit` → `unconfirmed-limit` → `estimated` → `unknown`). No
+CLI exposes a remaining quota today, so the system reports `persisted-limit` (an active
+cooldown backed by a provider-reported reset), `unconfirmed-limit` (an active cooldown
+from a quota-like signal with no reset, self-revalidating on a short bounded window), or
+`estimated`/`unknown` — it never fabricates a precise remaining-capacity number, and an
+unconfirmed guess is never reported at the same confidence as proven exhaustion.
+
+Provider-capacity suppression itself is provider- and kind-specific (`token-exhaustion.ts`):
+an authoritative provider-reported reset is honored exactly; a no-reset quota-like signal
+is unconfirmed and revalidates automatically on a short bounded window, except Claude's
+own documented ~5h rolling-window subscription limit, which is Claude-only policy and
+must never apply to another provider. Context/request-size exhaustion never suppresses
+the whole pool — it is a per-request limit, not an account-capacity fact.
 
 ## Telemetry semantics
 
