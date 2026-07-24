@@ -15,6 +15,7 @@ import {
 import type { DispatcherConfig } from "../src/config.ts";
 import { resolveAuthorAuthConfig } from "../src/author-auth.ts";
 import { resolveCapacitySuppression, type ProviderCapacitySignal } from "../src/token-exhaustion.ts";
+import { DISPATCHER_TARGET_POLICY_ENV } from "../src/target-policy.ts";
 import { existsSync, readFileSync } from "node:fs";
 
 const SPEC: AgentLaunchSpec = {
@@ -104,6 +105,7 @@ test("dispatchAgentEnv threads the required repo identity through the environmen
   assert.equal(env.DISPATCHER_REPO_SLUG, "acme/widgets");
   assert.equal(env.DISPATCHER_REPO_DIR, "/home/dev/mirror");
   assert.equal(env.DISPATCHER_WORKTREE_DIR, "/home/dev/worktrees");
+  assert.equal(env[DISPATCHER_TARGET_POLICY_ENV], "1");
 });
 
 test("dispatchAgentEnv omits the env-source dir when none is configured, sets it when present", () => {
