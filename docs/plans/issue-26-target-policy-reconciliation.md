@@ -13,7 +13,7 @@
 - Keep all target policy artifacts untracked and ignored through `.git/info/exclude`, so
   interactive checkouts and committed repository instructions are unchanged.
 
-## Milestone 1: canonical policy and pure reconciliation
+## [DONE] Milestone 1: canonical policy and pure reconciliation
 
 Create the canonical target-policy module, export deterministic reconciliation helpers,
 and cover missing/drift/extra managed-content cases with unit tests.
