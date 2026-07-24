@@ -58,6 +58,11 @@ export interface AttemptRecord {
   routingRationaleLabels: string[];
   routingConfidence: RoutingConfidence | null;
   capacityStateAtAssignment: CapacityState | null;
+  /** Pickup-time execution persistence and its provider-neutral rationale. */
+  effortLabel?: string;
+  effortReason?: string;
+  assignmentSource?: "automatic" | "human-override";
+  capacitySelection?: "live-headroom" | "rotation" | "only-capable" | "human-override";
   startedAt: number;
   endedAt: number | null;
   activeDurationMs: number | null;
