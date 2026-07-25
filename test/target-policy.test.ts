@@ -159,8 +159,10 @@ test("targetPolicyPaths returns checkout-local managed paths", () => {
 test("reconcile-target-policy command refuses untrusted launch context", async () => {
   const { checkout, cleanup } = await fixture();
   try {
+    const env = { ...process.env };
+    delete env[DISPATCHER_TARGET_POLICY_ENV];
     await assert.rejects(
-      execFileAsync("node", [reconcileScript, checkout], { env: { ...process.env } }),
+      execFileAsync("node", [reconcileScript, checkout], { env }),
       (error: { code?: number; stderr?: string }) => {
         assert.equal(error.code, 65);
         assert.match(error.stderr ?? "", /trusted launch context/);

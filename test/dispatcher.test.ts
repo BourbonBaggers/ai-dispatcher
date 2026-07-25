@@ -1052,6 +1052,277 @@ test("runScanOnce derives model and effort from an unassigned issue after readin
   }
 });
 
+test("runScanOnce does not audit blocked issues while normal eligible work exists", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    let audited = false;
+    const deps: DispatcherDeps = {
+      config: {
+        ...autoshipConfig({ autoshipCmd: null }),
+        dryRun: false,
+        worktreeDir: "/worktrees",
+        authorAuth: { ok: true, mode: "none", trustedAuthors: new Set() },
+        blockedQueueAuditModel: "claude-sonnet-5",
+        blockedQueueAuditEffortLabel: "effort:low",
+        blockedQueueAuditMaxCandidates: 3,
+      } as DispatcherConfig,
+      store,
+      logger: createLogger("error", () => undefined),
+      notifier: { send: async () => undefined },
+      github: {
+        listOpenIssues: async () => ({
+          ok: true,
+          issues: [
+            {
+              number: 28,
+              title: "blocked",
+              url: "https://x/28",
+              labels: ["blocked", "dispatch:ready"],
+              authorLogin: "BourbonBaggers",
+            },
+            {
+              number: 29,
+              title: "ready",
+              url: "https://x/29",
+              labels: ["dispatch:ready"],
+              authorLogin: "BourbonBaggers",
+            },
+          ],
+        }),
+        addLabel: async () => true,
+        removeLabel: async () => true,
+        issueState: async () => "OPEN",
+        comment: async () => true,
+      } as unknown as DispatcherDeps["github"],
+      blockedQueueAuditor: async () => {
+        audited = true;
+        return { ok: true, workable: true, rationale: "should not run" };
+      },
+      launch: async (claimed) =>
+        store.updateRun(claimed.id, {
+          status: "interrupted",
+          exitCode: 130,
+          finishedAt: 6_000,
+          failureSummary: "test interruption",
+        }),
+      now: () => 5_000,
+    };
+
+    const result = await runScanOnce(deps);
+
+    assert.match(result.message, /Ran/);
+    assert.equal(audited, false);
+    assert.equal(store.allRuns()[0]?.issueNumber, 29);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runScanOnce removes blocked from the first stale blocked issue without claiming it", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const removed: Array<{ issue: number; label: string }> = [];
+    const comments: Array<{ issue: number; body: string }> = [];
+    let audits = 0;
+    const deps: DispatcherDeps = {
+      config: {
+        ...autoshipConfig({ autoshipCmd: null }),
+        dryRun: false,
+        worktreeDir: "/worktrees",
+        authorAuth: { ok: true, mode: "none", trustedAuthors: new Set() },
+        blockedQueueAuditModel: "claude-sonnet-5",
+        blockedQueueAuditEffortLabel: "effort:low",
+        blockedQueueAuditMaxCandidates: 3,
+      } as DispatcherConfig,
+      store,
+      logger: createLogger("error", () => undefined),
+      notifier: { send: async () => undefined },
+      github: {
+        listOpenIssues: async () => ({
+          ok: true,
+          issues: [
+            {
+              number: 28,
+              title: "blocked after deps",
+              url: "https://x/28",
+              labels: ["blocked", "dispatch:ready"],
+              authorLogin: "BourbonBaggers",
+            },
+            {
+              number: 29,
+              title: "also blocked",
+              url: "https://x/29",
+              labels: ["blocked", "dispatch:ready"],
+              authorLogin: "BourbonBaggers",
+            },
+          ],
+        }),
+        issueBody: async (issue: number) =>
+          issue === 28 ? "Blocked by #26 and #27." : "Blocked by #26.",
+        issueState: async () => "CLOSED",
+        removeLabel: async (issue: number, label: string) => {
+          removed.push({ issue, label });
+          return true;
+        },
+        comment: async (issue: number, body: string) => {
+          comments.push({ issue, body });
+          return true;
+        },
+      } as unknown as DispatcherDeps["github"],
+      blockedQueueAuditor: async (_prompt, config) => {
+        audits += 1;
+        assert.equal(config.model.cliModel, "claude-sonnet-5");
+        assert.equal(config.cliEffort, "low");
+        return { ok: true, workable: true, rationale: "all referenced blockers are closed" };
+      },
+      launch: async () => {
+        throw new Error("audit path must not claim or launch");
+      },
+      now: () => 5_000,
+    };
+
+    const result = await runScanOnce(deps);
+
+    assert.match(result.message, /Removed stale blocked label from issue #28/);
+    assert.deepEqual(removed, [{ issue: 28, label: "blocked" }]);
+    assert.equal(comments.length, 1);
+    assert.match(comments[0]!.body, /Blocked queue audit/);
+    assert.match(comments[0]!.body, /#26:CLOSED, #27:CLOSED/);
+    assert.equal(audits, 1);
+    assert.equal(store.allRuns().length, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runScanOnce keeps unclear blocked issues held and can continue within the bound", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const removed: number[] = [];
+    const auditedIssues: number[] = [];
+    const deps: DispatcherDeps = {
+      config: {
+        ...autoshipConfig({ autoshipCmd: null }),
+        dryRun: false,
+        worktreeDir: "/worktrees",
+        authorAuth: { ok: true, mode: "none", trustedAuthors: new Set() },
+        blockedQueueAuditModel: "claude-sonnet-5",
+        blockedQueueAuditEffortLabel: "effort:low",
+        blockedQueueAuditMaxCandidates: 2,
+      } as DispatcherConfig,
+      store,
+      logger: createLogger("error", () => undefined),
+      notifier: { send: async () => undefined },
+      github: {
+        listOpenIssues: async () => ({
+          ok: true,
+          issues: [
+            {
+              number: 28,
+              title: "unclear",
+              url: "https://x/28",
+              labels: ["blocked", "dispatch:ready"],
+              authorLogin: "BourbonBaggers",
+            },
+            {
+              number: 29,
+              title: "stale",
+              url: "https://x/29",
+              labels: ["blocked", "dispatch:ready"],
+              authorLogin: "BourbonBaggers",
+            },
+          ],
+        }),
+        issueBody: async (issue: number) =>
+          issue === 28 ? "Blocked by #26." : "Blocked by #27.",
+        issueState: async (issue: number) => (issue === 26 ? "UNKNOWN" : "CLOSED"),
+        removeLabel: async (issue: number) => {
+          removed.push(issue);
+          return true;
+        },
+        comment: async () => true,
+      } as unknown as DispatcherDeps["github"],
+      blockedQueueAuditor: async (prompt) => {
+        const parsed = JSON.parse(prompt.split("\n").at(-1)!) as { issue: { number: number } };
+        auditedIssues.push(parsed.issue.number);
+        return { ok: true, workable: true, rationale: "closed" };
+      },
+      now: () => 5_000,
+    };
+
+    const result = await runScanOnce(deps);
+
+    assert.match(result.message, /issue #29/);
+    assert.deepEqual(auditedIssues, [28, 29]);
+    assert.deepEqual(removed, [29]);
+    assert.equal(store.allRuns().length, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runScanOnce fails closed when blocked-label removal fails", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    let comments = 0;
+    const deps: DispatcherDeps = {
+      config: {
+        ...autoshipConfig({ autoshipCmd: null }),
+        dryRun: false,
+        worktreeDir: "/worktrees",
+        authorAuth: { ok: true, mode: "none", trustedAuthors: new Set() },
+        blockedQueueAuditModel: "claude-sonnet-5",
+        blockedQueueAuditEffortLabel: "effort:low",
+        blockedQueueAuditMaxCandidates: 1,
+      } as DispatcherConfig,
+      store,
+      logger: createLogger("error", () => undefined),
+      notifier: { send: async () => undefined },
+      github: {
+        listOpenIssues: async () => ({
+          ok: true,
+          issues: [{
+            number: 28,
+            title: "blocked after deps",
+            url: "https://x/28",
+            labels: ["blocked", "dispatch:ready"],
+            authorLogin: "BourbonBaggers",
+          }],
+        }),
+        issueBody: async () => "Blocked by #26.",
+        issueState: async () => "CLOSED",
+        removeLabel: async () => false,
+        comment: async () => {
+          comments += 1;
+          return true;
+        },
+      } as unknown as DispatcherDeps["github"],
+      blockedQueueAuditor: async () => ({
+        ok: true,
+        workable: true,
+        rationale: "all blockers closed",
+      }),
+      now: () => 5_000,
+    };
+
+    const result = await runScanOnce(deps);
+
+    assert.match(result.message, /could not update issue #28/);
+    assert.equal(comments, 0);
+    assert.equal(store.allRuns().length, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("recheckHeldRun is a no-op while the issue still carries autoship-held", async () => {
   const dir = tmp();
   try {
