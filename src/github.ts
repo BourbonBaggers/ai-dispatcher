@@ -80,6 +80,10 @@ export function issueLabelsArgs(slug: string, issue: number): string[] {
   return ["issue", "view", String(issue), "--repo", slug, "--json", "labels"];
 }
 
+export function issueBodyArgs(slug: string, issue: number): string[] {
+  return ["issue", "view", String(issue), "--repo", slug, "--json", "body"];
+}
+
 export function prReadyArgs(slug: string, pr: number): string[] {
   return ["pr", "ready", String(pr), "--repo", slug];
 }
@@ -178,6 +182,18 @@ export class GithubClient {
     try {
       const raw = JSON.parse(result.stdout.trim()) as { labels?: Array<{ name: string }> };
       return (raw.labels ?? []).map((l) => l.name);
+    } catch {
+      return null;
+    }
+  }
+
+  /** The issue body, or null when the read fails or GitHub returns unexpected data. */
+  async issueBody(issue: number): Promise<string | null> {
+    const result = await this.exec("gh", issueBodyArgs(this.repo.slug, issue));
+    if (!result.ok) return null;
+    try {
+      const raw = JSON.parse(result.stdout.trim()) as { body?: unknown };
+      return typeof raw.body === "string" ? raw.body : null;
     } catch {
       return null;
     }

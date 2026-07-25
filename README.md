@@ -64,7 +64,7 @@ model, and effort atomically at pickup:
 | `route:human-override`          | makes one compatible agent/model pair and optional effort an explicit initial pin  |
 | `queue jump` / `technical debt` | move the issue between priority tiers                                              |
 | `agent-working`                 | the dispatcher is actively on it (added on claim, cleared on non-resumable finish) |
-| `needs-input` / `blocked`       | held for a human — skipped, not worked                                             |
+| `needs-input` / `blocked`       | held for a human during normal selection; `blocked` can be conservatively re-audited only when the queue is otherwise idle |
 
 The `model:*` allowlist is **data-driven**: it is derived from the curated registry in
 `src/models.ts`, not hand-maintained. The live lanes are `model:claude-haiku-4.5` (fast),
@@ -203,6 +203,9 @@ environment form; every variable is documented there.
 | `--state-dir <path>`       | `DISPATCHER_STATE_DIR`              | `./state`                  | durable state directory                                                                        |
 | `--autoship-deploy-dir`    | `DISPATCHER_AUTOSHIP_DEPLOYMENT_DIR` | state/repo-specific      | dedicated checkout used only for merge/deploy/rollback                                         |
 | `--autoship-timeout-minutes` | `DISPATCHER_AUTOSHIP_TIMEOUT_MINUTES` | `120`                  | complete merge/deploy/verify/rollback command ceiling                                           |
+| `--blocked-audit-model`    | `DISPATCHER_BLOCKED_QUEUE_AUDIT_MODEL` | `claude-sonnet-5`      | non-frontier model used to audit stale `blocked` holds when the normal queue is drained         |
+| `--blocked-audit-effort`   | `DISPATCHER_BLOCKED_QUEUE_AUDIT_EFFORT` | `effort:low`          | effort label used for stale `blocked` audits                                                    |
+| `--blocked-audit-max`      | `DISPATCHER_BLOCKED_QUEUE_AUDIT_MAX_CANDIDATES` | `3`             | maximum blocked issues audited in one otherwise-idle scan                                       |
 | `--author-auth <mode>`     | `DISPATCHER_ISSUE_AUTHOR_AUTH_MODE` | `author-allowlist`         | `author-allowlist` requires the original issue author to be trusted; `none` allows all authors |
 | `--trusted-authors <list>` | `DISPATCHER_TRUSTED_ISSUE_AUTHORS`  | _(required for allowlist)_ | comma-separated GitHub usernames, matched case-insensitively                                   |
 | `--log-level <level>`      | `DISPATCHER_LOG_LEVEL`              | `info`                     | `debug\|info\|warn\|error`                                                                     |
@@ -330,6 +333,15 @@ the issue claim, posts the exhausted evidence, and sends one high-priority page.
 
 GitHub transport/auth/read failures are parked as unknown and rechecked; they are not
 misreported as red CI, merge failure, or operator removal of an exhausted hold.
+
+When no active, resumable, parked, held, or normally eligible issue remains, the
+dispatcher can audit a bounded slice of the `blocked` queue. It reads each candidate's
+body, checks referenced dependency issue states, and asks the configured non-frontier
+model for a conservative JSON verdict. Any open/unknown dependency, unreadable issue
+body, model failure, invalid audit configuration, or label mutation failure leaves labels
+unchanged and creates no claim. The first issue proven workable has only `blocked`
+removed, gets an audit comment, and waits for a later normal scan; `needs-input`,
+`autoship-held`, and other holds are never cleared by this path.
 
 Draft and review-required PRs are promoted and admin-merged. Mixed Markdown/source
 conflicts that the deterministic generated-file repair cannot resolve are handed to the
