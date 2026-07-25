@@ -208,6 +208,67 @@ test("parseCliConfig resolves ciEscalationModel from env", () => {
   assert.equal(result.config!.ciEscalationModel, "claude-sonnet-5");
 });
 
+test("parseCliConfig resolves blocked queue audit defaults", () => {
+  const result = parseCliConfig(["--repo", "acme/widgets"], {
+    DISPATCHER_REPO_DIR: "/mirror",
+    DISPATCHER_WORKTREE_DIR: "/worktrees",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.config!.blockedQueueAuditModel, "claude-sonnet-5");
+  assert.equal(result.config!.blockedQueueAuditEffortLabel, "effort:low");
+  assert.equal(result.config!.blockedQueueAuditMaxCandidates, 3);
+});
+
+test("parseCliConfig resolves blocked queue audit settings from env or flags", () => {
+  const fromEnv = parseCliConfig(["--repo", "acme/widgets"], {
+    DISPATCHER_REPO_DIR: "/mirror",
+    DISPATCHER_WORKTREE_DIR: "/worktrees",
+    DISPATCHER_BLOCKED_QUEUE_AUDIT_MODEL: "gpt-5.5",
+    DISPATCHER_BLOCKED_QUEUE_AUDIT_EFFORT: "effort:medium",
+    DISPATCHER_BLOCKED_QUEUE_AUDIT_MAX_CANDIDATES: "5",
+  });
+  assert.equal(fromEnv.ok, true);
+  assert.equal(fromEnv.config!.blockedQueueAuditModel, "gpt-5.5");
+  assert.equal(fromEnv.config!.blockedQueueAuditEffortLabel, "effort:medium");
+  assert.equal(fromEnv.config!.blockedQueueAuditMaxCandidates, 5);
+
+  const fromFlags = parseCliConfig(
+    [
+      "--repo",
+      "acme/widgets",
+      "--blocked-audit-model",
+      "claude-sonnet-5",
+      "--blocked-audit-effort",
+      "effort:high",
+      "--blocked-audit-max",
+      "2",
+    ],
+    {
+      DISPATCHER_REPO_DIR: "/mirror",
+      DISPATCHER_WORKTREE_DIR: "/worktrees",
+      DISPATCHER_BLOCKED_QUEUE_AUDIT_MODEL: "gpt-5.5",
+      DISPATCHER_BLOCKED_QUEUE_AUDIT_EFFORT: "effort:medium",
+      DISPATCHER_BLOCKED_QUEUE_AUDIT_MAX_CANDIDATES: "5",
+    },
+  );
+  assert.equal(fromFlags.ok, true);
+  assert.equal(fromFlags.config!.blockedQueueAuditModel, "claude-sonnet-5");
+  assert.equal(fromFlags.config!.blockedQueueAuditEffortLabel, "effort:high");
+  assert.equal(fromFlags.config!.blockedQueueAuditMaxCandidates, 2);
+});
+
+test("parseCliConfig leaves invalid blocked queue audit model to fail closed at scan time", () => {
+  const result = parseCliConfig(["--repo", "acme/widgets"], {
+    DISPATCHER_REPO_DIR: "/mirror",
+    DISPATCHER_WORKTREE_DIR: "/worktrees",
+    DISPATCHER_BLOCKED_QUEUE_AUDIT_MODEL: "claude-opus-4-8",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.config!.blockedQueueAuditModel, "claude-opus-4-8");
+});
+
 test("parseCliConfig rejects an unknown ciEscalationModel", () => {
   const result = parseCliConfig(["--repo", "acme/widgets"], {
     DISPATCHER_REPO_DIR: "/mirror",

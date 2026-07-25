@@ -7,6 +7,7 @@ import {
   commentArgs,
   issueStateArgs,
   issueLabelsArgs,
+  issueBodyArgs,
   prReadyArgs,
   closeIssueArgs,
   reopenIssueArgs,
@@ -29,6 +30,7 @@ test("every gh argv builder threads --repo <slug> through", () => {
     commentArgs(SLUG, 5),
     issueStateArgs(SLUG, 5),
     issueLabelsArgs(SLUG, 5),
+    issueBodyArgs(SLUG, 5),
     prReadyArgs(SLUG, 7),
     closeIssueArgs(SLUG, 5),
     reopenIssueArgs(SLUG, 5),
@@ -231,6 +233,21 @@ test("issueLabels preserves unknown on a gh failure or malformed JSON", async ()
   const malformed = fakeExec(() => ok("not json"));
   const malformedClient = new GithubClient(repo.ok ? repo.value : (undefined as never), malformed.fn);
   assert.equal(await malformedClient.issueLabels(6), null);
+});
+
+test("issueBody parses the issue body and fails closed on unreadable data", async () => {
+  const repo = parseRepoSlug(SLUG);
+  const succeeding = fakeExec(() => ok(JSON.stringify({ body: "Blocked by #26." })));
+  const successClient = new GithubClient(repo.ok ? repo.value : (undefined as never), succeeding.fn);
+  assert.equal(await successClient.issueBody(6), "Blocked by #26.");
+
+  const failing = fakeExec(() => ({ ok: false, stdout: "", stderr: "boom", code: 1 }));
+  const failClient = new GithubClient(repo.ok ? repo.value : (undefined as never), failing.fn);
+  assert.equal(await failClient.issueBody(6), null);
+
+  const malformed = fakeExec(() => ok("not json"));
+  const malformedClient = new GithubClient(repo.ok ? repo.value : (undefined as never), malformed.fn);
+  assert.equal(await malformedClient.issueBody(6), null);
 });
 
 test("prChecksState separates red, pending, green, and unreadable GitHub state", async () => {

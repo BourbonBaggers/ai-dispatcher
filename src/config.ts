@@ -15,6 +15,11 @@ import {
   parseGeneratedConflictAllowlist,
 } from "./generated-conflict-recovery.ts";
 import { modelByCliModel } from "./models.ts";
+import {
+  DEFAULT_BLOCKED_QUEUE_AUDIT_EFFORT_LABEL,
+  DEFAULT_BLOCKED_QUEUE_AUDIT_MAX_CANDIDATES,
+  DEFAULT_BLOCKED_QUEUE_AUDIT_MODEL,
+} from "./blocked-queue.ts";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -113,6 +118,12 @@ export interface DispatcherConfig {
    * A CLI model identifier (models.ts `cliModel`), not a model:* label.
    */
   ciEscalationModel: string;
+  /** CLI model identifier for conservative stale-blocked-issue audits. */
+  blockedQueueAuditModel: string;
+  /** effort:* label for stale-blocked-issue audits. */
+  blockedQueueAuditEffortLabel: string;
+  /** Maximum blocked issues to audit in one otherwise-idle scan. */
+  blockedQueueAuditMaxCandidates: number;
   authorAuth: DispatcherAuthorAuthConfig;
   ntfyUrl: string | null;
   ntfyTopic: string | null;
@@ -165,6 +176,18 @@ Options:
   --autoship-timeout-minutes <minutes>
                              Merge/deploy/verify/rollback ceiling (default:
                              DISPATCHER_AUTOSHIP_TIMEOUT_MINUTES or 120).
+  --blocked-audit-model <model>
+                             Non-frontier CLI model for stale blocked-queue audits
+                             (default: DISPATCHER_BLOCKED_QUEUE_AUDIT_MODEL or
+                             ${DEFAULT_BLOCKED_QUEUE_AUDIT_MODEL}).
+  --blocked-audit-effort <effort:*>
+                             Effort label for stale blocked-queue audits (default:
+                             DISPATCHER_BLOCKED_QUEUE_AUDIT_EFFORT or
+                             ${DEFAULT_BLOCKED_QUEUE_AUDIT_EFFORT_LABEL}).
+  --blocked-audit-max <count>
+                             Maximum blocked issues audited in one idle scan (default:
+                             DISPATCHER_BLOCKED_QUEUE_AUDIT_MAX_CANDIDATES or
+                             ${DEFAULT_BLOCKED_QUEUE_AUDIT_MAX_CANDIDATES}).
   --author-auth <mode>       Issue author authorization: author-allowlist | none
                              (default: DISPATCHER_ISSUE_AUTHOR_AUTH_MODE or author-allowlist).
   --trusted-authors <list>   Comma-separated trusted GitHub usernames for author-allowlist
@@ -206,6 +229,9 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
         "worktree-dir": { type: "string" },
         "autoship-deploy-dir": { type: "string" },
         "autoship-timeout-minutes": { type: "string" },
+        "blocked-audit-model": { type: "string" },
+        "blocked-audit-effort": { type: "string" },
+        "blocked-audit-max": { type: "string" },
         "author-auth": { type: "string" },
         "trusted-authors": { type: "string" },
         "log-level": { type: "string" },
@@ -267,6 +293,14 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
     env.DISPATCHER_GENERATED_CONFLICT_ALLOWLIST,
   );
   const generatedConflictRegen = env.DISPATCHER_GENERATED_CONFLICT_REGEN_CMD;
+  const blockedQueueAuditModel =
+    ((values["blocked-audit-model"] as string | undefined) ??
+      env.DISPATCHER_BLOCKED_QUEUE_AUDIT_MODEL ??
+      DEFAULT_BLOCKED_QUEUE_AUDIT_MODEL).trim();
+  const blockedQueueAuditEffortLabel =
+    ((values["blocked-audit-effort"] as string | undefined) ??
+      env.DISPATCHER_BLOCKED_QUEUE_AUDIT_EFFORT ??
+      DEFAULT_BLOCKED_QUEUE_AUDIT_EFFORT_LABEL).trim();
   const authorAuth = resolveAuthorAuthConfig(
     (values["author-auth"] as string | undefined) ?? env.DISPATCHER_ISSUE_AUTHOR_AUTH_MODE,
     (values["trusted-authors"] as string | undefined) ?? env.DISPATCHER_TRUSTED_ISSUE_AUTHORS,
@@ -320,6 +354,13 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
     ),
     ciSelfHealMaxAttempts: positiveInt(env.DISPATCHER_CI_SELF_HEAL_MAX_ATTEMPTS, 2),
     ciEscalationModel,
+    blockedQueueAuditModel,
+    blockedQueueAuditEffortLabel,
+    blockedQueueAuditMaxCandidates: positiveInt(
+      (values["blocked-audit-max"] as string | undefined) ??
+        env.DISPATCHER_BLOCKED_QUEUE_AUDIT_MAX_CANDIDATES,
+      DEFAULT_BLOCKED_QUEUE_AUDIT_MAX_CANDIDATES,
+    ),
     authorAuth,
     ntfyUrl: ntfyUrl && ntfyUrl.trim() !== "" ? ntfyUrl : null,
     ntfyTopic: ntfyTopic && ntfyTopic.trim() !== "" ? ntfyTopic : null,

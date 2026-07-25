@@ -67,7 +67,19 @@ import {
   updateRecovery,
   type RecoveryKind,
 } from "./recovery-policy.ts";
-import { terminateProcessTree } from "./exec.ts";
+import { run as execRun, terminateProcessTree } from "./exec.ts";
+import {
+  BLOCKED_LABEL,
+  blockedQueueAuditPrompt,
+  decideBlockedQueueAudit,
+  parseModelAuditVerdict,
+  referencedIssueNumbers,
+  resolveBlockedQueueAuditConfig,
+  selectBlockedQueueAuditCandidates,
+  type BlockedQueueAuditConfig,
+  type DependencyEvidence,
+  type ModelAuditVerdict,
+} from "./blocked-queue.ts";
 
 /**
  * How many times the dispatcher relaunches a run by itself before leaving it for a
@@ -98,6 +110,11 @@ export interface DispatcherDeps {
   terminateOrphan?: (pid: number) => void;
   /** Injectable agent launcher for crash-boundary tests. */
   launch?: typeof launchRun;
+  /** Injectable stale-blocked-queue semantic auditor for deterministic tests. */
+  blockedQueueAuditor?: (
+    prompt: string,
+    config: BlockedQueueAuditConfig,
+  ) => Promise<ModelAuditVerdict>;
 }
 
 export interface ScanResult {
@@ -674,6 +691,8 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   });
 
   if (!target) {
+    const recovered = await recoverBlockedQueueIfIdle(deps, listing.issues, claimedByIssue);
+    if (recovered.attempted) return { started: null, message: recovered.message };
     return { started: null, message: "No eligible issues." };
   }
 
@@ -743,6 +762,162 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   pruneOldRuns(deps);
 
   return { started: terminal, message: `Ran ${agent} on issue #${issue.number}.` };
+}
+
+export async function runBlockedQueueAuditor(
+  prompt: string,
+  config: BlockedQueueAuditConfig,
+): Promise<ModelAuditVerdict> {
+  const args =
+    config.model.cli === "claude"
+      ? [
+          "-p",
+          "--model",
+          config.model.cliModel,
+          "--effort",
+          config.cliEffort,
+          "--output-format",
+          "text",
+        ]
+      : [
+          "exec",
+          "--model",
+          config.model.cliModel,
+          "-c",
+          `model_reasoning_effort=${config.cliEffort}`,
+          "-",
+        ];
+  const result = await execRun(config.model.cli, args, {
+    stdin: prompt,
+    timeoutMs: 5 * 60_000,
+    killProcessGroup: true,
+    maxOutputBytes: 256 * 1024,
+  });
+  if (!result.ok) {
+    return {
+      ok: false,
+      reason: `${config.model.cli} audit exited ${result.code ?? "unknown"}`,
+    };
+  }
+  return parseModelAuditVerdict(result.stdout);
+}
+
+async function recoverBlockedQueueIfIdle(
+  deps: DispatcherDeps,
+  issues: GithubIssue[],
+  claimedByIssue: Map<number, string>,
+): Promise<{ attempted: boolean; message: string }> {
+  const auditConfig = resolveBlockedQueueAuditConfig(
+    deps.config.blockedQueueAuditModel,
+    deps.config.blockedQueueAuditEffortLabel,
+    deps.config.blockedQueueAuditMaxCandidates,
+  );
+  if (!auditConfig.ok) {
+    deps.logger.warn("blocked queue audit disabled by invalid configuration", {
+      reason: auditConfig.reason,
+    });
+    return { attempted: false, message: "No eligible issues." };
+  }
+
+  const candidates = selectBlockedQueueAuditCandidates(issues, {
+    claimedByIssue,
+    authorAuth: deps.config.authorAuth,
+    maxCandidates: auditConfig.value.maxCandidates,
+  });
+  if (candidates.length === 0) return { attempted: false, message: "No eligible issues." };
+
+  for (const candidate of candidates) {
+    const body = await deps.github.issueBody(candidate.issue.number);
+    if (body === null) {
+      deps.logger.warn("blocked queue audit kept issue blocked because body could not be read", {
+        issue: candidate.issue.number,
+      });
+      continue;
+    }
+    const dependencyNumbers = referencedIssueNumbers(body, candidate.issue.number);
+    const dependencies: DependencyEvidence[] = [];
+    for (const dependency of dependencyNumbers) {
+      const state = await deps.github.issueState(dependency);
+      dependencies.push({
+        issueNumber: dependency,
+        state: state === "OPEN" || state === "CLOSED" ? state : "UNKNOWN",
+      });
+    }
+
+    const prompt = blockedQueueAuditPrompt({
+      issue: candidate.issue,
+      body,
+      dependencies,
+    });
+    const verdict = await (deps.blockedQueueAuditor ?? runBlockedQueueAuditor)(
+      prompt,
+      auditConfig.value,
+    );
+    const decision = decideBlockedQueueAudit(dependencies, verdict);
+    if (decision.action !== "unblock") {
+      deps.logger.info("blocked queue audit kept issue blocked", {
+        issue: candidate.issue.number,
+        reason: decision.reason,
+        dependencies: decision.dependencies,
+      });
+      continue;
+    }
+
+    const dependencySummary = decision.dependencies
+      .map((dep) => `#${dep.issueNumber}:${dep.state}`)
+      .join(", ");
+    if (deps.config.dryRun) {
+      deps.logger.info("blocked queue audit would remove stale blocked label", {
+        issue: candidate.issue.number,
+        rationale: decision.rationale,
+        dependencies: dependencySummary,
+        model: auditConfig.value.model.cliModel,
+        effort: auditConfig.value.cliEffort,
+      });
+      return {
+        attempted: true,
+        message: `[dry-run] would remove ${BLOCKED_LABEL} from issue #${candidate.issue.number}.`,
+      };
+    }
+
+    const removed = await deps.github.removeLabel(candidate.issue.number, BLOCKED_LABEL);
+    if (!removed) {
+      deps.logger.warn("blocked queue audit could not remove blocked label", {
+        issue: candidate.issue.number,
+        rationale: decision.rationale,
+      });
+      return {
+        attempted: true,
+        message: `Blocked queue audit could not update issue #${candidate.issue.number}.`,
+      };
+    }
+    await deps.github.comment(
+      candidate.issue.number,
+      [
+        "🤖 **Blocked queue audit**",
+        "",
+        "The dispatcher removed `blocked` after a conservative stale-hold audit.",
+        `Rationale: ${decision.rationale}`,
+        dependencySummary ? `Dependencies: ${dependencySummary}` : null,
+        `Audit model: \`${auditConfig.value.model.cliModel}\`, effort \`${auditConfig.value.cliEffort}\``,
+        "",
+        "The issue is not claimed by this audit; it will re-enter normal routing on a later scan.",
+      ].filter((line): line is string => line !== null).join("\n"),
+    );
+    deps.logger.info("blocked queue audit removed stale blocked label", {
+      issue: candidate.issue.number,
+      rationale: decision.rationale,
+      dependencies: dependencySummary,
+      model: auditConfig.value.model.cliModel,
+      effort: auditConfig.value.cliEffort,
+    });
+    return {
+      attempted: true,
+      message: `Removed stale ${BLOCKED_LABEL} label from issue #${candidate.issue.number}.`,
+    };
+  }
+
+  return { attempted: true, message: "No eligible issues; blocked queue audit found no stale holds." };
 }
 
 /** Re-enters the SAME run record in resume mode; the branch, checkout, and plan carry over. */
