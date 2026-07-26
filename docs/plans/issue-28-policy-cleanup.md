@@ -31,7 +31,7 @@ rather than by post-hoc diff policing across an unbounded write surface.
   `files[]` and vice versa (internal consistency).
 - Unit test every validation branch.
 
-## Milestone 2: CLI config + usage text
+## [DONE] Milestone 2: CLI config + usage text
 
 - `parsePolicyCleanupCliConfig(argv, env)` in `src/config.ts`: `--repo` (required,
   `DISPATCHER_REPO` fallback), `--dry-run`, `--log-level`. Resolves

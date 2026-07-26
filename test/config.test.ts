@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseRepoSlug, parseCliConfig, parseShipCliConfig } from "../src/config.ts";
+import {
+  parseRepoSlug,
+  parseCliConfig,
+  parseShipCliConfig,
+  parsePolicyCleanupCliConfig,
+} from "../src/config.ts";
 
 test("parseRepoSlug accepts a canonical owner/repository", () => {
   const result = parseRepoSlug("BourbonBaggers/internal-tools");
@@ -408,6 +413,46 @@ test("parseShipCliConfig --autoship-deploy-dir overrides the computed default", 
 
 test("parseShipCliConfig --help returns usage without requiring --repo/--pr", () => {
   const result = parseShipCliConfig(["--help"], {});
+  assert.equal(result.ok, true);
+  assert.equal(result.help, true);
+  assert.match(result.message ?? "", /Usage:/);
+});
+
+test("parsePolicyCleanupCliConfig requires --repo", () => {
+  const result = parsePolicyCleanupCliConfig([], {});
+  assert.equal(result.ok, false);
+  assert.match(result.message ?? "", /Invalid repository/);
+});
+
+test("parsePolicyCleanupCliConfig defaults dryRun to false and uses the default escalation model", () => {
+  const result = parsePolicyCleanupCliConfig(["--repo", "acme/widgets"], {});
+  assert.equal(result.ok, true);
+  assert.equal(result.config?.dryRun, false);
+  assert.equal(result.config?.ciEscalationModel, "claude-opus-4-8");
+});
+
+test("parsePolicyCleanupCliConfig --dry-run flag is honored", () => {
+  const result = parsePolicyCleanupCliConfig(["--repo", "acme/widgets", "--dry-run"], {});
+  assert.equal(result.ok, true);
+  assert.equal(result.config?.dryRun, true);
+});
+
+test("parsePolicyCleanupCliConfig falls back to DISPATCHER_REPO", () => {
+  const result = parsePolicyCleanupCliConfig([], { DISPATCHER_REPO: "acme/widgets" });
+  assert.equal(result.ok, true);
+  assert.equal(result.config?.repo.slug, "acme/widgets");
+});
+
+test("parsePolicyCleanupCliConfig rejects an invalid DISPATCHER_CI_ESCALATION_MODEL", () => {
+  const result = parsePolicyCleanupCliConfig(["--repo", "acme/widgets"], {
+    DISPATCHER_CI_ESCALATION_MODEL: "not-a-real-model",
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.message ?? "", /Invalid DISPATCHER_CI_ESCALATION_MODEL/);
+});
+
+test("parsePolicyCleanupCliConfig --help returns usage without requiring --repo", () => {
+  const result = parsePolicyCleanupCliConfig(["--help"], {});
   assert.equal(result.ok, true);
   assert.equal(result.help, true);
   assert.match(result.message ?? "", /Usage:/);
