@@ -81,8 +81,31 @@ const LOG_LEVELS: readonly LogLevel[] = ["debug", "info", "warn", "error"];
 /** Last-resort model for the one escalation attempt after self-heal is exhausted. */
 export const DEFAULT_CI_ESCALATION_MODEL = "claude-opus-4-8";
 
+type EnvLike = Record<string, string | undefined>;
+
 function isLogLevel(value: string): value is LogLevel {
   return (LOG_LEVELS as readonly string[]).includes(value);
+}
+
+/**
+ * Resolves `DISPATCHER_CI_ESCALATION_MODEL` the same way for every command that reuses
+ * the escalation model (the polling loop and `target policy-cleanup`, issue #28) so the
+ * validation stays in one place.
+ */
+export function resolveCiEscalationModel(env: EnvLike): { ok: true; value: string } | { ok: false; reason: string } {
+  const ciEscalationModel =
+    env.DISPATCHER_CI_ESCALATION_MODEL && env.DISPATCHER_CI_ESCALATION_MODEL.trim() !== ""
+      ? env.DISPATCHER_CI_ESCALATION_MODEL.trim()
+      : DEFAULT_CI_ESCALATION_MODEL;
+  if (!modelByCliModel(ciEscalationModel)) {
+    return {
+      ok: false,
+      reason:
+        `Invalid DISPATCHER_CI_ESCALATION_MODEL "${ciEscalationModel}" — not a known model ` +
+        "(see MODELS in models.ts).",
+    };
+  }
+  return { ok: true, value: ciEscalationModel };
 }
 
 export interface DispatcherConfig {
@@ -155,6 +178,10 @@ Usage:
   ai-dispatcher ship --repo <owner/repo> --pr <n> [--issue <n>]
                              Merge, deploy, and verify one ad hoc pull request without a
                              dispatcher issue or agent run. See "ai-dispatcher ship --help".
+  ai-dispatcher target policy-cleanup --repo <owner/repo> [--dry-run]
+                             Use the escalation model to repair conflicts between a target
+                             repo's agent instructions and the canonical dispatcher policy.
+                             See "ai-dispatcher target policy-cleanup --help".
 
 Required:
   --repo <owner/repo>        Target GitHub repository (canonical owner/repository).
@@ -198,8 +225,6 @@ Options:
 Example:
   ai-dispatcher --repo BourbonBaggers/internal-tools
 `;
-
-type EnvLike = Record<string, string | undefined>;
 
 function positiveInt(raw: string | undefined, fallback: number): number {
   if (raw === undefined || raw.trim() === "") return fallback;
@@ -274,18 +299,11 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
     };
   }
 
-  const ciEscalationModel =
-    env.DISPATCHER_CI_ESCALATION_MODEL && env.DISPATCHER_CI_ESCALATION_MODEL.trim() !== ""
-      ? env.DISPATCHER_CI_ESCALATION_MODEL.trim()
-      : DEFAULT_CI_ESCALATION_MODEL;
-  if (!modelByCliModel(ciEscalationModel)) {
-    return {
-      ok: false,
-      message:
-        `Invalid DISPATCHER_CI_ESCALATION_MODEL "${ciEscalationModel}" — not a known model ` +
-        `(see MODELS in models.ts).\n\n${USAGE}`,
-    };
+  const ciEscalationModelResult = resolveCiEscalationModel(env);
+  if (!ciEscalationModelResult.ok) {
+    return { ok: false, message: `${ciEscalationModelResult.reason}\n\n${USAGE}` };
   }
+  const ciEscalationModel = ciEscalationModelResult.value;
 
   const envSource = env.DISPATCHER_ENV_SOURCE_DIR;
   const autoship = env.DISPATCHER_AUTOSHIP_CMD;
@@ -516,6 +534,99 @@ export function parseShipCliConfig(argv: string[], env: EnvLike): ShipCliParseRe
       autoshipDeploymentDir && autoshipDeploymentDir.trim() !== ""
         ? expandHome(autoshipDeploymentDir)
         : join(stateDir, "autoship-deployments", `${repoResult.value.owner}-${repoResult.value.repo}`),
+    logLevel: logLevelRaw,
+  };
+
+  return { ok: true, config };
+}
+
+// ── `ai-dispatcher target policy-cleanup` — on-demand policy audit (issue #28) ─────────
+
+export interface PolicyCleanupCliConfig {
+  repo: RepoSlug;
+  dryRun: boolean;
+  ciEscalationModel: string;
+  logLevel: LogLevel;
+}
+
+export interface PolicyCleanupCliParseResult {
+  ok: boolean;
+  config?: PolicyCleanupCliConfig;
+  message?: string;
+  help?: boolean;
+}
+
+export const POLICY_CLEANUP_USAGE = `ai-dispatcher target policy-cleanup — use the configured escalation model to find and
+repair conflicts between a target repository's committed agent-instruction files
+(AGENTS.md, CLAUDE.md) and the canonical dispatcher policy, then open a ready PR.
+
+Explicitly invoked only; never runs during a normal scan. A clean repository produces no
+branch or PR. Delivery (merge, deploy, verification) is the existing one-shot \`ship\`
+command's job (issue #27), not this command's.
+
+Usage:
+  ai-dispatcher target policy-cleanup --repo <owner/repository> [--dry-run]
+
+Required:
+  --repo <owner/repo>   Target GitHub repository (canonical owner/repository).
+                        May also be supplied via DISPATCHER_REPO; the flag wins.
+
+Options:
+  --dry-run             Report conflicts without writing, committing, or opening a PR.
+  --log-level <level>   debug | info | warn | error (default: DISPATCHER_LOG_LEVEL or info).
+  --help                Show this message.
+
+Uses DISPATCHER_CI_ESCALATION_MODEL (same setting the polling loop uses for CI repair
+escalation) rather than introducing another model setting.
+
+Example:
+  ai-dispatcher target policy-cleanup --repo BourbonBaggers/internal-tools --dry-run
+`;
+
+/** Parses `ai-dispatcher target policy-cleanup ...` args, independent of the loop config. */
+export function parsePolicyCleanupCliConfig(argv: string[], env: EnvLike): PolicyCleanupCliParseResult {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: argv,
+      allowPositionals: false,
+      options: {
+        repo: { type: "string" },
+        "dry-run": { type: "boolean", default: false },
+        "log-level": { type: "string" },
+        help: { type: "boolean", default: false },
+      },
+    });
+  } catch (err) {
+    return { ok: false, message: `${(err as Error).message}\n\n${POLICY_CLEANUP_USAGE}` };
+  }
+
+  const values = parsed.values;
+  if (values.help) return { ok: true, help: true, message: POLICY_CLEANUP_USAGE };
+
+  const repoResult = parseRepoSlug((values.repo as string | undefined) ?? env.DISPATCHER_REPO);
+  if (!repoResult.ok) {
+    return { ok: false, message: `Invalid repository: ${repoResult.reason}\n\n${POLICY_CLEANUP_USAGE}` };
+  }
+
+  const logLevelRaw =
+    (values["log-level"] as string | undefined) ?? env.DISPATCHER_LOG_LEVEL ?? "info";
+  if (!isLogLevel(logLevelRaw)) {
+    return {
+      ok: false,
+      message: `Invalid --log-level "${logLevelRaw}" (debug|info|warn|error).\n\n${POLICY_CLEANUP_USAGE}`,
+    };
+  }
+
+  const ciEscalationModelResult = resolveCiEscalationModel(env);
+  if (!ciEscalationModelResult.ok) {
+    return { ok: false, message: `${ciEscalationModelResult.reason}\n\n${POLICY_CLEANUP_USAGE}` };
+  }
+
+  const config: PolicyCleanupCliConfig = {
+    repo: repoResult.value,
+    dryRun: Boolean(values["dry-run"]),
+    ciEscalationModel: ciEscalationModelResult.value,
     logLevel: logLevelRaw,
   };
 

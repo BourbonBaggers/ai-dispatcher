@@ -7,7 +7,13 @@
  * exits non-zero with usage text.
  */
 
-import { parseCliConfig, parseShipCliConfig, expandHome, type DispatcherConfig } from "./config.ts";
+import {
+  parseCliConfig,
+  parseShipCliConfig,
+  parsePolicyCleanupCliConfig,
+  expandHome,
+  type DispatcherConfig,
+} from "./config.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { StateStore, LockHeldError } from "./state.ts";
@@ -20,6 +26,11 @@ import { TelemetryStore } from "./telemetry.ts";
 import { buildRoutingReport } from "./report.ts";
 import { runHistoryCommand, runStatusCommand } from "./status.ts";
 import { shipRun, type ShipDeps, type ShipOutcome } from "./ship.ts";
+import {
+  resolvePolicyCleanupConfig,
+  runPolicyCleanup,
+  type PolicyCleanupOutcome,
+} from "./policy-cleanup.ts";
 
 /** Sleeps for `ms`, resolving early if the abort signal fires. */
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -171,10 +182,69 @@ export async function runShipCommand(
   return outcome.action === "shipped" ? 0 : 1;
 }
 
+/** Formats a `runPolicyCleanup` outcome as a single human-readable terminal line. */
+function formatPolicyCleanupOutcome(outcome: PolicyCleanupOutcome): string {
+  switch (outcome.action) {
+    case "clean":
+      return `No conflicts found. ${outcome.summary}`;
+    case "dry_run":
+      return `[dry-run] Would rewrite ${outcome.paths.join(", ")}. ${outcome.summary}`;
+    case "opened":
+      return `Opened PR #${outcome.pr} rewriting ${outcome.paths.join(", ")}. ${outcome.summary}`;
+    case "failed":
+      return `Not cleaned up: ${outcome.reason}`;
+  }
+}
+
+/** The `ai-dispatcher target policy-cleanup` subcommand (issue #28). */
+export async function runPolicyCleanupCommand(
+  argv: string[],
+  env: NodeJS.ProcessEnv,
+  out: (s: string) => void,
+  err: (s: string) => void,
+): Promise<number> {
+  const parsed = parsePolicyCleanupCliConfig(argv, env);
+  if (!parsed.ok) {
+    err(`${parsed.message}\n`);
+    return 2;
+  }
+  if (parsed.help) {
+    out(`${parsed.message}\n`);
+    return 0;
+  }
+  const config = parsed.config!;
+  const modelResult = resolvePolicyCleanupConfig(config.ciEscalationModel);
+  if (!modelResult.ok) {
+    err(`${modelResult.reason}\n`);
+    return 2;
+  }
+  const logger = createLogger(config.logLevel);
+
+  const outcome = await runPolicyCleanup(
+    {
+      github: new GithubClient(config.repo),
+      logger,
+      repoSlug: config.repo.slug,
+      config: modelResult.value,
+    },
+    { dryRun: config.dryRun },
+  );
+  out(`${formatPolicyCleanupOutcome(outcome)}\n`);
+  return outcome.action === "failed" ? 1 : 0;
+}
+
 export async function main(argv: string[]): Promise<number> {
   if (argv[0] === "ship") {
     return await runShipCommand(
       argv.slice(1),
+      process.env,
+      (s) => process.stdout.write(s),
+      (s) => process.stderr.write(s),
+    );
+  }
+  if (argv[0] === "target" && argv[1] === "policy-cleanup") {
+    return await runPolicyCleanupCommand(
+      argv.slice(2),
       process.env,
       (s) => process.stdout.write(s),
       (s) => process.stderr.write(s),
