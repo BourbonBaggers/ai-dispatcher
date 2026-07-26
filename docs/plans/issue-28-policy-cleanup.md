@@ -39,7 +39,7 @@ rather than by post-hoc diff policing across an unbounded write surface.
   New `POLICY_CLEANUP_USAGE` text; add the subcommand line to the top-level `USAGE`.
 - Unit test alongside the existing `config.test.ts` ship-config cases.
 
-## Milestone 3: `GithubClient.createPullRequest`
+## [DONE] Milestone 3: `GithubClient.createPullRequest`
 
 - Add `createPullRequestArgs` + `createPullRequest({ base, head, title, body })` to
   `src/github.ts`, body over stdin (`--body-file -`) like `comment()`, returning the

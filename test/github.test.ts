@@ -15,6 +15,7 @@ import {
   prMergeInfoArgs,
   prStateArgs,
   prTitleBodyArgs,
+  createPullRequestArgs,
   GithubClient,
 } from "../src/github.ts";
 import type { ExecFn, ExecResult } from "../src/exec.ts";
@@ -38,6 +39,7 @@ test("every gh argv builder threads --repo <slug> through", () => {
     prMergeInfoArgs(SLUG, 7),
     prStateArgs(SLUG, 7),
     prTitleBodyArgs(SLUG, 7),
+    createPullRequestArgs(SLUG, { base: "main", head: "feature", title: "t" }),
   ];
   for (const args of builders) {
     const idx = args.indexOf("--repo");
@@ -49,6 +51,12 @@ test("every gh argv builder threads --repo <slug> through", () => {
 test("comment uses --body-file - so the body never enters argv", () => {
   const args = commentArgs(SLUG, 12);
   assert.deepEqual(args.slice(-2), ["--body-file", "-"]);
+});
+
+test("createPullRequestArgs uses --body-file - so the body never enters argv", () => {
+  const args = createPullRequestArgs(SLUG, { base: "main", head: "feature", title: "t" });
+  assert.deepEqual(args.slice(-2), ["--body-file", "-"]);
+  assert.ok(!args.includes("--draft"));
 });
 
 test("issue number is passed as a string argument, not interpolated", () => {
@@ -280,6 +288,38 @@ test("markPrReady runs gh pr ready and reports success/failure", async () => {
   const failing = fakeExec(() => ({ ok: false, stdout: "", stderr: "already ready", code: 1 }));
   const failClient = new GithubClient(repo.ok ? repo.value : (undefined as never), failing.fn);
   assert.equal(await failClient.markPrReady(9), false);
+});
+
+test("createPullRequest parses the PR number from gh's printed URL and pipes body via stdin", async () => {
+  const repo = parseRepoSlug(SLUG);
+  const succeeding = fakeExec(() => ok("https://github.com/acme/widgets/pull/42\n"));
+  const client = new GithubClient(repo.ok ? repo.value : (undefined as never), succeeding.fn);
+  const pr = await client.createPullRequest({
+    base: "main",
+    head: "dispatcher/policy-cleanup-1",
+    title: "Reconcile agent instructions with dispatcher policy",
+    body: "Issue: none",
+  });
+  assert.equal(pr, 42);
+  assert.equal(succeeding.calls[0]!.stdin, "Issue: none");
+  assert.deepEqual(succeeding.calls[0]!.args.slice(-2), ["--body-file", "-"]);
+});
+
+test("createPullRequest fails closed on a gh failure or unparseable output", async () => {
+  const repo = parseRepoSlug(SLUG);
+  const failing = fakeExec(() => ({ ok: false, stdout: "", stderr: "already exists", code: 1 }));
+  const failClient = new GithubClient(repo.ok ? repo.value : (undefined as never), failing.fn);
+  assert.equal(
+    await failClient.createPullRequest({ base: "main", head: "h", title: "t", body: "b" }),
+    null,
+  );
+
+  const garbled = fakeExec(() => ok("not a url\n"));
+  const garbledClient = new GithubClient(repo.ok ? repo.value : (undefined as never), garbled.fn);
+  assert.equal(
+    await garbledClient.createPullRequest({ base: "main", head: "h", title: "t", body: "b" }),
+    null,
+  );
 });
 
 test("closeIssue runs gh issue close and reports success/failure", async () => {

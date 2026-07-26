@@ -120,6 +120,26 @@ export function prTitleBodyArgs(slug: string, pr: number): string[] {
   return ["pr", "view", String(pr), "--repo", slug, "--json", "title,body"];
 }
 
+export function createPullRequestArgs(
+  slug: string,
+  request: { base: string; head: string; title: string },
+): string[] {
+  return [
+    "pr",
+    "create",
+    "--repo",
+    slug,
+    "--base",
+    request.base,
+    "--head",
+    request.head,
+    "--title",
+    request.title,
+    "--body-file",
+    "-",
+  ];
+}
+
 // ── Client ─────────────────────────────────────────────────────────────────────
 
 export class GithubClient {
@@ -202,6 +222,28 @@ export class GithubClient {
   /** Promotes a draft PR to ready for review. */
   async markPrReady(pr: number): Promise<boolean> {
     return (await this.exec("gh", prReadyArgs(this.repo.slug, pr))).ok;
+  }
+
+  /**
+   * Opens a ready-for-review PR (never a draft) and returns its number, or null on
+   * failure. The body is free-form and is piped over stdin, never argv, like `comment()`.
+   */
+  async createPullRequest(request: {
+    base: string;
+    head: string;
+    title: string;
+    body: string;
+  }): Promise<number | null> {
+    const result = await this.exec(
+      "gh",
+      createPullRequestArgs(this.repo.slug, request),
+      { stdin: request.body },
+    );
+    if (!result.ok) return null;
+    const match = /\/pull\/(\d+)\s*$/.exec(result.stdout.trim());
+    if (!match) return null;
+    const pr = Number.parseInt(match[1]!, 10);
+    return Number.isInteger(pr) && pr > 0 ? pr : null;
   }
 
   /**
