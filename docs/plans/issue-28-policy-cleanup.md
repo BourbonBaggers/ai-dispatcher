@@ -46,7 +46,7 @@ rather than by post-hoc diff policing across an unbounded write surface.
   created PR number parsed from `gh pr create --json number` or `null` on failure.
 - Unit test the argv builder and the client method.
 
-## Milestone 4: orchestration (`runPolicyCleanup`)
+## [DONE] Milestone 4: orchestration (`runPolicyCleanup`)
 
 - In `src/policy-cleanup.ts`, add `runPolicyCleanup(deps, request)`: clones an isolated
   temp checkout (mirrors `generated-conflict-repair.ts`'s `mkdtempSync` pattern), reads

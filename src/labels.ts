@@ -23,7 +23,7 @@ export const AGENT_LABELS = {
 
 export type DispatcherAgent = (typeof AGENT_LABELS)[keyof typeof AGENT_LABELS];
 
-function isDispatcherAgent(cli: string): cli is DispatcherAgent {
+export function isDispatcherAgent(cli: string): cli is DispatcherAgent {
   return cli === "codex" || cli === "claude";
 }
 
