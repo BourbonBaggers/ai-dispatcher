@@ -13,7 +13,7 @@ no source-code edits, no GitHub issue required, structured-JSON model output (no
 free-write agentic session) so the permitted-file boundary is enforced by construction
 rather than by post-hoc diff policing across an unbounded write surface.
 
-## Milestone 1: pure audit logic (`src/policy-cleanup.ts`)
+## [DONE] Milestone 1: pure audit logic (`src/policy-cleanup.ts`)
 
 - `resolvePolicyCleanupConfig(rawModel)`: validates the CLI model via `modelByCliModel` +
   `isDispatchable` (frontier is fine and expected here — this reuses the escalation model,
