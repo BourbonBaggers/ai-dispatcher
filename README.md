@@ -173,6 +173,29 @@ resolved — an already-merged PR is redeployed and reverified by its exact merg
 rerunning after a partial failure is safe. `--issue` is optional; without it, no issue
 operation occurs at all. Exit code is `0` only when production is verified delivered.
 
+## On-demand policy cleanup for target repositories (#28)
+
+`target policy-cleanup` uses the configured escalation model
+(`DISPATCHER_CI_ESCALATION_MODEL`, the same setting used for CI repair escalation — no new
+model setting is introduced) to audit a target repository's committed agent-instruction
+files (`AGENTS.md`, `CLAUDE.md`) for conflicts with the canonical dispatcher policy
+(`src/target-policy.ts`), and to repair only real conflicts:
+
+```bash
+ai-dispatcher target policy-cleanup --repo owner/repo
+ai-dispatcher target policy-cleanup --repo owner/repo --dry-run   # report only, no PR
+```
+
+This is explicitly invoked only — it never runs during a normal scan. The model returns
+structured JSON naming full replacement content for the (at most two) files that
+conflict; the audited file set is a fixed allowlist, so an out-of-scope path in the
+verdict, or an out-of-scope change in the resulting working tree, aborts before anything
+is published. A clean repository produces no branch or PR. A real conflict is committed
+to a dedicated `dispatcher/policy-cleanup-<timestamp>` branch and opened as a ready (never
+draft) PR with no GitHub auto-close keyword and no associated issue — delivery from there
+is the existing one-shot [`ship`](#one-shot-ship-for-ad-hoc-pull-requests-27) command's
+job, not this command's.
+
 ## Requirements
 
 - **Node.js 24+** (the service runs its TypeScript directly via native type-stripping; no

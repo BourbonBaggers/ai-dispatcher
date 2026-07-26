@@ -69,7 +69,7 @@ rather than by post-hoc diff policing across an unbounded write surface.
 - Unit test with injected `exec`/model-runner fakes: clean repo, dry-run with conflicts,
   successful cleanup PR, out-of-scope verdict rejected, push/PR failure paths.
 
-## Milestone 5: CLI wiring (`main.ts`) + docs
+## [DONE] Milestone 5: CLI wiring (`main.ts`) + docs
 
 - `ai-dispatcher target policy-cleanup ...` subcommand in `main.ts`, formatting the
   outcome to one line like `runShipCommand` does; non-`clean`/`opened` outcomes exit
