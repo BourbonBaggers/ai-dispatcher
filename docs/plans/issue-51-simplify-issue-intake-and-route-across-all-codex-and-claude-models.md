@@ -36,3 +36,10 @@ documentation/help/report terminology, and automated coverage for label parsing,
 route derivation, price-effective dates, candidate selection, effort mapping,
 migration, missing usage, cost aggregation, and recovery branches. Run the required
 test and typecheck commands before opening the ready-for-review PR.
+
+## [DONE] Milestone 5: Recovery self-ship CI gate
+
+Repair the self-ship delivery failure where the PR check rollup was green but the
+ship command treated `gh pr checks` as non-green. Re-read current PR check buckets
+from GitHub during self-ship, classify pass/pending/fail from structured data, and
+verify the script keeps using bucket evidence instead of raw exit-code semantics.
