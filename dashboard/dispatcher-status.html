@@ -119,8 +119,10 @@
   </main>
   <script>
     const REFRESH_MS = 15000;
+    const STREAM_MAX_LINES = 500;
+    const STREAM_FLUSH_MS = 100;
     const compact = location.pathname === "/compact" || new URLSearchParams(location.search).get("view") === "compact";
-    const state = { payload: null, selected: null, streams: new Map() };
+    const state = { payload: null, selected: null, mountedUnit: null, streams: new Map() };
     const tabs = document.getElementById("tabs");
     const content = document.getElementById("content");
     const updated = document.getElementById("updated");
@@ -198,7 +200,7 @@
         tabs.appendChild(button);
       }
     }
-    function renderInstance(instance) {
+    function statusBodyHtml(instance) {
       const current = instance.status.current;
       const issue = currentIssue(instance);
       const pr = current?.pr;
@@ -212,8 +214,7 @@
       const nextValue = instance.nextRunAt
         ? `${fmtDateTime(instance.nextRunAt)} · in <span data-countdown="${instance.nextRunAt}">${countdown(instance.nextRunAt)}</span>`
         : (instance.kind === "idle" ? "unknown" : "after current work settles");
-      const liveId = `stream-${instance.unit.replace(/[^a-z0-9_-]/gi, "-")}`;
-      content.innerHTML = `
+      return `
         <div class="status-row">
           <div>
             <div class="headline">
@@ -245,6 +246,16 @@
           </aside>
         </div>
         ${renderRecentRuns(instance)}
+      `;
+    }
+    // Mounting the live-stream <details>/<pre> exactly once per selected instance (instead of
+    // rebuilding it on every periodic refresh) keeps an open accordion open and keeps its
+    // EventSource tied to a live DOM node — a full innerHTML replace every 15s silently
+    // re-collapsed the accordion and orphaned the stream against a detached <pre>.
+    function mountInstance(instance) {
+      const liveId = `stream-${instance.unit.replace(/[^a-z0-9_-]/gi, "-")}`;
+      content.innerHTML = `
+        <div id="status-body">${statusBodyHtml(instance)}</div>
         <details data-unit="${escapeHtml(instance.unit)}">
           <summary>Live stream</summary>
           <pre id="${liveId}">Stream opens on demand. Waiting for output...</pre>
@@ -255,17 +266,30 @@
         if (details.open) startStream(instance.unit, liveId);
         else stopStream(instance.unit);
       });
+      state.mountedUnit = instance.unit;
+    }
+    function updateInstance(instance) {
+      const body = document.getElementById("status-body");
+      if (body) body.innerHTML = statusBodyHtml(instance);
     }
     function render() {
       const instances = state.payload?.instances ?? [];
       if (!instances.length) {
+        stopStream(state.mountedUnit);
+        state.mountedUnit = null;
         tabs.innerHTML = "";
         content.innerHTML = '<div class="empty">No dispatcher instances discovered.</div>';
         return;
       }
       if (!state.selected || !instances.some((instance) => instance.unit === state.selected)) state.selected = instances[0].unit;
       renderTabs();
-      renderInstance(instances.find((instance) => instance.unit === state.selected));
+      const instance = instances.find((candidate) => candidate.unit === state.selected);
+      if (instance.unit !== state.mountedUnit) {
+        stopStream(state.mountedUnit);
+        mountInstance(instance);
+      } else {
+        updateInstance(instance);
+      }
     }
     async function refresh() {
       const response = await fetch("/api/instances", { cache: "no-store" });
@@ -273,22 +297,56 @@
       updated.textContent = `Updated ${fmtDateTime(state.payload.updatedAt)}`;
       render();
     }
+    function formatEntryLine(entry) {
+      if (entry.type === "output") return entry.line;
+      if (entry.type === "phase") return `[phase:${entry.phase}] ${entry.message}`;
+      return `[${entry.status}] ${entry.message ?? ""}`;
+    }
+    // A newly opened stream can replay a couple hundred lines almost at once (the server
+    // already caps history — see STREAM_REPLAY_LIMIT in dashboard.ts). Appending each line
+    // with a separate textContent write + scrollTop read forces a synchronous reflow per
+    // line, which is what froze the tab. Buffer into a bounded ring and flush once per tick.
     function startStream(unit, preId) {
       stopStream(unit);
       const pre = document.getElementById(preId);
-      const source = new EventSource(`/api/stream?unit=${encodeURIComponent(unit)}`);
-      state.streams.set(unit, source);
-      source.addEventListener("entry", (event) => {
-        const entry = JSON.parse(event.data);
-        const line = entry.type === "output"
-          ? entry.line
-          : entry.type === "phase"
-            ? `[phase:${entry.phase}] ${entry.message}`
-            : `[${entry.status}] ${entry.message ?? ""}`;
-        pre.textContent += `\n${line}`;
+      if (!pre) return;
+      const lines = [];
+      let flushTimer = null;
+      const flush = () => {
+        flushTimer = null;
+        pre.textContent = lines.join("\n");
         pre.scrollTop = pre.scrollHeight;
+      };
+      const pushLine = (line) => {
+        lines.push(line);
+        if (lines.length > STREAM_MAX_LINES) lines.splice(0, lines.length - STREAM_MAX_LINES);
+        if (!flushTimer) flushTimer = setTimeout(flush, STREAM_FLUSH_MS);
+      };
+      const source = new EventSource(`/api/stream?unit=${encodeURIComponent(unit)}`);
+      source.addEventListener("entry", (event) => {
+        let entry;
+        try {
+          entry = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        pushLine(formatEntryLine(entry));
       });
-      source.onerror = () => { pre.textContent += "\n[stream] reconnecting..."; };
+      source.addEventListener("notice", (event) => {
+        try {
+          const notice = JSON.parse(event.data);
+          pushLine(`[stream] ${notice.message}`);
+        } catch {
+          // Malformed notice payload; nothing useful to show.
+        }
+      });
+      source.onerror = () => pushLine("[stream] reconnecting...");
+      state.streams.set(unit, {
+        close: () => {
+          source.close();
+          if (flushTimer) clearTimeout(flushTimer);
+        },
+      });
     }
     function stopStream(unit) {
       const existing = state.streams.get(unit);
