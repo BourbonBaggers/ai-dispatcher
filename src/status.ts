@@ -45,6 +45,8 @@ export interface HistoryJson {
   runs: ReturnType<typeof runSummary>[];
 }
 
+export type RunSummary = ReturnType<typeof runSummary>;
+
 function stateDirForValue(raw: string | undefined, env: NodeJS.ProcessEnv): string {
   return expandHome(raw ?? env.DISPATCHER_STATE_DIR ?? "./state");
 }
@@ -180,6 +182,31 @@ function runSummary(run: RunRecord) {
     failureSummary: run.failureSummary,
     ghCommand: ghCommandFor(run),
   };
+}
+
+const NON_IDLE_RUN_STATUSES = new Set<DispatcherStatus>([
+  "claimed",
+  "running",
+  "pr_ready",
+  "shipped",
+  "ci_pending",
+  "ci_failed",
+  "held",
+  "failed",
+  "timed_out",
+  "interrupted",
+  "abandoned",
+  "token_exhausted",
+]);
+
+export function recentNonIdleRunSummaries(runs: RunRecord[], limit: number): RunSummary[] {
+  if (!Number.isInteger(limit) || limit <= 0) return [];
+  return runs
+    .filter((run) => NON_IDLE_RUN_STATUSES.has(run.status))
+    .slice()
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, limit)
+    .map((run) => runSummary(run));
 }
 
 export interface GithubWorkingIssue {
@@ -362,12 +389,7 @@ export function renderStatusHuman(snapshot: StatusJson): string {
 
 export function historySnapshot(stateDir: string, limit: number): HistoryJson {
   const snapshot = readOnlyStateSnapshot(stateDir);
-  const runs = snapshot.state.runs
-    .slice()
-    .sort((a, b) => b.createdAt - a.createdAt)
-    .slice(0, limit)
-    .map((run) => runSummary(run));
-  return { version: STATUS_JSON_VERSION, runs };
+  return { version: STATUS_JSON_VERSION, runs: recentNonIdleRunSummaries(snapshot.state.runs, limit) };
 }
 
 export function renderHistoryHuman(history: HistoryJson): string {
