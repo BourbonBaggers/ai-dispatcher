@@ -27,6 +27,7 @@ import {
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import type { ModelTier } from "./models.ts";
 import {
   ACTIVE_STATUSES,
   CLAIMING_STATUSES,
@@ -76,7 +77,7 @@ export interface RoutingCapacityEvidence {
 
 export interface RoutingAssignmentEvidence {
   source: "automatic" | "human-override";
-  minimumTier: "fast" | "general" | "complex" | "frontier";
+  minimumTier: ModelTier;
   characteristicLabels: string[];
   rationaleLabels: string[];
   confidence: "high" | "medium" | "low";

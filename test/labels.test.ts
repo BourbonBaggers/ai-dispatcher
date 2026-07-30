@@ -6,6 +6,8 @@ import {
   assignmentForModel,
   isDispatchRequested,
   resolvePriorityTier,
+  validateDispatchReadyContract,
+  migrationForLegacyIntakeLabels,
   branchNameFor,
 } from "../src/labels.ts";
 import { modelByLabel } from "../src/models.ts";
@@ -29,10 +31,10 @@ test("resolveAssignment maps a valid codex pair", () => {
   assert.equal(r.ok && r.value.cliEffort, "high");
 });
 
-test("effort:max caps codex at high but gives claude xhigh", () => {
+test("provider-neutral effort maps through each CLI without changing model", () => {
   const codex = resolveAssignment(["agent:codex", "model:gpt-5.5", "effort:max"]);
   assert.equal(codex.ok && codex.value.cliEffort, "high");
-  const claude = resolveAssignment(["agent:claude", "model:claude-opus-4.8", "effort:max"]);
+  const claude = resolveAssignment(["agent:claude", "model:claude-opus-4.8", "effort:xhigh"]);
   assert.equal(claude.ok && claude.value.cliEffort, "xhigh");
 });
 
@@ -107,12 +109,41 @@ test("dispatch:ready admits provider-neutral work and legacy assignment labels r
   assert.equal(isDispatchRequested(["bug"]), false);
 });
 
-test("resolvePriorityTier honours queue jump then technical debt then regular", () => {
+test("resolvePriorityTier honors new priority labels and legacy migration labels", () => {
+  assert.equal(resolvePriorityTier(["priority:queue-jump"]), "queue-jump");
+  assert.equal(resolvePriorityTier(["priority:normal"]), "normal");
+  assert.equal(resolvePriorityTier(["priority:background"]), "background");
   assert.equal(resolvePriorityTier(["queue jump"]), "queue-jump");
-  assert.equal(resolvePriorityTier(["technical debt"]), "technical-debt");
-  assert.equal(resolvePriorityTier([]), "regular");
-  // queue jump wins over technical debt
+  assert.equal(resolvePriorityTier(["technical debt"]), "background");
+  assert.equal(resolvePriorityTier([]), "normal");
   assert.equal(resolvePriorityTier(["queue jump", "technical debt"]), "queue-jump");
+});
+
+test("dispatch:ready contract requires one type, priority, and business risk", () => {
+  assert.equal(
+    validateDispatchReadyContract([
+      "dispatch:ready",
+      "type:bug",
+      "priority:normal",
+      "risk:low-stakes",
+    ]).ok,
+    true,
+  );
+  const missing = validateDispatchReadyContract(["dispatch:ready", "priority:normal", "risk:normal"]);
+  assert.equal(missing.ok, false);
+  if (!missing.ok) assert.match(missing.reason, /missing type/);
+});
+
+test("legacy intake labels migrate when unambiguous", () => {
+  assert.deepEqual(migrationForLegacyIntakeLabels(["task:feature", "risk:medium", "technical debt"]), {
+    add: ["dispatch:ready", "priority:background", "type:enhancement", "risk:normal"],
+    remove: ["technical debt"],
+    needsInputReason: null,
+  });
+  assert.match(
+    migrationForLegacyIntakeLabels(["task:unknown", "risk:medium"]).needsInputReason ?? "",
+    /missing type/,
+  );
 });
 
 test("branchNameFor produces a safe, stable ref from an untrusted title", () => {

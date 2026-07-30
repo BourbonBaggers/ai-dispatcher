@@ -14,6 +14,7 @@
 
 import {
   MODEL_TIERS,
+  modelExpectedCostScore,
   tierRank,
   dispatchableModels,
   type ModelEntry,
@@ -54,7 +55,18 @@ export type VerificationStrength = (typeof VERIFICATION_STRENGTH)[number];
 export const RECOVERABILITY = ["low", "medium", "high"] as const;
 export type Recoverability = (typeof RECOVERABILITY)[number];
 
+export const ISSUE_TYPES = ["bug", "enhancement", "refactor", "chore", "docs", "ops", "research"] as const;
+export type IssueType = (typeof ISSUE_TYPES)[number];
+
+export const BUSINESS_RISKS = ["low-stakes", "normal", "destructive"] as const;
+export type BusinessRisk = (typeof BUSINESS_RISKS)[number];
+
+export const ROUTE_TIERS = MODEL_TIERS;
+export type RouteTier = ModelTier;
+
 export interface IssueCharacteristics {
+  issueType: IssueType;
+  businessRisk: BusinessRisk;
   /** Free-form task class (e.g. "feature", "bugfix", "refactor"), matched to taskClasses. */
   taskType: string;
   complexity: Complexity;
@@ -71,6 +83,8 @@ export interface IssueCharacteristics {
 
 /** Conservative defaults for an unlabelled issue: mid on every axis → a general-tier route. */
 export const DEFAULT_CHARACTERISTICS: IssueCharacteristics = {
+  issueType: "enhancement",
+  businessRisk: "normal",
   taskType: "general",
   complexity: "moderate",
   risk: "medium",
@@ -84,6 +98,7 @@ export const DEFAULT_CHARACTERISTICS: IssueCharacteristics = {
 
 /** `dimension:value` label prefixes for each characteristic dimension. */
 export const CHARACTERISTIC_LABEL_PREFIXES = {
+  issueType: "type",
   taskType: "task",
   complexity: "complexity",
   risk: "risk",
@@ -94,6 +109,44 @@ export const CHARACTERISTIC_LABEL_PREFIXES = {
   verificationStrength: "verification",
   recoverability: "recoverability",
 } as const;
+
+export const BASE_ROUTE_MATRIX: Record<IssueType, Record<BusinessRisk, RouteTier>> = {
+  docs: {
+    "low-stakes": "tiny",
+    normal: "cheap",
+    destructive: "standard",
+  },
+  chore: {
+    "low-stakes": "tiny",
+    normal: "cheap",
+    destructive: "capable",
+  },
+  bug: {
+    "low-stakes": "cheap",
+    normal: "standard",
+    destructive: "capable",
+  },
+  enhancement: {
+    "low-stakes": "standard",
+    normal: "standard",
+    destructive: "capable",
+  },
+  refactor: {
+    "low-stakes": "standard",
+    normal: "capable",
+    destructive: "hard",
+  },
+  ops: {
+    "low-stakes": "standard",
+    normal: "capable",
+    destructive: "hard",
+  },
+  research: {
+    "low-stakes": "standard",
+    normal: "capable",
+    destructive: "hard",
+  },
+};
 
 /** Marks an issue whose model was chosen by a human, not the rubric (excluded from learning). */
 export const HUMAN_OVERRIDE_LABEL = "route:human-override";
@@ -113,7 +166,9 @@ export const ROUTING_EFFORTS = [
   "effort:low",
   "effort:medium",
   "effort:high",
+  "effort:xhigh",
   "effort:max",
+  "effort:ultra",
 ] as const;
 export type RoutingEffort = (typeof ROUTING_EFFORTS)[number];
 
@@ -135,6 +190,8 @@ function oneOf<T extends string>(value: string | null, allowed: readonly T[], fa
 export function parseCharacteristics(labels: string[]): IssueCharacteristics {
   const p = CHARACTERISTIC_LABEL_PREFIXES;
   return {
+    issueType: oneOf(labelValue(labels, p.issueType), ISSUE_TYPES, DEFAULT_CHARACTERISTICS.issueType),
+    businessRisk: oneOf(labelValue(labels, p.risk), BUSINESS_RISKS, DEFAULT_CHARACTERISTICS.businessRisk),
     taskType: labelValue(labels, p.taskType) ?? DEFAULT_CHARACTERISTICS.taskType,
     complexity: oneOf(labelValue(labels, p.complexity), COMPLEXITY, DEFAULT_CHARACTERISTICS.complexity),
     risk: oneOf(labelValue(labels, p.risk), RISK, DEFAULT_CHARACTERISTICS.risk),
@@ -162,43 +219,7 @@ export function parseCharacteristics(labels: string[]): IssueCharacteristics {
 // ── Minimum-viable-tier derivation ──────────────────────────────────────────────
 
 function deriveBaselineTier(c: IssueCharacteristics): ModelTier {
-  // Balanced/general is the default. Fast is earned by a complete deterministic
-  // execution package, not merely by somebody calling the task "simple".
-  if (
-    (c.complexity === "trivial" || c.complexity === "simple") &&
-    c.risk === "low" &&
-    c.ambiguity === "clear" &&
-    c.requirementsQuality === "good" &&
-    c.reasoningDepth === "shallow" &&
-    c.verificationStrength === "strong"
-  ) {
-    return "fast";
-  }
-
-  let rank = c.complexity === "complex" ? 2 : 1;
-  // Risk changes how much verification and recovery matter; it does not give a model
-  // additional reasoning ability. Only unresolved implementation judgment raises the
-  // capability floor. This prevents safety-critical but well-specified work from being
-  // priced as architecture merely because its subject is important.
-  if (c.reasoningDepth === "deep") rank = Math.max(rank, 2); // complex
-  if (c.ambiguity === "high" || c.requirementsQuality === "poor") {
-    rank = Math.max(rank, 2); // unresolved approach selection needs the complex lane
-  }
-
-  const severeResidualUncertainty =
-    c.reasoningDepth === "deep" &&
-    (c.ambiguity === "high" || c.requirementsQuality === "poor");
-  const weakSafeguards =
-    c.verificationStrength === "weak" || c.recoverability === "low";
-  if (
-    c.complexity === "complex" &&
-    c.risk === "high" &&
-    severeResidualUncertainty &&
-    weakSafeguards
-  ) {
-    rank = 3; // frontier — a wrong first approach is both likely and expensive
-  }
-  return MODEL_TIERS[rank]!;
+  return BASE_ROUTE_MATRIX[c.issueType][c.businessRisk];
 }
 
 /**
@@ -210,10 +231,10 @@ function deriveBaselineTier(c: IssueCharacteristics): ModelTier {
  */
 export function hasRecoverabilityDiscount(c: IssueCharacteristics): boolean {
   return (
-    deriveBaselineTier(c) === "complex" &&
-    c.reasoningDepth !== "deep" &&
+    tierRank(deriveBaselineTier(c)) > 0 &&
+    (c.complexity === "trivial" || c.contextSize === "small") &&
     c.requirementsQuality === "good" &&
-    c.ambiguity !== "high" &&
+    c.ambiguity === "clear" &&
     c.verificationStrength === "strong" &&
     c.recoverability === "high"
   );
@@ -230,8 +251,15 @@ export function hasRecoverabilityDiscount(c: IssueCharacteristics): boolean {
  */
 export function deriveMinimumTier(c: IssueCharacteristics): ModelTier {
   const baselineRank = tierRank(deriveBaselineTier(c));
-  const adjustedRank =
-    hasRecoverabilityDiscount(c) && baselineRank > 0 ? baselineRank - 1 : baselineRank;
+  if (c.requirementsQuality === "poor") return "standard";
+  let adjustedRank = hasRecoverabilityDiscount(c) && baselineRank > 0 ? baselineRank - 1 : baselineRank;
+  const upRouteEvidence =
+    c.contextSize === "large" ||
+    c.ambiguity === "high" ||
+    c.reasoningDepth === "deep" ||
+    c.complexity === "complex" ||
+    c.verificationStrength === "weak";
+  if (upRouteEvidence && adjustedRank < tierRank("frontier")) adjustedRank += 1;
   return MODEL_TIERS[adjustedRank]!;
 }
 
@@ -241,33 +269,28 @@ export function deriveMinimumTier(c: IssueCharacteristics): ModelTier {
  */
 export function deriveEffort(c: IssueCharacteristics): EffortDecision {
   const minimumTier = deriveMinimumTier(c);
-  if (
-    minimumTier === "fast" &&
-    c.contextSize === "small" &&
-    c.verificationStrength === "strong"
-  ) {
+  if (minimumTier === "tiny" || minimumTier === "cheap") {
     return {
       effortLabel: "effort:low",
-      reason: "localized deterministic work with strong verification",
+      reason: "tiny and cheap deterministic work uses low effort",
     };
   }
-  if (
-    minimumTier === "frontier" &&
-    (c.verificationStrength === "weak" || c.recoverability === "low")
-  ) {
+  if (minimumTier === "frontier") {
+    return {
+      effortLabel: "effort:xhigh",
+      reason: "frontier work uses extra-high persistence",
+    };
+  }
+  if (minimumTier === "ultra-frontier") {
     return {
       effortLabel: "effort:max",
-      reason: "frontier work with weak verification or costly recovery warrants exhaustive persistence",
+      reason: "ultra-frontier work requires explicit maximum persistence",
     };
   }
-  if (
-    c.contextSize === "large" ||
-    c.complexity === "complex" ||
-    c.verificationStrength === "weak"
-  ) {
+  if (minimumTier === "hard") {
     return {
       effortLabel: "effort:high",
-      reason: "broad bounded execution or multi-step verification requires extra persistence",
+      reason: "hard work uses high effort",
     };
   }
   return {
@@ -297,6 +320,7 @@ export interface RoutingDecision {
   alternatives: RoutingAlternative[];
   capacitySelection: "live-headroom" | "rotation" | "only-capable";
   reason: string;
+  needsInput: boolean;
 }
 
 export interface RoutingOptions {
@@ -339,11 +363,15 @@ export function routeIssue(
   options: RoutingOptions = {},
 ): RoutingDecision {
   const minimumTier = deriveMinimumTier(characteristics);
+  const effort = deriveEffort(characteristics);
   const minRank = tierRank(minimumTier);
   const frontierJustified = minimumTier === "frontier";
   const needsLargeContext = characteristics.contextSize === "large";
   const baselineTier = deriveBaselineTier(characteristics);
   const factors: string[] = [`baseline tier: ${baselineTier}`];
+  if (characteristics.requirementsQuality === "poor") {
+    factors.push("poor requirements: needs-input instead of expensive-model escalation");
+  }
   if (hasRecoverabilityDiscount(characteristics)) {
     factors.push(`recoverability discount: ${baselineTier} → ${minimumTier}`);
   } else {
@@ -354,9 +382,10 @@ export function routeIssue(
   const eligible: ModelEntry[] = [];
 
   for (const model of models) {
+    const modelCeiling = routeCeilingForModel(model);
     // Capability floor: at or above the minimum viable tier.
-    if (tierRank(model.tier) < minRank) {
-      alternatives.push(alt(model, false, `below minimum viable tier (${model.tier} < ${minimumTier})`));
+    if (tierRank(modelCeiling) < minRank) {
+      alternatives.push(alt(model, false, `below minimum viable route (${modelCeiling} < ${minimumTier})`));
       continue;
     }
     // One tier of headroom lets adjacent capable pools share subscription load without
@@ -371,6 +400,10 @@ export function routeIssue(
       continue;
     }
     // Protect the frontier: withhold frontier models unless the tier floor itself demands it.
+    if (model.tier === "ultra-frontier") {
+      alternatives.push(alt(model, false, "ultra-frontier model requires explicit reserve selection"));
+      continue;
+    }
     if (model.frontier && !frontierJustified) {
       alternatives.push(alt(model, false, "frontier model withheld — not justified by characteristics"));
       continue;
@@ -385,6 +418,20 @@ export function routeIssue(
     eligible.push(model);
   }
 
+  if (characteristics.requirementsQuality === "poor") {
+    return {
+      selected: null,
+      minimumTier,
+      confidence: "low",
+      determiningFactors: factors,
+      rationaleLabels: [],
+      alternatives,
+      capacitySelection: "only-capable",
+      reason: "needs-input: requirements are missing or contradictory",
+      needsInput: true,
+    };
+  }
+
   if (eligible.length === 0) {
     return {
       selected: null,
@@ -397,6 +444,7 @@ export function routeIssue(
       reason: frontierJustified
         ? "no capable model is available (including the frontier)"
         : "no capable non-frontier model is available — refine the issue or approve frontier use",
+      needsInput: false,
     };
   }
 
@@ -448,11 +496,23 @@ export function routeIssue(
     alternatives,
     capacitySelection: picked.basis,
     reason: `selected ${selected.modelLabel} (${selected.tier})`,
+    needsInput: false,
   };
 }
 
 function alt(model: ModelEntry, eligible: boolean, reason: string): RoutingAlternative {
   return { modelLabel: model.modelLabel, tier: model.tier, eligible, reason };
+}
+
+function routeCeilingForModel(model: ModelEntry): ModelTier {
+  if (model.modelLabel === "model:gpt-5.4-mini") {
+    return "cheap";
+  }
+  if (model.modelLabel === "model:claude-haiku-4.5") return "standard";
+  if (model.modelLabel === "model:gpt-5.6-terra" || model.modelLabel === "model:claude-sonnet-5") {
+    return "hard";
+  }
+  return model.tier;
 }
 
 /**
@@ -473,20 +533,25 @@ function pickBest(
 } {
   const taskMatch = (m: ModelEntry) => (m.taskClasses.includes(c.taskType) ? 0 : 1);
   const registryOrder = new Map(eligible.map((model, index) => [model.modelLabel, index]));
+  const effort = deriveEffort(c).effortLabel;
+  const byCost = (a: ModelEntry, b: ModelEntry) =>
+    modelExpectedCostScore(a, effort) - modelExpectedCostScore(b, effort) ||
+    tierRank(a.tier) - tierRank(b.tier) ||
+    taskMatch(a) - taskMatch(b) ||
+    registryOrder.get(a.modelLabel)! - registryOrder.get(b.modelLabel)!;
   const bestWithinPool = (pool: string): ModelEntry =>
     eligible
       .filter((model) => model.capacityPool === pool)
       .sort(
         (a, b) =>
-          tierRank(a.tier) - tierRank(b.tier) ||
-          taskMatch(a) - taskMatch(b) ||
-          registryOrder.get(a.modelLabel)! - registryOrder.get(b.modelLabel)!,
+          byCost(a, b),
       )[0]!;
 
   const pools = [...new Set(eligible.map((model) => model.capacityPool))];
+  const cheapest = [...eligible].sort(byCost)[0]!;
   if (pools.length === 1) {
     return {
-      model: bestWithinPool(pools[0]!),
+      model: cheapest,
       basis: "only-capable",
       reason: `only capable capacity pool is ${pools[0]}`,
     };
@@ -503,7 +568,10 @@ function pickBest(
     const sorted = [...headrooms].sort((a, b) => b.headroom! - a.headroom!);
     const spread = sorted[0]!.headroom! - sorted[sorted.length - 1]!.headroom!;
     const hysteresis = options.headroomHysteresisPercent ?? 10;
-    if (spread > hysteresis) {
+    const cheapestScore = modelExpectedCostScore(cheapest, effort);
+    const winnerScore = modelExpectedCostScore(sorted[0]!.model, effort);
+    const closeCost = Math.abs(winnerScore - cheapestScore) / Math.max(cheapestScore, 1) <= 0.1;
+    if (spread > hysteresis && closeCost) {
       const winner = sorted[0]!;
       return {
         model: winner.model,
@@ -511,6 +579,14 @@ function pickBest(
         reason: `preferred ${winner.model.capacityPool} with ${winner.headroom}% constrained headroom`,
       };
     }
+  }
+
+  if (cheapest) {
+    return {
+      model: cheapest,
+      basis: "only-capable",
+      reason: `selected lowest expected cost candidate ${cheapest.modelLabel}`,
+    };
   }
 
   const cursorIndex = options.rotationCursor
@@ -628,7 +704,7 @@ export function planNextAttempt(
     const comparable = models.filter(
       (m) =>
         !m.frontier &&
-        tierRank(m.tier) >= tierRank(currentModel.tier) &&
+        tierRank(routeCeilingForModel(m)) >= tierRank(currentModel.tier) &&
         tierRank(m.tier) <= tierRank(currentModel.tier) + 1 &&
         m.capacityPool !== currentModel.capacityPool &&
         available(m, capacityByPool),
@@ -680,33 +756,44 @@ export function planNextAttempt(
   // Implementation / test failure: escalate exactly one capability tier. Frontier is
   // the final automated rung; failure there is the handoff point.
   const nextRank = tierRank(currentModel.tier) + 1;
-  if (nextRank >= MODEL_TIERS.length) {
-    if (currentModel.frontier) {
-      return {
-        action: "hold",
-        model: null,
-        escalationReason: reason,
-        requiresHumanApproval: false,
-        rationale: "frontier attempt failed — automation exhausted",
-      };
-    }
+  if (currentModel.frontier) {
+    return {
+      action: "hold",
+      model: null,
+      escalationReason: reason,
+      requiresHumanApproval: false,
+      rationale: "frontier attempt failed — automation exhausted",
+    };
+  }
+  if (nextRank >= tierRank("frontier")) {
     // Already at the strongest non-frontier tier: use an explicit fallback if present.
-    const sameTierElsewhere = firstAvailable(currentModel.fallbacks, capacityByPool, models);
-    if (sameTierElsewhere) {
+    const fallback = firstAvailable(
+      currentModel.fallbacks.filter((label) => modelByLabelLocal(label, models)?.tier !== "ultra-frontier"),
+      capacityByPool,
+      models,
+    );
+    if (fallback) {
       return {
-        action: "handoff",
-        model: sameTierElsewhere,
+        action: fallback.frontier ? "escalate-frontier" : "handoff",
+        model: fallback,
         escalationReason: reason,
         requiresHumanApproval: false,
-        rationale: `top tier reached — hand off to ${sameTierElsewhere.modelLabel}`,
+        rationale: fallback.frontier
+          ? `escalate automatically to final frontier attempt (${fallback.modelLabel})`
+          : `top tier reached — hand off to ${fallback.modelLabel}`,
       };
     }
     return { action: "hold", model: null, escalationReason: reason, requiresHumanApproval: false, rationale: "already at the strongest tier — hold for a human" };
   }
   const nextTier = MODEL_TIERS[nextRank]!;
   const stronger = models
-    .filter((m) => m.tier === nextTier && available(m, capacityByPool))
-    .sort((a, b) => (capacityByPool.get(a.capacityPool)?.dormant ? 0 : 1) - (capacityByPool.get(b.capacityPool)?.dormant ? 0 : 1));
+    .filter((m) => m.tier === nextTier && m.tier !== "ultra-frontier" && available(m, capacityByPool))
+    .sort(
+      (a, b) =>
+        modelExpectedCostScore(a, "effort:high") - modelExpectedCostScore(b, "effort:high") ||
+        (capacityByPool.get(a.capacityPool)?.dormant ? 0 : 1) -
+          (capacityByPool.get(b.capacityPool)?.dormant ? 0 : 1),
+    );
   const target = stronger[0] ?? firstAvailable(currentModel.fallbacks, capacityByPool, models);
   if (!target) {
     return { action: "hold", model: null, escalationReason: reason, requiresHumanApproval: false, rationale: `no ${nextTier}-tier capacity available — hold` };
@@ -720,4 +807,8 @@ export function planNextAttempt(
       ? `escalate automatically to final frontier attempt (${target.modelLabel})`
       : `escalate one tier to ${target.modelLabel}`,
   };
+}
+
+function modelByLabelLocal(label: string, models: readonly ModelEntry[]): ModelEntry | null {
+  return models.find((model) => model.modelLabel === label) ?? null;
 }
