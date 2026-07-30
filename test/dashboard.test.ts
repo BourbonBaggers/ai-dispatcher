@@ -4,16 +4,87 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  capReplayBatch,
   computeNextRunAt,
   dashboardRecentRuns,
   dashboardPayload,
   parseDashboardArgs,
   parseEnvironmentFile,
   parseSystemdCat,
+  streamInstance,
   type RecentScan,
 } from "../src/dashboard.ts";
 import { StateStore } from "../src/state.ts";
 import type { StatusJson } from "../src/status.ts";
+import { appendRunOutputEntry, type RunOutputEntry } from "../src/run-output.ts";
+import type { ExecFn } from "../src/exec.ts";
+
+function outputEntry(seq: number): RunOutputEntry {
+  return { version: 1, runId: "run-1", seq, timestamp: seq, type: "output", stream: "stdout", line: `line ${seq}` };
+}
+
+function fakeUnitExec(envPath: string): ExecFn {
+  return async (file, args) => {
+    if (file === "systemctl" && args.includes("cat")) {
+      return {
+        ok: true,
+        stdout: `[Unit]\nDescription=AI Issue Dispatcher\n[Service]\nEnvironmentFile=${envPath}\nExecStart=/node bin/ai-dispatcher.mjs --repo acme/widgets --interval 60\n`,
+        stderr: "",
+        code: 0,
+      };
+    }
+    if (file === "systemctl" && args.includes("show")) {
+      return { ok: true, stdout: "ActiveState=active\nSubState=running\nMainPID=42\n", stderr: "", code: 0 };
+    }
+    if (file === "journalctl") return { ok: true, stdout: "", stderr: "", code: 0 };
+    if (file === "gh") return { ok: true, stdout: "[]", stderr: "", code: 0 };
+    return { ok: false, stdout: "", stderr: `unexpected command ${file}`, code: 1 };
+  };
+}
+
+function fakeStreamRes(): {
+  res: { writeHead: () => void; write: (chunk: string) => void; end: () => void; on: (name: string, cb: () => void) => void };
+  writes: string[];
+  ended: boolean;
+  close: () => void;
+} {
+  const writes: string[] = [];
+  let ended = false;
+  let closeHandler: (() => void) | null = null;
+  const res = {
+    writeHead: () => {},
+    write: (chunk: string) => {
+      writes.push(chunk);
+    },
+    end: () => {
+      ended = true;
+    },
+    on: (name: string, cb: () => void) => {
+      if (name === "close") closeHandler = cb;
+    },
+  };
+  return {
+    res,
+    writes,
+    get ended() {
+      return ended;
+    },
+    close: () => closeHandler?.(),
+  };
+}
+
+function eventsOf(writes: string[], event: string): unknown[] {
+  const out: unknown[] = [];
+  for (let i = 0; i < writes.length; i += 1) {
+    const chunk = writes[i]!;
+    if (!chunk.startsWith("event: ")) continue;
+    const name = chunk.slice("event: ".length).trim();
+    const dataChunk = writes[i + 1] ?? "";
+    const dataLine = dataChunk.split("\n").find((line) => line.startsWith("data: "));
+    if (name === event && dataLine) out.push(JSON.parse(dataLine.slice("data: ".length)));
+  }
+  return out;
+}
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "ai-dispatcher-dashboard-"));
@@ -199,4 +270,81 @@ test("dashboardRecentRuns returns the five newest non-idle runs", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("capReplayBatch passes small batches through untouched", () => {
+  const entries = [outputEntry(1), outputEntry(2), outputEntry(3)];
+  const batch = capReplayBatch(entries, 200, 0);
+  assert.deepEqual(batch.toSend, entries);
+  assert.equal(batch.omitted, 0);
+  assert.equal(batch.nextSeq, 3);
+});
+
+test("capReplayBatch caps a large backlog but still advances seq past every omitted entry", () => {
+  const entries = Array.from({ length: 5000 }, (_, i) => outputEntry(i + 1));
+  const batch = capReplayBatch(entries, 200, 0);
+  assert.equal(batch.toSend.length, 200);
+  assert.equal(batch.omitted, 4800);
+  assert.equal(batch.toSend[0]?.seq, 4801);
+  assert.equal(batch.toSend[199]?.seq, 5000);
+  assert.equal(batch.nextSeq, 5000);
+});
+
+test("capReplayBatch on an empty batch keeps the caller's resume point", () => {
+  const batch = capReplayBatch([], 200, 42);
+  assert.deepEqual(batch, { toSend: [], omitted: 0, nextSeq: 42 });
+});
+
+test("streamInstance caps a large output backlog and emits a truncation notice on first connect", async () => {
+  const dir = tmp();
+  try {
+    const stateDir = join(dir, "state");
+    const envPath = join(dir, "dispatcher.env");
+    writeFileSync(envPath, `DISPATCHER_REPO=acme/widgets\nDISPATCHER_STATE_DIR=${stateDir}\n`, "utf8");
+    const store = StateStore.open(stateDir);
+    const run = store.createRun({
+      issueNumber: 7,
+      issueTitle: "big verbose run",
+      issueUrl: "https://github.com/acme/widgets/issues/7",
+      agent: "codex",
+      modelLabel: "model:gpt-5.5",
+      cliModel: "gpt-5.5",
+      effortLabel: "effort:medium",
+      cliEffort: "medium",
+      branch: "issue-7",
+      checkoutPath: "/tmp/issue-7",
+      planPath: null,
+      trigger: "poll",
+    });
+    store.updateRun(run.id, { status: "running" });
+    for (let seq = 1; seq <= 5000; seq += 1) {
+      appendRunOutputEntry(stateDir, { ...outputEntry(seq), runId: run.id });
+    }
+    store.releaseLock();
+
+    const { res, writes, close } = fakeStreamRes();
+    const stream = streamInstance("ai-dispatcher.service", ["ai-dispatcher.service"], res as never, fakeUnitExec(envPath));
+    // A single poll tick is enough to observe the capped replay; close right after it.
+    setTimeout(close, 50);
+    await stream;
+
+    const entries = eventsOf(writes, "entry") as RunOutputEntry[];
+    const notices = eventsOf(writes, "notice") as { message: string }[];
+    assert.equal(entries.length, 200);
+    assert.equal(entries[0]?.seq, 4801);
+    assert.equal(entries[199]?.seq, 5000);
+    assert.equal(notices.length, 1);
+    assert.match(notices[0]!.message, /4800 earlier output line/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("streamInstance closes the response cleanly for an unknown unit instead of hanging it open", async () => {
+  const fake = fakeStreamRes();
+  await streamInstance("ai-dispatcher-does-not-exist.service", ["ai-dispatcher.service"], fake.res as never, fakeUnitExec("/nonexistent/env"));
+  const errors = eventsOf(fake.writes, "error") as { message: string }[];
+  assert.equal(errors.length, 1);
+  assert.match(errors[0]!.message, /unknown dispatcher unit/);
+  assert.equal(fake.ended, true);
 });
