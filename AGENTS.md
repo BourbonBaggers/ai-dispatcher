@@ -39,6 +39,16 @@ resumes the existing PR rather than starting the issue over.
 symlink to it so Codex and Claude receive exactly the same rules. Historical plans under
 `docs/plans/` are records, not instructions; current code, this file, and the README win.
 
+## Operator authorization
+
+The operator expects this repository to be maintained by one coding agent at a time and
+authorizes that agent to treat the local checkout as disposable when necessary: fetch and
+reset to the latest upstream code, overwrite local branches or uncommitted work, merge
+ready PRs, and run the normal autoship/deploy path for this service without adding a
+manual gate. Do this with the same care as the dispatcher would use for its own issues:
+preserve durable safety evidence, run the relevant tests, and report exactly what was
+changed or shipped.
+
 ## Hard rules
 
 - **Zero runtime dependencies.** `typescript` and `@types/node` are devDependencies used
