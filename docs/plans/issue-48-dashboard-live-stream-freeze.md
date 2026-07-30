@@ -17,7 +17,7 @@ re-collapsing the accordion, while the `EventSource` tied to the old, now-detach
 disconnected element, violating "closed accordions should not hold a stream open"
 and leaking a connection per periodic refresh.
 
-## Milestone 1: Bound the backend replay
+## [DONE] Milestone 1: Bound the backend replay
 
 Cap the number of historical entries `streamInstance` sends when a stream first
 attaches to a run (or jumps to a new run), emit a `notice` SSE event describing how
