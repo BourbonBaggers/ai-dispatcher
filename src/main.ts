@@ -25,6 +25,7 @@ import { run } from "./exec.ts";
 import { TelemetryStore } from "./telemetry.ts";
 import { buildRoutingReport } from "./report.ts";
 import { runHistoryCommand, runStatusCommand } from "./status.ts";
+import { runDashboardCommand } from "./dashboard.ts";
 import { shipRun, type ShipDeps, type ShipOutcome } from "./ship.ts";
 import {
   resolvePolicyCleanupConfig,
@@ -266,6 +267,13 @@ export async function main(argv: string[]): Promise<number> {
     return runHistoryCommand(
       argv.slice(1),
       process.env,
+      (s) => process.stdout.write(s),
+      (s) => process.stderr.write(s),
+    );
+  }
+  if (argv[0] === "dashboard") {
+    return await runDashboardCommand(
+      argv.slice(1),
       (s) => process.stdout.write(s),
       (s) => process.stderr.write(s),
     );
