@@ -10,6 +10,7 @@ import {
   modelByLabel,
   modelByCliModel,
   isLiveDispatchCli,
+  effectiveModelPrice,
 } from "../src/models.ts";
 import { MODEL_LABELS } from "../src/labels.ts";
 
@@ -39,20 +40,18 @@ test("fallbacks reference real registry labels", () => {
 });
 
 test("tierRank orders the capability ladder ascending", () => {
-  assert.equal(tierRank("fast"), 0);
-  assert.ok(tierRank("fast") < tierRank("general"));
-  assert.ok(tierRank("general") < tierRank("complex"));
-  assert.ok(tierRank("complex") < tierRank("frontier"));
+  assert.equal(tierRank("tiny"), 0);
+  assert.ok(tierRank("tiny") < tierRank("cheap"));
+  assert.ok(tierRank("cheap") < tierRank("standard"));
+  assert.ok(tierRank("standard") < tierRank("capable"));
+  assert.ok(tierRank("capable") < tierRank("hard"));
+  assert.ok(tierRank("hard") < tierRank("frontier"));
+  assert.ok(tierRank("frontier") < tierRank("ultra-frontier"));
 });
 
 test("only enabled models on a live dispatch agent are dispatchable", () => {
   const opus = modelByLabel("model:claude-opus-4.8")!;
   assert.equal(isDispatchable(opus), true);
-
-  // Disabled model: excluded even though its cli is a live agent.
-  const mini = modelByLabel("model:gpt-5.5-mini")!;
-  assert.equal(mini.enabled, false);
-  assert.equal(isDispatchable(mini), false);
 
   // Enabled but future provider (non-live cli): excluded.
   const gemini = modelByLabel("model:gemini-2.5-pro")!;
@@ -61,10 +60,12 @@ test("only enabled models on a live dispatch agent are dispatchable", () => {
   assert.equal(isDispatchable(gemini), false);
 });
 
-test("exactly one frontier model per live provider is protected", () => {
+test("frontier and ultra-frontier live models are protected tiers", () => {
   const frontier = dispatchableModels().filter((m) => m.frontier);
   assert.ok(frontier.length >= 1, "at least one frontier model exists");
-  for (const m of frontier) assert.equal(m.tier, "frontier");
+  for (const m of frontier) {
+    assert.ok(m.tier === "frontier" || m.tier === "ultra-frontier");
+  }
 });
 
 test("MODEL_LABELS is derived from the dispatchable registry", () => {
@@ -73,15 +74,21 @@ test("MODEL_LABELS is derived from the dispatchable registry", () => {
   const fromLabels = new Set(Object.keys(MODEL_LABELS));
   assert.deepEqual([...fromLabels].sort(), [...fromRegistry].sort());
 
-  // The two historically-supported lanes resolve to their pinned identifiers.
+  // Representative lanes resolve to their pinned identifiers.
   assert.deepEqual(MODEL_LABELS["model:claude-opus-4.8"], {
     agent: "claude",
     cliModel: "claude-opus-4-8",
   });
   assert.deepEqual(MODEL_LABELS["model:gpt-5.5"], { agent: "codex", cliModel: "gpt-5.5" });
+  assert.deepEqual(MODEL_LABELS["model:gpt-5.4-mini"], {
+    agent: "codex",
+    cliModel: "gpt-5.4-mini",
+  });
+  assert.deepEqual(MODEL_LABELS["model:claude-fable-5"], {
+    agent: "claude",
+    cliModel: "claude-fable-5",
+  });
 
-  // A disabled model is not a valid dispatch label.
-  assert.equal(MODEL_LABELS["model:gpt-5.5-mini"], undefined);
   assert.equal(MODEL_LABELS["model:gemini-2.5-pro"], undefined);
 });
 
@@ -89,4 +96,10 @@ test("modelByCliModel round-trips explicit identifiers", () => {
   assert.equal(modelByCliModel("claude-opus-4-8")!.modelLabel, "model:claude-opus-4.8");
   assert.equal(modelByCliModel("gpt-5.5")!.modelLabel, "model:gpt-5.5");
   assert.equal(modelByCliModel("nope"), null);
+});
+
+test("sonnet promotional and standard prices are date-effective", () => {
+  const sonnet = modelByLabel("model:claude-sonnet-5")!;
+  assert.equal(effectiveModelPrice(sonnet, new Date("2026-08-31T12:00:00Z")).inputUsdPerMillion, 2);
+  assert.equal(effectiveModelPrice(sonnet, new Date("2026-09-01T00:00:00Z")).inputUsdPerMillion, 3);
 });
