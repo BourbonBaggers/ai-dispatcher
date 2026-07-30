@@ -55,13 +55,71 @@ export const EFFORT_LABELS: Record<string, Record<DispatcherAgent, string>> = {
   "effort:low": { codex: "low", claude: "low" },
   "effort:medium": { codex: "medium", claude: "medium" },
   "effort:high": { codex: "high", claude: "high" },
-  "effort:max": { codex: "high", claude: "xhigh" },
+  "effort:xhigh": { codex: "high", claude: "xhigh" },
+  "effort:max": { codex: "high", claude: "max" },
+  "effort:ultra": { codex: "high", claude: "max" },
 };
 
 export const DEFAULT_EFFORT_LABEL = "effort:medium";
 
 /** Provider-neutral queue admission. Assignment is derived later at pickup. */
 export const DISPATCH_READY_LABEL = "dispatch:ready";
+
+export const ISSUE_TYPE_LABELS = [
+  "type:bug",
+  "type:enhancement",
+  "type:refactor",
+  "type:chore",
+  "type:docs",
+  "type:ops",
+  "type:research",
+] as const;
+export type IssueTypeLabel = (typeof ISSUE_TYPE_LABELS)[number];
+
+export const PRIORITY_LABELS = [
+  "priority:queue-jump",
+  "priority:normal",
+  "priority:background",
+] as const;
+export type PriorityLabel = (typeof PRIORITY_LABELS)[number];
+
+export const BUSINESS_RISK_LABELS = [
+  "risk:low-stakes",
+  "risk:normal",
+  "risk:destructive",
+] as const;
+export type BusinessRiskLabel = (typeof BUSINESS_RISK_LABELS)[number];
+
+export type IntakeLabelContractResult =
+  | { ok: true }
+  | { ok: false; reason: string };
+
+function labelsIn(labels: string[], allowed: readonly string[]): string[] {
+  return labels.filter((label) => allowed.includes(label));
+}
+
+export function validateDispatchReadyContract(labels: string[]): IntakeLabelContractResult {
+  if (!labels.includes(DISPATCH_READY_LABEL)) {
+    return { ok: false, reason: "missing dispatch:ready" };
+  }
+  const groups = [
+    ["type", labelsIn(labels, ISSUE_TYPE_LABELS)],
+    ["priority", labelsIn(labels, PRIORITY_LABELS)],
+    ["risk", labelsIn(labels, BUSINESS_RISK_LABELS)],
+  ] as const;
+  for (const [group, hits] of groups) {
+    if (hits.length !== 1) {
+      return {
+        ok: false,
+        reason:
+          hits.length === 0
+            ? `missing ${group}:* intake label`
+            : `conflicting ${group}:* intake labels (${hits.join(", ")})`,
+      };
+    }
+  }
+  return { ok: true };
+}
 
 /**
  * Legacy assignment labels continue to admit already-queued work during migration, but
@@ -93,7 +151,7 @@ export function isDispatchRequested(labels: string[]): boolean {
 export const QUEUE_JUMP_LABEL = "queue jump";
 export const TECHNICAL_DEBT_LABEL = "technical debt";
 
-export const DISPATCHER_PRIORITY_TIERS = ["queue-jump", "regular", "technical-debt"] as const;
+export const DISPATCHER_PRIORITY_TIERS = ["queue-jump", "normal", "background"] as const;
 export type DispatcherPriorityTier = (typeof DISPATCHER_PRIORITY_TIERS)[number];
 
 /** Labels the repo already uses to mean "an agent has this". */
@@ -338,9 +396,71 @@ export function resolveRoutingOverride(labels: string[]): RoutingOverrideResult 
 }
 
 export function resolvePriorityTier(labels: string[]): DispatcherPriorityTier {
+  if (labels.includes("priority:queue-jump")) return "queue-jump";
+  if (labels.includes("priority:background")) return "background";
+  if (labels.includes("priority:normal")) return "normal";
   if (labels.includes(QUEUE_JUMP_LABEL)) return "queue-jump";
-  if (labels.includes(TECHNICAL_DEBT_LABEL)) return "technical-debt";
-  return "regular";
+  if (labels.includes(TECHNICAL_DEBT_LABEL)) return "background";
+  return "normal";
+}
+
+export interface LabelMigration {
+  add: string[];
+  remove: string[];
+  needsInputReason: string | null;
+}
+
+export function migrationForLegacyIntakeLabels(labels: string[]): LabelMigration {
+  const add = new Set<string>();
+  const remove = new Set<string>();
+  if (isDispatchRequested(labels) && !labels.includes(DISPATCH_READY_LABEL)) {
+    add.add(DISPATCH_READY_LABEL);
+  }
+  if (labels.includes(QUEUE_JUMP_LABEL) && !labels.includes("priority:queue-jump")) {
+    add.add("priority:queue-jump");
+    remove.add(QUEUE_JUMP_LABEL);
+  } else if (labels.includes(TECHNICAL_DEBT_LABEL) && !labels.includes("priority:background")) {
+    add.add("priority:background");
+    remove.add(TECHNICAL_DEBT_LABEL);
+  } else if (!labelsIn(labels, PRIORITY_LABELS).length) {
+    add.add("priority:normal");
+  }
+
+  const task = labels.find((label) => label.startsWith("task:"))?.slice("task:".length);
+  const taskMap: Record<string, IssueTypeLabel> = {
+    bug: "type:bug",
+    bugfix: "type:bug",
+    feature: "type:enhancement",
+    enhancement: "type:enhancement",
+    refactor: "type:refactor",
+    chore: "type:chore",
+    docs: "type:docs",
+    ops: "type:ops",
+    research: "type:research",
+  };
+  if (!labelsIn(labels, ISSUE_TYPE_LABELS).length && task && taskMap[task]) {
+    add.add(taskMap[task]);
+  }
+
+  const legacyRisk = labels.find((label) => /^risk:(low|medium|high)$/.test(label));
+  const riskMap: Record<string, BusinessRiskLabel> = {
+    "risk:low": "risk:low-stakes",
+    "risk:medium": "risk:normal",
+    "risk:high": "risk:destructive",
+  };
+  if (!labelsIn(labels, BUSINESS_RISK_LABELS).length && legacyRisk) {
+    add.add(riskMap[legacyRisk]!);
+  }
+
+  const projected = [...labels.filter((label) => !remove.has(label)), ...add];
+  const contract = projected.includes(DISPATCH_READY_LABEL)
+    ? validateDispatchReadyContract(projected)
+    : { ok: true as const };
+  return {
+    add: [...add].filter((label) => !labels.includes(label)),
+    remove: [...remove],
+    needsInputReason: contract.ok ? null : contract.reason,
+  };
 }
 
 /**
