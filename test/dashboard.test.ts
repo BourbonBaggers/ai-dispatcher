@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   computeNextRunAt,
+  dashboardRecentRuns,
   dashboardPayload,
   parseDashboardArgs,
   parseEnvironmentFile,
@@ -153,8 +154,47 @@ ExecStart=/node bin/ai-dispatcher.mjs --repo acme/widgets --interval 60
     assert.equal(payload.version, 1);
     assert.equal(payload.instances.length, 1);
     assert.equal(payload.instances[0]?.kind, "idle");
+    assert.deepEqual(payload.instances[0]?.recentRuns, []);
     assert.equal(payload.instances[0]?.systemd.mainPid, 42);
     assert.ok((payload.instances[0]?.nextRunAt ?? 0) >= Date.parse("2026-07-30T05:01:00.000Z"));
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dashboardRecentRuns returns the five newest non-idle runs", () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    for (let issue = 1; issue <= 6; issue += 1) {
+      const run = store.createRun({
+        issueNumber: issue,
+        issueTitle: `issue ${issue}`,
+        issueUrl: `https://github.com/acme/widgets/issues/${issue}`,
+        agent: "codex",
+        modelLabel: "model:gpt-5.5",
+        cliModel: "gpt-5.5",
+        effortLabel: "effort:medium",
+        cliEffort: "medium",
+        branch: `issue-${issue}`,
+        checkoutPath: `/tmp/issue-${issue}`,
+        planPath: null,
+        trigger: "poll",
+      });
+      store.updateRun(run.id, {
+        status: issue === 3 ? "interrupted" : "shipped",
+        createdAt: issue * 1000,
+        finishedAt: issue * 1000 + 500,
+      });
+    }
+
+    const recent = dashboardRecentRuns(dir);
+    assert.deepEqual(
+      recent.map((run) => run.issue.number),
+      [6, 5, 4, 3, 2],
+    );
+    assert.equal(recent[3]?.status, "interrupted");
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });

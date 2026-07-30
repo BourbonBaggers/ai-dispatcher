@@ -205,6 +205,12 @@ The installer creates and enables `ai-dispatcher-dashboard.service`, binding to
 `http://<dev-server>:8787/` after reboot. Override with `DASHBOARD_HOST`,
 `DASHBOARD_PORT`, `DASHBOARD_CHECKOUT`, `DASHBOARD_NODE_BIN`, or `DASHBOARD_UNIT`.
 
+The same page is available as a compact popover-friendly view at `/compact`. The Mac mini
+menu bar app in [`macos/DispatcherStatusBar`](macos/DispatcherStatusBar) opens
+`http://192.168.0.240:8787/compact` and reports a visible offline state if that URL is
+unreachable. Build, install, and launch-at-login steps are documented in
+[`docs/macos-menu-bar.md`](docs/macos-menu-bar.md).
+
 ## On-demand policy cleanup for target repositories (#28)
 
 `target policy-cleanup` uses the configured escalation model
