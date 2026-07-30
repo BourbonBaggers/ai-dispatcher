@@ -35,7 +35,7 @@ every periodic refresh: keep it mounted across status refreshes for the selected
 instance, and only tear it down (stopping its stream) when the selected instance
 changes. Handle malformed SSE payloads and stream errors without throwing.
 
-## Milestone 3: Verify
+## [DONE] Milestone 3: Verify
 
 Add unit tests for the new pure replay-capping helper. Exercise `/api/stream`
 end-to-end with a scripted client (fake `ExecFn`, seeded run-output fixture) to

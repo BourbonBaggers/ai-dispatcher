@@ -386,7 +386,7 @@ export function capReplayBatch(entries: RunOutputEntry[], limit: number, previou
   return { toSend, omitted, nextSeq };
 }
 
-async function streamInstance(
+export async function streamInstance(
   unit: string,
   explicitUnits: string[],
   res: ServerResponse,
