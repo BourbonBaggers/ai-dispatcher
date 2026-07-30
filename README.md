@@ -98,25 +98,32 @@ node bin/ai-dispatcher.mjs report --state-dir ~/dispatcher/state
 
 ## Local status and history
 
-`status` and `history` are local, read-only, and lock-free. They read only
-`DISPATCHER_STATE_DIR` / `--state-dir`, never call GitHub, never acquire
-`dispatcher.lock`, and never mutate durable state. If both `state.json` and
-`state.json.backup` are unreadable, they fail closed instead of reporting idle.
+`status` and `history` are read-only and lock-free. They read
+`DISPATCHER_STATE_DIR` / `--state-dir`, never acquire `dispatcher.lock`, and never mutate
+durable state. `status` also performs a bounded read-only GitHub check for open issues
+with `agent-working` when a repo is supplied through `--repo` / `DISPATCHER_REPO` or can
+be inferred from existing state; use `--no-github` for a strictly local read. If both
+`state.json` and `state.json.backup` are unreadable, they fail closed instead of
+reporting idle.
 
 ```bash
 ai-dispatcher status --state-dir ~/dispatcher/state
+ai-dispatcher status --state-dir ~/dispatcher/state --repo BourbonBaggers/internal-tools
 ai-dispatcher status --state-dir ~/dispatcher/state --json
 ai-dispatcher status --state-dir ~/dispatcher/state --follow
 ai-dispatcher status --state-dir ~/dispatcher/state --json --follow
+ai-dispatcher status --state-dir ~/dispatcher/state --no-github
 ai-dispatcher history --state-dir ~/dispatcher/state
 ai-dispatcher history --state-dir ~/dispatcher/state --json --limit 50
 ```
 
-Human `status` output is exactly `idle` when a live dispatcher has no claimed work. If no
-live lock exists and no claimed work is durable, it prints `offline`. If claimed work
-exists, it prints `active:` with the locally known issue, PR, branch, agent/model, phase,
-status, and an optional exact `gh` command the operator may run separately for fresh
-GitHub state.
+Human `status` output is exactly `idle` only when the live dispatcher has no claimed work
+and no checked GitHub issue has `agent-working`. If no live lock exists and no claimed
+work is durable, it prints `offline`. If durable claimed work exists, it prints `active:`
+with the locally known issue, PR, branch, agent/model, phase, status, and exact `gh`
+commands for inspection. If durable state is idle but GitHub still has `agent-working`, it
+prints `attention:` with the labelled issue and PR-search command instead of hiding behind
+`idle`.
 
 Each run persists an explicit trusted phase in `state.json`. Provider stdout is never
 parsed as phase evidence. The current phase is one of:
@@ -138,7 +145,8 @@ Versioned JSON schemas:
   service: { state: "online", pid: number } |
     { state: "offline", pid: number | null, reason: "missing" | "stale" | "corrupt" },
   stateSource: "primary" | "backup" | "empty",
-  current: null | RunSummary
+  current: null | RunSummary,
+  github: GithubStatusEvidence
 }
 
 // ai-dispatcher history --json

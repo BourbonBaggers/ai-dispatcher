@@ -11,6 +11,7 @@ import {
   runHistoryCommand,
   runStatusCommand,
   statusSnapshot,
+  statusSnapshotWithGithub,
 } from "../src/status.ts";
 import { appendRunOutputEntry } from "../src/run-output.ts";
 import { runOutputPath } from "../src/state.ts";
@@ -82,6 +83,73 @@ test("idle human status is exactly terse when the dispatcher is live with no run
     const store = StateStore.open(dir);
     assert.equal(renderStatusHuman(statusSnapshot(dir)), "idle");
     store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("status surfaces GitHub agent-working when durable state has no current claim", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const old = store.createRun(claimData(3));
+    store.updateRun(old.id, { status: "shipped", phase: "verifying", finishedAt: 2 });
+    store.releaseLock();
+
+    const snapshot = await statusSnapshotWithGithub(dir, null, async (_file, args) => {
+      assert.deepEqual(args.slice(0, 8), [
+        "issue",
+        "list",
+        "--repo",
+        "acme/widgets",
+        "--state",
+        "open",
+        "--label",
+        "agent-working",
+      ]);
+      return {
+        ok: true,
+        stdout: JSON.stringify([
+          {
+            number: 513,
+            title: "OMS rows need paid state",
+            url: "https://github.com/acme/widgets/issues/513",
+            labels: [{ name: "agent-working" }],
+          },
+        ]),
+        stderr: "",
+        code: 0,
+      };
+    });
+
+    const human = renderStatusHuman(snapshot);
+    assert.match(human, /^attention:/);
+    assert.match(human, /no durable claiming run, but GitHub has agent-working/);
+    assert.match(human, /issue: #513 OMS rows need paid state/);
+    assert.match(human, /pr-search: gh pr list --repo acme\/widgets --state all --search "513"/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("status warns when durable active work lacks the GitHub working label", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run = store.createRun(claimData(7));
+    store.updateRun(run.id, { status: "running", phase: "agent_working" });
+    store.releaseLock();
+
+    const snapshot = await statusSnapshotWithGithub(dir, "acme/widgets", async () => ({
+      ok: true,
+      stdout: "[]",
+      stderr: "",
+      code: 0,
+    }));
+
+    const human = renderStatusHuman(snapshot);
+    assert.match(human, /^active:/);
+    assert.match(human, /github: agent-working label is absent on current issue/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
