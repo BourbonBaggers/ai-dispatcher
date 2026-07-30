@@ -22,6 +22,8 @@ import {
   branchNameFor,
   assignmentForModel,
   resolveRoutingOverride,
+  DISPATCH_READY_LABEL,
+  validateDispatchReadyContract,
   type DispatcherAgent,
 } from "./labels.ts";
 import { selectEligibleIssue } from "./selection.ts";
@@ -32,7 +34,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { NOTIFY_PRIORITY_HIGH, type Notifier } from "./notify.ts";
 import { autoshipRun, AUTOSHIP_HELD_LABEL, type ShipRunner } from "./autoship.ts";
-import { dispatchableModels, modelByCliModel } from "./models.ts";
+import { dispatchableModels, modelByCliModel, tierRank } from "./models.ts";
 import {
   deriveEffort,
   parseCharacteristics,
@@ -398,6 +400,19 @@ export function planQuotaHandoff(
     rotationCursor: modelByCliModel(run.cliModel)?.capacityPool ?? null,
   });
   if (!decision.selected) return { ok: false, reason: decision.reason };
+  const currentModel = modelByCliModel(run.cliModel);
+  if (currentModel && tierRank(decision.selected.tier) < tierRank(currentModel.tier)) {
+    const comparable = dispatchableModels()
+      .filter((model) => !model.frontier)
+      .filter((model) => model.capacityPool !== currentModel.capacityPool)
+      .filter((model) => tierRank(model.tier) >= tierRank(currentModel.tier))
+      .filter((model) => {
+        const assessment = capacityByPool.get(model.capacityPool);
+        return !(assessment && isModelCapacityExhausted(assessment, model.modelLabel));
+      })
+      .sort((a, b) => tierRank(a.tier) - tierRank(b.tier))[0];
+    if (comparable) return assignmentForModel(comparable, run.assignedEffortLabel);
+  }
   return assignmentForModel(decision.selected, run.assignedEffortLabel);
 }
 
@@ -620,6 +635,10 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   const cursor = store.getSettings().lastInitialCapacityPool;
   const { candidates, target } = selectEligibleIssue(listing.issues, {
     assignmentForIssue: (issue) => {
+      if (issue.labels.includes(DISPATCH_READY_LABEL)) {
+        const contract = validateDispatchReadyContract(issue.labels);
+        if (!contract.ok) return contract;
+      }
       const characteristics = parseCharacteristics(issue.labels);
       const derivedEffort = deriveEffort(characteristics);
       const override = resolveRoutingOverride(issue.labels);

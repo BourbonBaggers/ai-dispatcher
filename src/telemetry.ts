@@ -22,6 +22,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "
 import { join } from "node:path";
 import type { RoutingConfidence } from "./routing.ts";
 import type { CapacityState } from "./capacity.ts";
+import { effectiveModelPrice, modelByLabel, type ModelPrice } from "./models.ts";
 
 // ── Token usage (honest about provenance) ────────────────────────────────────────
 
@@ -32,6 +33,8 @@ export interface TokenUsage {
   inputTokens: number | null;
   outputTokens: number | null;
   cachedTokens: number | null;
+  cacheWriteTokens?: number | null;
+  otherBillableUnits?: number | null;
   source: TokenSource;
 }
 
@@ -40,8 +43,37 @@ export const UNAVAILABLE_TOKENS: TokenUsage = {
   inputTokens: null,
   outputTokens: null,
   cachedTokens: null,
+  cacheWriteTokens: null,
+  otherBillableUnits: null,
   source: "unavailable",
 };
+
+export interface BilledCost {
+  amount: number;
+  currency: string;
+  source: "provider-reported" | "cli-reported";
+  confidence: "reported";
+}
+
+export interface ListPriceEquivalent {
+  amountUsd: number | null;
+  source: "calculated-from-trusted-usage" | "unavailable";
+  confidence: "high" | "unavailable";
+}
+
+export interface SubscriptionConsumption {
+  units: number | null;
+  unit: string;
+  source: "provider-reported" | "cli-reported" | "unavailable";
+}
+
+export interface AttemptCostEvidence {
+  priceSnapshot: ModelPrice | null;
+  billedCost: BilledCost | null;
+  listPriceEquivalent: ListPriceEquivalent;
+  subscriptionConsumption: SubscriptionConsumption | null;
+  toolCharges: BilledCost[];
+}
 
 // ── Attempt-level record ─────────────────────────────────────────────────────────
 
@@ -67,6 +99,7 @@ export interface AttemptRecord {
   endedAt: number | null;
   activeDurationMs: number | null;
   tokens: TokenUsage;
+  cost?: AttemptCostEvidence;
   cliExitCode: number | null;
   /** Retry / handoff reason that led to this attempt, or null for the first attempt. */
   retryReason: string | null;
@@ -102,6 +135,14 @@ export interface TokenTotals {
   source: TokenSource;
 }
 
+export interface CostTotals {
+  billed: Record<string, number>;
+  listPriceEquivalentUsd: number | null;
+  subscriptionConsumption: Record<string, number>;
+  frontierListPriceEquivalentUsd: number | null;
+  unavailableMeasures: string[];
+}
+
 /**
  * Lifecycle facts an attempt cannot know (merge, production, regressions). Recorded
  * externally as they become known; every field is optional and defaults conservatively.
@@ -127,6 +168,7 @@ export interface IssueRecord {
   tokensByModel: Record<string, TokenTotals>;
   tokensByProvider: Record<string, TokenTotals>;
   estimatedApiValueUsd: number | null;
+  costTotals?: CostTotals;
   finalCompletingModel: string | null;
   prStatus: PrStatus;
   ciStatus: CiStatus;
@@ -155,6 +197,81 @@ function foldTokens(into: TokenTotals | undefined, usage: TokenUsage): TokenTota
     outputTokens: base.outputTokens + (usage.outputTokens ?? 0),
     cachedTokens: base.cachedTokens + (usage.cachedTokens ?? 0),
     source: leastReliable(base.source, usage.source),
+  };
+}
+
+export function listPriceEquivalentForAttempt(attempt: AttemptRecord): ListPriceEquivalent {
+  if (
+    attempt.tokens.source === "unavailable" ||
+    attempt.tokens.inputTokens === null ||
+    attempt.tokens.outputTokens === null
+  ) {
+    return {
+      amountUsd: null,
+      source: "unavailable",
+      confidence: "unavailable",
+    };
+  }
+  const model = modelByLabel(attempt.selectedModelLabel);
+  if (!model) {
+    return {
+      amountUsd: null,
+      source: "unavailable",
+      confidence: "unavailable",
+    };
+  }
+  const price = attempt.cost?.priceSnapshot ?? effectiveModelPrice(model, new Date(attempt.startedAt));
+  const input = (attempt.tokens.inputTokens / 1_000_000) * price.inputUsdPerMillion;
+  const output = (attempt.tokens.outputTokens / 1_000_000) * price.outputUsdPerMillion;
+  const cached =
+    ((attempt.tokens.cachedTokens ?? 0) / 1_000_000) *
+    (price.cachedInputUsdPerMillion ?? price.inputUsdPerMillion);
+  return {
+    amountUsd: input + output + cached,
+    source: "calculated-from-trusted-usage",
+    confidence: "high",
+  };
+}
+
+function foldCostTotals(attempts: AttemptRecord[]): CostTotals {
+  const billed: Record<string, number> = {};
+  const subscriptionConsumption: Record<string, number> = {};
+  let listPriceEquivalentUsd: number | null = 0;
+  let frontierListPriceEquivalentUsd: number | null = 0;
+  const unavailableMeasures = new Set<string>();
+
+  for (const attempt of attempts) {
+    const cost = attempt.cost;
+    if (cost?.billedCost) {
+      billed[cost.billedCost.currency] =
+        (billed[cost.billedCost.currency] ?? 0) + cost.billedCost.amount;
+    }
+    const subscription = cost?.subscriptionConsumption;
+    if (subscription?.units !== null && subscription?.units !== undefined) {
+      subscriptionConsumption[subscription.unit] =
+        (subscriptionConsumption[subscription.unit] ?? 0) + subscription.units;
+    }
+    const list = cost?.listPriceEquivalent ?? listPriceEquivalentForAttempt(attempt);
+    if (list.amountUsd === null) {
+      listPriceEquivalentUsd = null;
+      if (attempt.frontierModelUsed) frontierListPriceEquivalentUsd = null;
+      unavailableMeasures.add("list-price equivalent");
+    } else {
+      if (listPriceEquivalentUsd !== null) listPriceEquivalentUsd += list.amountUsd;
+      if (attempt.frontierModelUsed && frontierListPriceEquivalentUsd !== null) {
+        frontierListPriceEquivalentUsd += list.amountUsd;
+      }
+    }
+    if (!cost?.billedCost) unavailableMeasures.add("billed cost");
+    if (!subscription) unavailableMeasures.add("subscription consumption");
+  }
+
+  return {
+    billed,
+    listPriceEquivalentUsd,
+    subscriptionConsumption,
+    frontierListPriceEquivalentUsd,
+    unavailableMeasures: [...unavailableMeasures].sort(),
   };
 }
 
@@ -215,6 +332,7 @@ export function aggregateIssue(
     tokensByModel,
     tokensByProvider,
     estimatedApiValueUsd: overlay.estimatedApiValueUsd ?? null,
+    costTotals: foldCostTotals(mine),
     finalCompletingModel,
     prStatus: overlay.prStatus ?? (mine.some((a) => a.prCreated) ? "open" : "none"),
     ciStatus: overlay.ciStatus ?? "unknown",

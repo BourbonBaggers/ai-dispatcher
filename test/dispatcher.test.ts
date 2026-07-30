@@ -184,7 +184,7 @@ test("quota handoff changes provider without consuming frontier or changing assi
   const handoff = planQuotaHandoff(blocked, capacities);
   assert.equal(handoff.ok, true);
   if (handoff.ok) {
-    assert.equal(handoff.value.modelLabel, "model:gpt-5.5");
+    assert.equal(handoff.value.modelLabel, "model:gpt-5.6-terra");
     assert.equal(handoff.value.effortLabel, "effort:high");
     assert.notEqual(handoff.value.modelLabel, "model:claude-opus-4.8");
   }
@@ -988,7 +988,7 @@ test("runScanOnce derives model and effort from an unassigned issue after readin
             number: 34,
             title: "claim-time routing",
             url: "https://x/34",
-            labels: ["dispatch:ready"],
+            labels: ["dispatch:ready", "type:bug", "priority:normal", "risk:normal"],
             authorLogin: "BourbonBaggers",
           }],
         }),
@@ -1034,17 +1034,17 @@ test("runScanOnce derives model and effort from an unassigned issue after readin
 
     const result = await runScanOnce(deps);
     const claimed = store.allRuns()[0]!;
-    assert.match(result.message, /Ran codex/);
+    assert.match(result.message, /Ran claude/);
     assert.equal(capacityReads, 1);
-    assert.equal(claimed.assignedModelLabel, "model:gpt-5.5");
+    assert.equal(claimed.assignedModelLabel, "model:claude-haiku-4.5");
     assert.equal(claimed.assignedEffortLabel, "effort:medium");
     assert.equal(claimed.routing?.source, "automatic");
-    assert.equal(claimed.routing?.capacitySelection, "live-headroom");
-    assert.equal(claimed.routing?.selectedPool, "codex-subscription");
-    assert.equal(store.getSettings().lastInitialCapacityPool, "codex-subscription");
+    assert.equal(claimed.routing?.capacitySelection, "only-capable");
+    assert.equal(claimed.routing?.selectedPool, "claude-subscription");
+    assert.equal(store.getSettings().lastInitialCapacityPool, "claude-subscription");
     assert.equal(store.getProviderSuppression("codex"), null);
-    assert.ok(added.includes("agent:codex"));
-    assert.ok(added.includes("model:gpt-5.5"));
+    assert.ok(added.includes("agent:claude"));
+    assert.ok(added.includes("model:claude-haiku-4.5"));
     assert.ok(added.includes("effort:medium"));
     store.releaseLock();
   } finally {
@@ -1078,14 +1078,14 @@ test("runScanOnce does not audit blocked issues while normal eligible work exist
               number: 28,
               title: "blocked",
               url: "https://x/28",
-              labels: ["blocked", "dispatch:ready"],
+              labels: ["blocked", "dispatch:ready", "type:bug", "priority:normal", "risk:normal"],
               authorLogin: "BourbonBaggers",
             },
             {
               number: 29,
               title: "ready",
               url: "https://x/29",
-              labels: ["dispatch:ready"],
+              labels: ["dispatch:ready", "type:bug", "priority:normal", "risk:normal"],
               authorLogin: "BourbonBaggers",
             },
           ],
