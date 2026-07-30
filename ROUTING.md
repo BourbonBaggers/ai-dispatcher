@@ -1,8 +1,9 @@
 # Pickup-time routing rubric
 
 The dispatcher chooses provider, model, and effort when it claims an issue. Issue authors
-describe the workload with characteristic and priority labels; they do not need to know
-subscription state or preselect execution parameters.
+provide a clear issue plus `dispatch:ready` and one label from each business-facing
+group: `type:*`, `priority:*`, and `risk:*`. They do not need to know subscription state,
+technical workload dimensions, or execution parameters.
 
 `src/models.ts` is the model-catalog authority. `src/routing.ts` implements the pure
 capability and effort rubric, `src/capacity.ts` normalizes capacity evidence, and the
@@ -10,8 +11,8 @@ dispatcher joins those decisions atomically at pickup.
 
 ## Objective
 
-> Use the minimum viable model while balancing paid subscription headroom and preserving
-> frontier capacity, with no routine operator involvement.
+> Use the lowest expected-cost route that is adequate for a successful result while
+> preserving frontier capacity and requiring no routine operator involvement.
 
 Success means merged, deployed, healthy, and requiring no material human repair. A cheap
 first miss is acceptable when deterministic verification and automatic recovery make it
@@ -24,22 +25,24 @@ board. Most mistakes happen on a Git branch, are caught by tests or CI, and can 
 Production changes are health-checked and rollback is the safety net. The number of users,
 organizational approval layers, and enterprise governance overhead are not routing inputs.
 
-Judge the residual work left for the coding agent after reading the issue. Apply only
-labels that materially differ from the middle defaults; an omitted dimension uses its
-middle value and never wedges an issue. When choosing between adjacent values, use the
-lower one unless the issue contains concrete evidence for the higher value.
+Judge the residual work left for the coding agent after reading the issue. New issues
+normally carry exactly these labels:
 
-| Dimension | Label | Values |
-| --- | --- | --- |
-| Task type | `task:<type>` | e.g. `feature`, `bugfix`, `refactor`, `docs`, `test`, `infra` |
-| Complexity | `complexity:<v>` | `trivial`, `simple`, `moderate`, `complex` |
-| Residual blast radius | `risk:<v>` | `low`, `medium`, `high` |
-| Context size | `context:<v>` | `small`, `medium`, `large` |
-| Ambiguity | `ambiguity:<v>` | `clear`, `some`, `high` |
-| Requirements quality | `requirements:<v>` | `good`, `adequate`, `poor` |
-| Residual reasoning | `reasoning:<v>` | `shallow`, `moderate`, `deep` |
-| Verification strength | `verification:<v>` | `weak`, `standard`, `strong` |
-| Recoverability | `recoverability:<v>` | `low`, `medium`, `high` |
+| Group | Values |
+| --- | --- |
+| Type | `type:bug`, `type:enhancement`, `type:refactor`, `type:chore`, `type:docs`, `type:ops`, `type:research` |
+| Priority | `priority:queue-jump`, `priority:normal`, `priority:background` |
+| Risk | `risk:low-stakes`, `risk:normal`, `risk:destructive` |
+
+Priority controls order only. Risk informs the initial route and safeguards, but
+`risk:destructive` does not automatically select a frontier model. Missing or materially
+contradictory requirements produce `needs-input` rather than expensive-model escalation.
+
+Legacy technical labels (`complexity:*`, `context:*`, `ambiguity:*`, `requirements:*`,
+`reasoning:*`, `verification:*`, and `recoverability:*`) are migration/advisory evidence.
+The dispatcher may use that internal evidence to move one route down for localized,
+strongly verified work or one route up for concrete cross-cutting context, unresolved
+approach selection, or weak verification.
 
 Use `requirements:good` only when the issue gives a bounded execution package: outcome,
 scope and exclusions, acceptance criteria, business/data rules, dependencies, verification,
@@ -81,40 +84,33 @@ Route by uncertainty remaining after requirements and safeguards. Importance, co
 breadth, state-machine vocabulary, and “production-adjacent” language do not independently
 justify a stronger model.
 
-## 2. Derive the minimum model tier
+## 2. Derive the route
 
-The capability ladder is `fast → general → complex → frontier`. General is the default.
+The route ladder is `tiny → cheap → standard → capable → hard → frontier → ultra-frontier`.
 
-| Tier | Initial use |
-| --- | --- |
-| **fast** | Trivial/simple, low-risk, clear work with good requirements, shallow reasoning, and strong deterministic verification. |
-| **general** | Most bounded work with a known approach, including cross-file stateful work with explicit invariants; also complex raw scope whose design is settled and whose failures are strongly verified and cheaply recoverable. |
-| **complex** | Meaningful approach selection remains: genuinely complex implementation structure, high ambiguity, poor requirements, or deep residual reasoning. Risk alone does not select this tier. |
-| **frontier** | Exceptional first attempts only: complex and high-risk work with deep uncertainty plus weak verification or low recoverability. |
-
-Raw complex scope receives a one-tier recoverability discount when requirements are good,
-ambiguity is not high, reasoning is not deep, verification is strong, and recovery is
-cheap. High risk does not cancel real verification and recoverability. Frontier otherwise
-remains the final automatic recovery rung.
+| Type | Low-stakes | Normal | Destructive |
+| --- | --- | --- | --- |
+| Docs | tiny | cheap | standard |
+| Chore | tiny | cheap | capable |
+| Bug | cheap | standard | capable |
+| Enhancement | standard | standard | capable |
+| Refactor | standard | capable | hard |
+| Ops | standard | capable | hard |
+| Research | standard | capable | hard |
 
 The human-readable decision rule is:
 
-> Start at general + medium. Move down for deterministic mechanical work. Move effort up
-> for execution breadth or persistence. Move the model up only when the worker must choose
-> the right approach under unresolved uncertainty.
-
-Current catalog warning: `context:large` requires large-context capability, while
-`complexity:complex` requires the complex lane. No current live model satisfies both.
-That combination is intentionally unroutable and should be used only when both assertions
-are literally true—not as a way to say “this is an important broad change.”
+> Start from the type/risk matrix. Move down once for deterministic localized work. Move
+> up once for concrete unresolved implementation evidence. Use `needs-input` for poor
+> requirements. Keep frontier exceptional.
 
 ### Calibration examples from this repository
 
 | Work item | Appropriate characteristics | Initial route |
 | --- | --- | --- |
-| Reconcile target policy before each launch (#26) | `complexity:moderate`, `risk:medium`, `context:medium`, `ambiguity:clear`, `requirements:good`, `reasoning:moderate`, `verification:strong`, `recoverability:high` | general + medium |
-| Compose existing autoship machinery into a one-shot command (#27) | `complexity:moderate`, `risk:medium`, `context:medium`, `ambiguity:clear`, `requirements:good`, `reasoning:moderate`, `verification:strong`, `recoverability:high` | general + medium |
-| Add blocked, on-demand semantic policy cleanup (#28) | `complexity:moderate`, `risk:medium`, `context:medium`, `ambiguity:some`, `requirements:good`, `reasoning:moderate`, `verification:standard`, `recoverability:high` | blocked; general + medium when admitted |
+| Reconcile target policy before each launch (#26) | `type:ops`, `risk:normal`, `priority:normal`, clear requirements, strong verification | capable + medium |
+| Compose existing autoship machinery into a one-shot command (#27) | `type:enhancement`, `risk:normal`, `priority:normal`, clear requirements, strong verification | standard + medium |
+| Add blocked, on-demand semantic policy cleanup (#28) | `type:enhancement`, `risk:normal`, `priority:background`, blocked until policy is clear | blocked; standard + medium when admitted |
 
 ## 3. Derive effort independently
 
@@ -156,15 +152,14 @@ Capacity reads are bounded. One or both adapters failing never stops the scan.
 
 For each issue in priority order:
 
-1. Exclude models below the minimum tier.
-2. Admit at most one non-frontier tier of headroom.
-3. Enforce context and task capabilities.
-4. Withhold frontier unless the issue characteristics justify it.
-5. Exclude pools or model-specific windows proven exhausted.
-6. When both pools have comparable live evidence and their constrained headroom differs
-   by more than the hysteresis threshold, prefer greater headroom.
-7. When evidence is close, missing, or incomparable, use the durable round-robin cursor.
-8. Within the chosen pool, use the lowest adequate model, then task-class match.
+1. Exclude unavailable or technically incompatible candidates.
+2. Withhold frontier and ultra-frontier unless explicitly justified.
+3. Prefer the candidate with the lowest expected cost to successful completion.
+4. Use effective list price and effort as the fallback estimate when trusted comparable
+   completion evidence is insufficient.
+5. Use measured task-type success and retry cost when enough comparable evidence exists.
+6. Use subscription headroom and capacity as availability constraints and close-cost
+   tie-breakers, not as permission to jump several price tiers.
 
 If an issue is temporarily unroutable, leave it unclaimed and continue through the queue.
 Retry it on later polls. Capacity scheduling never creates `autoship-held`, spends a
@@ -175,21 +170,26 @@ Current live lanes:
 <!-- BEGIN GENERATED LIVE MODEL LANES -->
 | Tier | Role | `agent:*` label | `model:*` label | CLI model | Pool | Frontier |
 | --- | --- | --- | --- | --- | --- | --- |
-| fast | fast | `agent:claude` | `model:claude-haiku-4.5` | `claude-haiku-4-5-20251001` | `claude-subscription` | no |
-| general | general | `agent:claude` | `model:claude-sonnet-5` | `claude-sonnet-5` | `claude-subscription` | no |
+| tiny | tiny | `agent:claude` | `model:claude-haiku-4.5` | `claude-haiku-4-5-20251001` | `claude-subscription` | no |
+| capable | capable | `agent:claude` | `model:claude-sonnet-5` | `claude-sonnet-5` | `claude-subscription` | no |
 | frontier | frontier-reserve | `agent:claude` | `model:claude-opus-4.8` | `claude-opus-4-8` | `claude-subscription` | **yes** |
-| complex | complex | `agent:codex` | `model:gpt-5.5` | `gpt-5.5` | `codex-subscription` | no |
+| ultra-frontier | ultra-frontier-reserve | `agent:claude` | `model:claude-fable-5` | `claude-fable-5` | `claude-subscription` | **yes** |
+| tiny | tiny | `agent:codex` | `model:gpt-5.4-mini` | `gpt-5.4-mini` | `codex-subscription` | no |
+| standard | standard | `agent:codex` | `model:gpt-5.6-luna` | `gpt-5.6-luna` | `codex-subscription` | no |
+| capable | capable | `agent:codex` | `model:gpt-5.6-terra` | `gpt-5.6-terra` | `codex-subscription` | no |
+| capable | capable | `agent:codex` | `model:gpt-5.4` | `gpt-5.4` | `codex-subscription` | no |
+| frontier | frontier-reserve | `agent:codex` | `model:gpt-5.6-sol` | `gpt-5.6-sol` | `codex-subscription` | **yes** |
+| frontier | frontier-reserve | `agent:codex` | `model:gpt-5.5` | `gpt-5.5` | `codex-subscription` | **yes** |
 <!-- END GENERATED LIVE MODEL LANES -->
 
 Run `npm run docs:routing` after changing `src/models.ts`.
 
 ## 6. Assignment labels and overrides
 
-Any recognized workload-characteristic label admits a planned issue. `dispatch:ready` is
-the explicit provider-neutral admission marker for an issue that intentionally relies on
-all default characteristics. Neither form needs `agent:*`, `model:*`, or `effort:*`.
-Ordinary assignment labels remain a legacy admission signal, but are advisory/stale and
-cannot wedge the queue. After the
+`dispatch:ready` is the sole normal admission signal. A ready issue also carries exactly
+one valid `type:*`, `priority:*`, and business `risk:*` label. Legacy workload and
+assignment labels remain migration signals, but are advisory/stale and cannot wedge the
+queue. After the
 durable claim, the dispatcher rewrites them best-effort for visibility.
 
 Only `route:human-override` makes assignment labels authoritative. It requires exactly one
@@ -205,8 +205,9 @@ from the learning dataset.
 
 A quota exit changes capacity, not task difficulty. The dispatcher re-routes the existing
 run inside the original capability band, preserving assigned effort and branch state.
-One adjacent non-frontier tier is allowed, so Sonnet exhaustion can hand off to GPT-5.5
-before Opus. A quota handoff does not consume the frontier rung.
+One adjacent non-frontier route is allowed, so Sonnet exhaustion can hand off to a
+comparable Codex capable lane before Opus or Sol. A quota handoff does not consume the
+frontier rung.
 
 If no alternate pool is usable, the run waits and revalidates automatically. It does not
 become operator work.
@@ -239,8 +240,9 @@ repair → frontier → durable exhaustion path can require an operator.
 
 ## Priority and future providers
 
-`queue jump`, regular, and `technical debt` control order only. They never select model or
-effort.
+`priority:queue-jump`, `priority:normal`, and `priority:background` control order only.
+They never select model or effort. Legacy `queue jump` and `technical debt` labels migrate
+to `priority:queue-jump` and `priority:background`.
 
 To add a provider, add the complete disabled catalog entry in `src/models.ts`, implement
 its launch and bounded capacity adapters, test its safety contract, then enable it. Never

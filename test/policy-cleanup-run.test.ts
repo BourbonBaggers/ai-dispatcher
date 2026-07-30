@@ -28,6 +28,16 @@ const model: ModelEntry = {
   largeContext: false,
   capacityPool: "claude-subscription",
   fallbacks: [],
+  listPrice: {
+    standardContext: [
+      {
+        inputUsdPerMillion: 5,
+        outputUsdPerMillion: 25,
+        source: "test",
+        effectiveFrom: "2026-01-01",
+      },
+    ],
+  },
   enabled: true,
 };
 

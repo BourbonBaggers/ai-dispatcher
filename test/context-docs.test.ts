@@ -104,3 +104,13 @@ test("self-ship does not bypass durable exhaustion with an operator page", () =>
   assert.match(script, /ROLLBACK_RESTART_ATTEMPTS/);
   assert.match(script, /deployment_failed_rollback_failed/);
 });
+
+test("self-ship classifies CI from structured check buckets", () => {
+  const script = readFileSync(resolve(root, "scripts/self-ship.sh"), "utf8");
+  assert.match(script, /ci_state_from_checks_json/);
+  assert.match(script, /gh pr checks "\$PR" --repo "\$REPO" --json bucket/);
+  assert.match(script, /bucket === "fail" \|\| bucket === "cancel"/);
+  assert.match(script, /bucket === "pending"/);
+  assert.match(script, /bucket === "pass" \|\| bucket === "skipping"/);
+  assert.doesNotMatch(script, /gh pr checks "\$PR" --repo "\$REPO" >\/dev\/null 2>&1/);
+});
