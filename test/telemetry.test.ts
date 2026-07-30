@@ -61,6 +61,34 @@ test("aggregateIssue folds attempts and stays honest about token provenance", ()
   assert.equal(rec.tokensByProvider["anthropic"]!.outputTokens, 20);
 });
 
+test("aggregateIssue separates list-price equivalent from unavailable billed cost", () => {
+  const rec = aggregateIssue(1, [
+    attempt({
+      attemptId: "cost-1",
+      selectedModelLabel: "model:gpt-5.4-mini",
+      modelRequested: "gpt-5.4-mini",
+      provider: "openai",
+      tokens: tokens({
+        inputTokens: 1_000_000,
+        outputTokens: 1_000_000,
+        cachedTokens: 0,
+        source: "reported",
+      }),
+    }),
+    attempt({
+      attemptId: "cost-2",
+      selectedModelLabel: "model:claude-opus-4.8",
+      modelRequested: "claude-opus-4-8",
+      frontierModelUsed: true,
+      tokens: UNAVAILABLE_TOKENS,
+    }),
+  ]);
+  assert.equal(rec.costTotals?.listPriceEquivalentUsd, null);
+  assert.ok(rec.costTotals?.unavailableMeasures.includes("billed cost"));
+  assert.ok(rec.costTotals?.unavailableMeasures.includes("list-price equivalent"));
+  assert.deepEqual(rec.costTotals?.billed, {});
+});
+
 test("aggregateIssue: a PR alone is not success — merge + prod are required", () => {
   const attempts = [attempt({ terminalStatus: "pr_ready", prCreated: true })];
   // Ready/open PR only: not success.
