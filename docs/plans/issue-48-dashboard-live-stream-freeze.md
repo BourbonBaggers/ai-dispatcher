@@ -26,7 +26,7 @@ the emitted slice is capped. Explicitly close the response for an unknown unit
 instead of leaving the connection open with nothing left to write. Cover the capping
 decision with a pure, unit-tested helper.
 
-## Milestone 2: Fix client rendering and lifecycle
+## [DONE] Milestone 2: Fix client rendering and lifecycle
 
 Batch incoming SSE entries client-side (coalesce into a bounded ring buffer and flush
 the DOM on a short timer instead of per-message) so a burst of history doesn't force
