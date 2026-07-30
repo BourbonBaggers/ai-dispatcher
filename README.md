@@ -1,8 +1,8 @@
 # ai-dispatcher
 
 Standalone AI issue dispatcher. Polls a GitHub repository, claims one open issue carrying
-workload-characteristic labels, chooses provider/model/effort from live capacity at pickup,
-and runs Codex or Claude Code against it in an
+the business-facing dispatcher intake labels, chooses provider/model/effort by expected
+completion cost at pickup, and runs Codex or Claude Code against it in an
 isolated checkout — serially, with retries, provider cooldowns, and durable file-backed
 state. Without autoship its handoff is a ready-for-review pull request. With autoship configured,
 the output is a merged PR, verified production deployment, and closed issue.
@@ -29,7 +29,7 @@ On each scan (when no run is active):
    and never while its provider is in a token cooldown.
 2. **Select one fresh issue.** Open issues are evaluated oldest-first and filtered by an
    allowlist contract (below). The single highest-priority eligible issue is chosen by
-   tier: `queue jump` → regular → `technical debt`.
+   tier: `priority:queue-jump` → `priority:normal` → `priority:background`.
 3. **Claim, then label.** The state row is the authoritative lock; the `agent-working`
    label is added after the claim so a failed label write cannot desync the claim.
 4. **Launch and supervise.** The bundled `dispatch-agent.sh` clones an isolated checkout,
@@ -37,9 +37,12 @@ On each scan (when no run is active):
    itself), launches the CLI under a wall-clock budget, checkpoints the plan every 60s,
    captures uncommitted work on a clean exit, opens a **ready** PR, and waits for the real
    CI verdict.
-5. **Recover or finalize.** Agent/CI/merge/deploy failures retry with the assigned model,
-   then get one Opus 4.8 attempt. Only verified production success or exhausted frontier
-   failure finalizes the delivery; progress attempts do not page the operator.
+5. **Recover or finalize.** Agent/CI/merge/deploy failures choose the next action from
+   evidence: retry transient failures, repair concrete CI/merge/deploy findings, raise
+   effort for shallow/incomplete work, hand off laterally for provider misses or capacity,
+   and use frontier only after cheaper recovery options are exhausted. Only verified
+   production success or exhausted frontier failure finalizes the delivery; progress
+   attempts do not page the operator.
 
 For coding, CI, merge, and deploy, `autoship-held` is valid only with durable evidence
 that the assigned-model repair budget and the automatic frontier attempt both failed.
@@ -58,19 +61,23 @@ model, and effort atomically at pickup:
 
 | Label                           | Meaning                                                                            |
 | ------------------------------- | ---------------------------------------------------------------------------------- |
-| `dispatch:ready`                | explicit provider-neutral admission when relying on all default characteristics    |
-| workload characteristics        | admit planned work and drive tier/effort; missing axes use conservative defaults    |
+| `dispatch:ready`                | normal provider-neutral admission signal                                           |
+| `type:*`                        | exactly one of `bug`, `enhancement`, `refactor`, `chore`, `docs`, `ops`, `research` |
+| `priority:*`                    | exactly one of `queue-jump`, `normal`, `background`; affects queue order only       |
+| `risk:*`                        | exactly one of `low-stakes`, `normal`, `destructive`; informs route safeguards      |
+| legacy workload characteristics | migration/advisory evidence; no longer required from issue authors                 |
 | `agent:*` / `model:*` / `effort:*` | dispatcher output for visibility; non-authoritative unless explicitly overridden |
 | `route:human-override`          | makes one compatible agent/model pair and optional effort an explicit initial pin  |
-| `queue jump` / `technical debt` | move the issue between priority tiers                                              |
 | `agent-working`                 | the dispatcher is actively on it (added on claim, cleared on non-resumable finish) |
 | `needs-input` / `blocked`       | held for a human during normal selection; `blocked` can be conservatively re-audited only when the queue is otherwise idle |
 
 The `model:*` allowlist is **data-driven**: it is derived from the curated registry in
-`src/models.ts`, not hand-maintained. The live lanes are `model:claude-haiku-4.5` (fast),
-`model:claude-sonnet-5` (general / large-context / planning), `model:gpt-5.5` (complex),
-and `model:claude-opus-4.8` (frontier reserve). A disabled or future-provider registry
-entry is documentation and is not dispatchable.
+`src/models.ts`, not hand-maintained. The live lanes cover the configured Codex and
+Claude CLIs from tiny through frontier and explicit ultra-frontier reserve, including
+`model:gpt-5.4-mini`, `model:gpt-5.6-luna`, `model:gpt-5.6-terra`, `model:gpt-5.4`,
+`model:gpt-5.6-sol`, `model:gpt-5.5`, `model:claude-haiku-4.5`,
+`model:claude-sonnet-5`, `model:claude-opus-4.8`, and `model:claude-fable-5`.
+A disabled or future-provider registry entry is documentation and is not dispatchable.
 
 Labels are never passed to a shell. The dispatcher looks up its selected registry entry
 and effort in frozen maps; only those constants reach the CLI. Missing, partial, stale,
@@ -79,9 +86,11 @@ human override is rejected visibly rather than silently violated.
 
 ## Capacity-aware routing & evidence (#319)
 
-At pickup the dispatcher derives minimum model tier and effort, then reads live Codex and
-Claude usage windows. It balances constrained subscription headroom, falls back to a
-durable round-robin cursor when evidence is unavailable or close, and protects frontier.
+At pickup the dispatcher derives a base route from type/risk, adjusts at most one route
+down or up from internal evidence, derives effort from the route, then reads live Codex
+and Claude usage windows. It excludes unavailable candidates, chooses the lowest expected
+cost adequate model from effective price and observed evidence, uses capacity as an
+availability constraint or close-cost tie-breaker, and protects frontier.
 The complete decision and failure policy is in [`ROUTING.md`](ROUTING.md).
 
 Every terminal run records an **attempt** into `telemetry.json` (alongside dispatcher
@@ -379,11 +388,12 @@ before autoship may merge.
 
 Every delivery phase uses one recovery contract: agent exit/zero-commit/no-PR failures,
 red CI, mergeability or file-conflict failures, deploy failures, unhealthy/unknown
-production reports, and failure to close the shipped issue. Each phase gets
-`DISPATCHER_CI_SELF_HEAL_MAX_ATTEMPTS` (default `2`) repairs with the assigned model,
-then one automatic attempt on `DISPATCHER_CI_ESCALATION_MODEL` (default
-`claude-opus-4-8`). The resumed agent receives the exact recovery reason as data in its
-prompt, including conflicting file names and CI evidence.
+production reports, and failure to close the shipped issue. Recovery is evidence-based:
+transient failures retry the same model, deterministic failures repair with the concrete
+target, shallow or incomplete attempts may increase effort, provider-specific misses and
+capacity failures can hand off laterally, and capability escalation moves one route at a
+time before a final frontier attempt. The resumed agent receives the exact recovery
+reason as data in its prompt, including conflicting file names and CI evidence.
 
 The phase budgets are independent: spending the CI ladder does not consume the merge or
 deploy ladder. The original issue assignment is retained separately from the currently
