@@ -22,6 +22,7 @@ const model: ModelEntry = {
   cliModel: "claude-opus-4-8",
   role: "frontier-reserve",
   tier: "frontier",
+  routeTiers: ["frontier"],
   frontier: true,
   taskClasses: [],
   contextWindow: 200_000,

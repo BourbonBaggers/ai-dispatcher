@@ -38,11 +38,39 @@ Priority controls order only. Risk informs the initial route and safeguards, but
 `risk:destructive` does not automatically select a frontier model. Missing or materially
 contradictory requirements produce `needs-input` rather than expensive-model escalation.
 
+### Where the internal axes come from
+
+The author is no longer asked for the technical dimensions. At pickup the dispatcher reads
+the selected issue's title and body and derives them itself (`src/issue-assessment.ts`),
+using that evidence to move one route down for localized, strongly verified work or one
+route up for concrete cross-cutting context, unresolved approach selection, or explicitly
+weak verification.
+
+This is deterministic pattern matching over structure the author produces incidentally —
+file paths, code fences, checklists, headings, cross-references — plus explicit vocabulary.
+It is a rubric, not a prediction engine, so the same text always routes the same way and
+every axis is unit testable.
+
+Three properties bound it, because the issue body is untrusted author-controlled input:
+
+- scanning is length-capped;
+- the assessment may move the route by one step only; and
+- **text can never reach a frontier model.** Text-driven up-routing stops at `hard`.
+  Frontier remains reachable only by human override or by the recovery ladder proving
+  cheaper rungs already failed, so no issue author can word their way into the reserve.
+
+Silence is not evidence. An issue that does not mention tests is `standard` verification,
+not `weak` — this service always runs CI, health verification, and rollback, so those
+safeguards exist whether or not the author mentioned them. Treating silence as weak would
+up-route nearly every issue and pay for a bigger model to cover a contained risk.
+
+`needs-input` likewise requires positive evidence of a problem, never brevity: either the
+issue states essentially nothing, or it hedges heavily while giving no acceptance criteria
+and no reproduction steps. "Bump node to 24" is short and perfectly actionable.
+
 Legacy technical labels (`complexity:*`, `context:*`, `ambiguity:*`, `requirements:*`,
-`reasoning:*`, `verification:*`, and `recoverability:*`) are migration/advisory evidence.
-The dispatcher may use that internal evidence to move one route down for localized,
-strongly verified work or one route up for concrete cross-cutting context, unresolved
-approach selection, or weak verification.
+`reasoning:*`, `verification:*`, and `recoverability:*`) still pin their axis when present,
+so a human can override the reader during migration.
 
 Use `requirements:good` only when the issue gives a bounded execution package: outcome,
 scope and exclusions, acceptance criteria, business/data rules, dependencies, verification,
@@ -117,12 +145,21 @@ The human-readable decision rule is:
 Effort controls persistence within the selected lane. It is derived at pickup and is
 independent of subscription usage.
 
-| Effort | Use |
-| --- | --- |
-| `effort:low` | Localized deterministic work with an obvious path and strong verification. |
-| `effort:medium` | Default normal implementation and test work. |
-| `effort:high` | Broad but bounded execution, careful sequencing, several edge cases, or multi-step verification. |
-| `effort:max` | Rare exhaustive frontier/near-frontier work where weak verification or costly recovery makes extra persistence cheaper than a miss. |
+Effort is also an economic control: higher effort consumes more tokens, so it burns more
+headroom on the same model. One table (`ROUTE_EFFORT`) maps route tier to effort, shared by
+pickup and recovery so the two cannot drift apart.
+
+| Route tier | Effort | Use |
+| --- | --- | --- |
+| tiny, cheap | `effort:low` | Localized deterministic work with an obvious path and strong verification. |
+| standard, capable | `effort:medium` | Default normal implementation and test work. |
+| hard | `effort:high` | Broad but bounded execution, careful sequencing, several edge cases, or multi-step verification. |
+| frontier | `effort:xhigh` | The final automatic recovery rung. |
+| ultra-frontier | `effort:max` | Rare exhaustive work where weak verification or costly recovery makes extra persistence cheaper than a miss. |
+
+Escalation uses the effort of the route it escalated *to*, not a blanket maximum: spending
+frontier persistence on a `capable` repair burns headroom the run may still need for a
+later phase.
 
 Importance alone raises neither model tier nor effort. After model selection, the
 provider-neutral effort is mapped through the selected CLI's frozen allowlist; unsupported
@@ -152,14 +189,44 @@ Capacity reads are bounded. One or both adapters failing never stops the scan.
 
 For each issue in priority order:
 
-1. Exclude unavailable or technically incompatible candidates.
-2. Withhold frontier and ultra-frontier unless explicitly justified.
-3. Prefer the candidate with the lowest expected cost to successful completion.
-4. Use effective list price and effort as the fallback estimate when trusted comparable
-   completion evidence is insufficient.
-5. Use measured task-type success and retry cost when enough comparable evidence exists.
-6. Use subscription headroom and capacity as availability constraints and close-cost
-   tie-breakers, not as permission to jump several price tiers.
+1. Exclude candidates whose registry entry does not serve the derived route tier.
+2. Exclude unavailable or technically incompatible candidates.
+3. Withhold frontier and ultra-frontier unless explicitly justified.
+4. Rank the rest by **scarcity-weighted burn** and take the lowest.
+
+### Why one score instead of price and capacity as separate rules
+
+The service runs on flat subscriptions, so the per-attempt dollar figure is not what is
+actually being spent. What is being spent is a provider's rolling usage window, and
+running one dry can remove that pool for days. Effective list price is the best available
+proxy for how fast a model drains its window, which is why routing minimizes it — not
+because it is a billing estimate.
+
+Those two concerns point the same way nearly always: the cheapest adequate model burns the
+least headroom, so cheapest-first *is* headroom preservation. They diverge only near a
+limit, where continuing to feed the cheap-but-nearly-spent pool trades a small saving for a
+large outage risk. So the two are combined into one number — burn rate scaled by pool
+scarcity:
+
+| Window spent | Scarcity multiplier | Effect on routing |
+| --- | --- | --- |
+| 0–50% | ~1.0–1.2 | none; the cheapest adequate model wins outright |
+| 60% | ~1.6 | still normally cheapest-first |
+| 70% | ~2.4 | begins to overcome a small price gap |
+| 80% | ~4.2 | work moves to the other provider |
+| 90%+ | ~7.4+ | the strained pool is effectively reserved |
+
+The curve is deliberately flat below the knee: reacting to routine consumption would mean
+chasing quota jitter instead of picking the cheapest adequate model. There is no pool
+rotation rule — rotating would spend headroom with no evidence it needs spending.
+
+An unknown capacity reading is neutral (multiplier 1.0), never optimistic and never a
+fabricated estimate. Dormancy may only break a tie, at less than any real price gap.
+
+Measured task-type success and retry cost are not yet inputs: the launcher reports no
+trusted token usage, so that evidence does not exist. Attempts durably record the price
+snapshot active when they ran, which is what will make that comparison possible later
+without rewriting history.
 
 If an issue is temporarily unroutable, leave it unclaimed and continue through the queue.
 Retry it on later polls. Capacity scheduling never creates `autoship-held`, spends a
@@ -168,17 +235,17 @@ repair attempt, or pages the operator.
 Current live lanes:
 
 <!-- BEGIN GENERATED LIVE MODEL LANES -->
-| Tier | Role | `agent:*` label | `model:*` label | CLI model | Pool | Frontier |
+| Routes served | Role | `agent:*` label | `model:*` label | CLI model | Pool | Frontier |
 | --- | --- | --- | --- | --- | --- | --- |
-| tiny | tiny | `agent:claude` | `model:claude-haiku-4.5` | `claude-haiku-4-5-20251001` | `claude-subscription` | no |
-| capable | capable | `agent:claude` | `model:claude-sonnet-5` | `claude-sonnet-5` | `claude-subscription` | no |
+| tiny, cheap, standard | tiny | `agent:claude` | `model:claude-haiku-4.5` | `claude-haiku-4-5-20251001` | `claude-subscription` | no |
+| capable, hard | capable | `agent:claude` | `model:claude-sonnet-5` | `claude-sonnet-5` | `claude-subscription` | no |
 | frontier | frontier-reserve | `agent:claude` | `model:claude-opus-4.8` | `claude-opus-4-8` | `claude-subscription` | **yes** |
 | ultra-frontier | ultra-frontier-reserve | `agent:claude` | `model:claude-fable-5` | `claude-fable-5` | `claude-subscription` | **yes** |
-| tiny | tiny | `agent:codex` | `model:gpt-5.4-mini` | `gpt-5.4-mini` | `codex-subscription` | no |
+| tiny, cheap | tiny | `agent:codex` | `model:gpt-5.4-mini` | `gpt-5.4-mini` | `codex-subscription` | no |
 | standard | standard | `agent:codex` | `model:gpt-5.6-luna` | `gpt-5.6-luna` | `codex-subscription` | no |
-| capable | capable | `agent:codex` | `model:gpt-5.6-terra` | `gpt-5.6-terra` | `codex-subscription` | no |
+| capable, hard | capable | `agent:codex` | `model:gpt-5.6-terra` | `gpt-5.6-terra` | `codex-subscription` | no |
 | capable | capable | `agent:codex` | `model:gpt-5.4` | `gpt-5.4` | `codex-subscription` | no |
-| frontier | frontier-reserve | `agent:codex` | `model:gpt-5.6-sol` | `gpt-5.6-sol` | `codex-subscription` | **yes** |
+| frontier, ultra-frontier | frontier-reserve | `agent:codex` | `model:gpt-5.6-sol` | `gpt-5.6-sol` | `codex-subscription` | **yes** |
 | frontier | frontier-reserve | `agent:codex` | `model:gpt-5.5` | `gpt-5.5` | `codex-subscription` | **yes** |
 <!-- END GENERATED LIVE MODEL LANES -->
 
@@ -205,9 +272,10 @@ from the learning dataset.
 
 A quota exit changes capacity, not task difficulty. The dispatcher re-routes the existing
 run inside the original capability band, preserving assigned effort and branch state.
-One adjacent non-frontier route is allowed, so Sonnet exhaustion can hand off to a
-comparable Codex capable lane before Opus or Sol. A quota handoff does not consume the
-frontier rung.
+"Comparable" is defined by the registry, not by tier arithmetic: a handoff goes to another
+pool whose model also serves the assigned route, so Sonnet exhaustion hands off to the
+comparable Codex lane before Opus or Sol. A quota handoff does not consume the frontier
+rung.
 
 If no alternate pool is usable, the run waits and revalidates automatically. It does not
 become operator work.
@@ -227,8 +295,31 @@ Before any launch or GitHub mutation, the claim stores:
 Restart and later delivery phases restore this original assignment. Frontier use in one
 phase does not rewrite it. GitHub assignment-label failures are cosmetic.
 
-Attempt telemetry records the same sanitized routing evidence. Token counts remain
-`unavailable` until a trusted launcher signal exists; they are never fabricated.
+- the per-axis justification the issue-text assessment produced, so a route can be
+  explained later even though no label records those axes any more.
+
+Restart and later delivery phases restore this original assignment. Frontier use in one
+phase does not rewrite it — escalation walks the *assigned route* ladder, not the current
+model's home tier, so a frontier model borrowed to repair one phase leaves the next phase's
+ordinary repairs on the original route.
+
+Attempt telemetry records the same sanitized routing evidence, plus the **price snapshot
+active when the attempt ran**, so a later price change cannot rewrite historical cost.
+
+Token counts remain `unavailable` until a trusted launcher signal exists; they are never
+fabricated, and never estimated from elapsed time. The three economic measures stay
+strictly separate and each carries its provenance:
+
+| Measure | Meaning | Today |
+| --- | --- | --- |
+| Billed cost | An amount a provider or billing source explicitly reported | unavailable — never inferred |
+| List-price equivalent | The price snapshot applied to *trusted* token usage | unavailable — no trusted usage exists |
+| Subscription consumption | Usage-window/capacity consumed; not converted to currency | unavailable |
+
+A total nothing contributed to is reported as unavailable, not as `$0.00`. Terminal issues
+receive a cost summary comment that names each unavailable measure explicitly; the durable
+telemetry record is authoritative, and failing to post that comment never changes delivery
+status.
 
 ## Operator-involvement invariant
 

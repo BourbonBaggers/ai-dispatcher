@@ -11,12 +11,13 @@ const END = "<!-- END GENERATED LIVE MODEL LANES -->";
 function renderLiveModelLanes() {
   const rows = dispatchableModels().map((model) => {
     const frontier = model.frontier ? "**yes**" : "no";
-    return `| ${model.tier} | ${model.role} | \`agent:${model.cli}\` | \`${model.modelLabel}\` | \`${model.cliModel}\` | \`${model.capacityPool}\` | ${frontier} |`;
+    const routes = model.routeTiers.join(", ");
+    return `| ${routes} | ${model.role} | \`agent:${model.cli}\` | \`${model.modelLabel}\` | \`${model.cliModel}\` | \`${model.capacityPool}\` | ${frontier} |`;
   });
 
   return [
     BEGIN,
-    "| Tier | Role | `agent:*` label | `model:*` label | CLI model | Pool | Frontier |",
+    "| Routes served | Role | `agent:*` label | `model:*` label | CLI model | Pool | Frontier |",
     "| --- | --- | --- | --- | --- | --- | --- |",
     ...rows,
     END,

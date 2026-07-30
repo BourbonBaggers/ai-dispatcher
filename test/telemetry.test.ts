@@ -11,6 +11,7 @@ import {
   UNAVAILABLE_TOKENS,
   type AttemptRecord,
   type TokenUsage,
+  renderCostSummary,
 } from "../src/telemetry.ts";
 
 const NOW = 1_700_000_000_000;
@@ -171,4 +172,52 @@ test("TelemetryStore idempotently ignores replayed finalization attempts", () =>
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── Cost summary (#51 §7) ────────────────────────────────────────────────────────
+//
+// The three economic measures stay strictly separate and every one carries its
+// provenance. A reader must be able to tell "this cost nothing" from "nobody reported
+// what this cost" — reporting an unavailable measure as zero is the failure mode.
+
+test("the cost summary names unavailable measures instead of showing zero", () => {
+  const record = aggregateIssue(1, [attempt({ terminalStatus: "failed" })], {}, 0);
+  const summary = renderCostSummary(record);
+  assert.match(summary, /Billed cost: unavailable/);
+  assert.match(summary, /List-price equivalent: unavailable/);
+  assert.doesNotMatch(summary, /\$0\.0000/);
+});
+
+test("the summary explains that missing usage is not estimated from elapsed time", () => {
+  const record = aggregateIssue(1, [attempt({ terminalStatus: "failed" })], {}, 0);
+  assert.match(renderCostSummary(record), /not estimated from elapsed time/);
+});
+
+test("aggregation counts every attempt, including the failed ones before success", () => {
+  const attempts = [
+    attempt({ attemptId: "a#1", terminalStatus: "failed" }),
+    attempt({ attemptId: "a#2", terminalStatus: "ci_failed" }),
+    attempt({ attemptId: "a#3", terminalStatus: "shipped" }),
+  ];
+  const record = aggregateIssue(1, attempts, {}, 0);
+  assert.equal(record.totalAttempts, 3);
+  assert.equal(record.costTotals?.failedAttempts, 2);
+  assert.match(renderCostSummary(record), /Attempts: 3 \(2 failed\)/);
+});
+
+test("a billed amount is only ever reported when a provider actually reported one", () => {
+  const withBilling = attempt({
+    attemptId: "a#1",
+    terminalStatus: "shipped",
+    cost: {
+      priceSnapshot: null,
+      billedCost: { amount: 1.25, currency: "USD", source: "provider-reported", confidence: "reported" },
+      listPriceEquivalent: { amountUsd: null, source: "unavailable", confidence: "unavailable" },
+      subscriptionConsumption: null,
+      toolCharges: [],
+    },
+  });
+  const record = aggregateIssue(1, [withBilling], {}, 0);
+  assert.equal(record.costTotals?.billed["USD"], 1.25);
+  assert.match(renderCostSummary(record), /Billed cost: 1\.2500 USD \(provider-reported\)/);
 });

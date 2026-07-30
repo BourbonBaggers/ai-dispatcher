@@ -20,7 +20,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
-import type { RoutingConfidence } from "./routing.ts";
+import type { CapacitySelectionBasis, RoutingConfidence } from "./routing.ts";
 import type { CapacityState } from "./capacity.ts";
 import { effectiveModelPrice, modelByLabel, type ModelPrice } from "./models.ts";
 
@@ -94,7 +94,7 @@ export interface AttemptRecord {
   effortLabel?: string;
   effortReason?: string;
   assignmentSource?: "automatic" | "human-override";
-  capacitySelection?: "live-headroom" | "rotation" | "only-capable" | "human-override";
+  capacitySelection?: CapacitySelectionBasis | "human-override";
   startedAt: number;
   endedAt: number | null;
   activeDurationMs: number | null;
@@ -140,8 +140,16 @@ export interface CostTotals {
   listPriceEquivalentUsd: number | null;
   subscriptionConsumption: Record<string, number>;
   frontierListPriceEquivalentUsd: number | null;
+  /**
+   * Attempts that did not reach a delivery-ready state. Cost-to-success is only meaningful
+   * next to the failed work it took to get there (#51 §7).
+   */
+  failedAttempts: number;
   unavailableMeasures: string[];
 }
+
+/** Attempt terminal states that produced usable delivery evidence rather than a failure. */
+const DELIVERY_READY_STATUSES = new Set(["pr_ready", "shipped", "ci_pending"]);
 
 /**
  * Lifecycle facts an attempt cannot know (merge, production, regressions). Recorded
@@ -238,6 +246,11 @@ function foldCostTotals(attempts: AttemptRecord[]): CostTotals {
   const subscriptionConsumption: Record<string, number> = {};
   let listPriceEquivalentUsd: number | null = 0;
   let frontierListPriceEquivalentUsd: number | null = 0;
+  // A running total that nothing ever contributed to is not "$0.00 spent" — it is "no
+  // usage was ever reported". Collapsing the two would let a summary claim a calculated
+  // cost for an issue whose token counts never existed.
+  let sawListPrice = false;
+  let sawFrontierListPrice = false;
   const unavailableMeasures = new Set<string>();
 
   for (const attempt of attempts) {
@@ -257,22 +270,85 @@ function foldCostTotals(attempts: AttemptRecord[]): CostTotals {
       if (attempt.frontierModelUsed) frontierListPriceEquivalentUsd = null;
       unavailableMeasures.add("list-price equivalent");
     } else {
-      if (listPriceEquivalentUsd !== null) listPriceEquivalentUsd += list.amountUsd;
+      if (listPriceEquivalentUsd !== null) {
+        listPriceEquivalentUsd += list.amountUsd;
+        sawListPrice = true;
+      }
       if (attempt.frontierModelUsed && frontierListPriceEquivalentUsd !== null) {
         frontierListPriceEquivalentUsd += list.amountUsd;
+        sawFrontierListPrice = true;
       }
     }
     if (!cost?.billedCost) unavailableMeasures.add("billed cost");
     if (!subscription) unavailableMeasures.add("subscription consumption");
   }
 
+  if (!sawListPrice) {
+    listPriceEquivalentUsd = null;
+    unavailableMeasures.add("list-price equivalent");
+  }
+  if (!sawFrontierListPrice) frontierListPriceEquivalentUsd = null;
+
   return {
     billed,
     listPriceEquivalentUsd,
     subscriptionConsumption,
     frontierListPriceEquivalentUsd,
+    failedAttempts: attempts.filter((a) => !DELIVERY_READY_STATUSES.has(a.terminalStatus)).length,
     unavailableMeasures: [...unavailableMeasures].sort(),
   };
+}
+
+/**
+ * Renders the cost summary posted on a terminal issue (#51 §7).
+ *
+ * Unavailable measures are named explicitly rather than shown as zero — a reader must be
+ * able to tell "this cost nothing" from "nobody reported what this cost". The durable
+ * telemetry record is authoritative; a failure to post this comment must never change
+ * delivery status, so callers treat it as best-effort.
+ */
+export function renderCostSummary(record: IssueRecord): string {
+  const totals = record.costTotals;
+  const lines: string[] = ["### Cost summary", ""];
+  if (!totals) {
+    lines.push(`- Attempts: ${record.totalAttempts}`);
+    lines.push("- No economic evidence was recorded for this issue.");
+    return lines.join("\n");
+  }
+  lines.push(`- Attempts: ${record.totalAttempts} (${totals.failedAttempts} failed)`);
+
+  const billed = Object.entries(totals.billed);
+  lines.push(
+    billed.length
+      ? `- Billed cost: ${billed.map(([currency, amount]) => `${amount.toFixed(4)} ${currency}`).join(", ")} (provider-reported)`
+      : "- Billed cost: unavailable — no provider or billing source reported an amount",
+  );
+
+  lines.push(
+    totals.listPriceEquivalentUsd === null
+      ? "- List-price equivalent: unavailable — the CLI reports no trusted token usage, and it is not estimated from elapsed time"
+      : `- List-price equivalent: $${totals.listPriceEquivalentUsd.toFixed(4)} (calculated from trusted usage at the price active when each attempt ran)`,
+  );
+
+  if (totals.frontierListPriceEquivalentUsd !== null && totals.frontierListPriceEquivalentUsd > 0) {
+    lines.push(
+      `- Of which frontier escalation: $${totals.frontierListPriceEquivalentUsd.toFixed(4)}`,
+    );
+  }
+
+  const subscription = Object.entries(totals.subscriptionConsumption);
+  lines.push(
+    subscription.length
+      ? `- Subscription consumption: ${subscription.map(([unit, units]) => `${units} ${unit}`).join(", ")} (not converted to currency)`
+      : "- Subscription consumption: unavailable",
+  );
+
+  const models = Object.keys(record.tokensByModel);
+  if (models.length) lines.push(`- Models used: ${models.join(", ")}`);
+  if (totals.unavailableMeasures.length) {
+    lines.push("", `Unavailable measures: ${totals.unavailableMeasures.join("; ")}.`);
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -441,6 +517,16 @@ export class TelemetryStore {
 
   outcomeFor(issueNumber: number): IssueOutcomeOverlay {
     return { ...this.data.outcomes[String(issueNumber)] };
+  }
+
+  /** Aggregates one issue — every attempt, including failed repairs and escalations. */
+  aggregateOne(issueNumber: number, nowMs = 0): IssueRecord {
+    return aggregateIssue(
+      issueNumber,
+      this.data.attempts,
+      this.data.outcomes[String(issueNumber)] ?? {},
+      nowMs,
+    );
   }
 
   /** Aggregates every issue seen in the attempts into issue-level records. */
