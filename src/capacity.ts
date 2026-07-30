@@ -198,6 +198,50 @@ export function capacityHeadroomForModel(
   return minimumHeadroom(applicable);
 }
 
+/**
+ * How steeply a nearly-spent window is penalized, and where the penalty starts to bite.
+ *
+ * The exponent is high on purpose: routine consumption (a pool half through its window)
+ * must NOT perturb routing, or the dispatcher would chase quota jitter and stop picking
+ * the cheapest adequate model. The curve stays near 1.0 until roughly two thirds spent,
+ * then climbs hard.
+ */
+const SCARCITY_PENALTY_WEIGHT = 12;
+const SCARCITY_PENALTY_EXPONENT = 6;
+
+/**
+ * Dormancy is a rotation *hint*, never a quota estimate (see the module contract). It may
+ * only break a tie between otherwise comparable candidates, so the nudge is deliberately
+ * smaller than any real price gap in the registry.
+ */
+const DORMANT_POOL_TIE_BREAK = 0.95;
+
+/**
+ * Multiplier applied to a candidate's burn score to reflect how scarce its pool is.
+ *
+ * Exhausting a provider window does not cost a price delta — it can remove the pool for
+ * days. That tail risk is what justifies ever paying more per attempt: below the knee the
+ * multiplier is ~1 and the cheapest model wins outright; as headroom drains the penalty
+ * grows fast enough to move work to another provider well before lockout.
+ *
+ * An unknown reading is neutral (1.0), never optimistic and never a fabricated estimate.
+ */
+export function poolScarcityMultiplier(
+  assessment: CapacityAssessment | undefined,
+  modelLabel: string,
+): number {
+  if (!assessment) return 1;
+  const headroom = capacityHeadroomForModel(assessment, modelLabel);
+  if (headroom === null) {
+    // No usable quota reading: dormancy is the only honest signal left, and only as a
+    // tie-break.
+    return assessment.dormant ? DORMANT_POOL_TIE_BREAK : 1;
+  }
+  const spent = Math.min(1, Math.max(0, (100 - headroom) / 100));
+  const penalty = 1 + SCARCITY_PENALTY_WEIGHT * spent ** SCARCITY_PENALTY_EXPONENT;
+  return assessment.dormant ? penalty * DORMANT_POOL_TIE_BREAK : penalty;
+}
+
 export function isPoolExhausted(assessment: CapacityAssessment): boolean {
   return assessment.state === "exhausted";
 }

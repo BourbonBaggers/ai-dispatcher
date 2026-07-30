@@ -28,6 +28,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import type { ModelTier } from "./models.ts";
+import type { CapacitySelectionBasis } from "./routing.ts";
 import {
   ACTIVE_STATUSES,
   CLAIMING_STATUSES,
@@ -81,9 +82,14 @@ export interface RoutingAssignmentEvidence {
   characteristicLabels: string[];
   rationaleLabels: string[];
   confidence: "high" | "medium" | "low";
-  capacitySelection: "live-headroom" | "rotation" | "only-capable" | "human-override";
+  capacitySelection: CapacitySelectionBasis | "human-override";
   selectedPool: string;
   effortReason: string;
+  /**
+   * Per-axis justification from reading the issue text. Absent on human overrides and on
+   * runs assigned before the dispatcher read issue bodies.
+   */
+  assessmentEvidence?: string[];
   capacity: RoutingCapacityEvidence[];
   assignedAt: number;
 }

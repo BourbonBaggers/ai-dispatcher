@@ -137,7 +137,9 @@ test("dispatch:ready contract requires one type, priority, and business risk", (
 test("legacy intake labels migrate when unambiguous", () => {
   assert.deepEqual(migrationForLegacyIntakeLabels(["task:feature", "risk:medium", "technical debt"]), {
     add: ["dispatch:ready", "priority:background", "type:enhancement", "risk:normal"],
-    remove: ["technical debt"],
+    // The legacy risk label is retired in the same pass so two dimensions never share the
+    // `risk:` prefix on one issue.
+    remove: ["technical debt", "risk:medium"],
     needsInputReason: null,
   });
   assert.match(

@@ -23,9 +23,16 @@ import {
   assignmentForModel,
   resolveRoutingOverride,
   DISPATCH_READY_LABEL,
+  EFFORT_LABELS,
+  HOLD_LABELS,
+  isDispatchRequested,
+  migrationForLegacyIntakeLabels,
+  NEEDS_INPUT_LABEL,
   validateDispatchReadyContract,
   type DispatcherAgent,
+  type ResolvedAssignment,
 } from "./labels.ts";
+import { assessIssueText, applyAssessment } from "./issue-assessment.ts";
 import { selectEligibleIssue } from "./selection.ts";
 import { untrustedAuthorComment, UNTRUSTED_AUTHOR_LABEL } from "./author-auth.ts";
 import { isProviderSuppressed } from "./token-exhaustion.ts";
@@ -34,12 +41,23 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { NOTIFY_PRIORITY_HIGH, type Notifier } from "./notify.ts";
 import { autoshipRun, AUTOSHIP_HELD_LABEL, type ShipRunner } from "./autoship.ts";
-import { dispatchableModels, modelByCliModel, tierRank } from "./models.ts";
+import {
+  dispatchableModels,
+  effectiveModelPrice,
+  modelByCliModel,
+  tierRank,
+  MODEL_TIERS,
+  type ModelEntry,
+} from "./models.ts";
 import {
   deriveEffort,
+  effortForRouteTier,
   parseCharacteristics,
+  planNextAttempt,
   routeIssue,
   CHARACTERISTIC_LABEL_PREFIXES,
+  HUMAN_OVERRIDE_LABEL,
+  type FailureCategory,
 } from "./routing.ts";
 import {
   assessPools,
@@ -51,7 +69,13 @@ import {
   readLiveCapacity,
   type CapacityReadResult,
 } from "./capacity-adapters.ts";
-import { UNAVAILABLE_TOKENS, type AttemptRecord, type TelemetryStore } from "./telemetry.ts";
+import {
+  renderCostSummary,
+  UNAVAILABLE_TOKENS,
+  type AttemptCostEvidence,
+  type AttemptRecord,
+  type TelemetryStore,
+} from "./telemetry.ts";
 import type { GithubClient, GithubIssue } from "./github.ts";
 import type { DispatcherConfig } from "./config.ts";
 import type { Logger } from "./logger.ts";
@@ -282,6 +306,143 @@ export function assignedIdentity(run: RunRecord): Pick<
     effortLabel: run.assignedEffortLabel,
     cliEffort: run.assignedCliEffort,
   };
+}
+
+interface RefinedAssignment {
+  assignment: ResolvedAssignment | null;
+  routing: RoutingAssignmentEvidence | null;
+  needsInput: string | null;
+}
+
+/**
+ * Second-pass routing for the one issue actually being picked up (#51 §1).
+ *
+ * The scan's first pass is label-only and IO-free so it can rank every candidate without
+ * a read per issue. Only the winner earns a body read — and that read is what makes the
+ * simplified intake contract honest: the author supplies type, priority, and risk, and the
+ * dispatcher works out context, ambiguity, verification, and recoverability by *reading the
+ * issue* instead of asking a human to predict them.
+ *
+ * Degrades honestly. A failed body read leaves the label-only assignment untouched rather
+ * than inventing characteristics, exactly like every other unknown GitHub read.
+ */
+async function refineAssignmentFromIssueText(
+  deps: DispatcherDeps,
+  issue: GithubIssue,
+  capacityByPool: Map<string, CapacityAssessment>,
+  nowMs: number,
+): Promise<RefinedAssignment> {
+  const none: RefinedAssignment = { assignment: null, routing: null, needsInput: null };
+  // An unreadable issue body is `unknown`, never a fabricated characteristic set: keep the
+  // label-only assignment rather than routing on invented evidence. Refinement is an
+  // improvement on the first pass, so it must never be able to fail a pickup outright.
+  let body: string | null = null;
+  try {
+    body = await deps.github.issueBody(issue.number);
+  } catch (err) {
+    deps.logger.debug("routing: issue body read failed", {
+      issue: issue.number,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return none;
+  }
+  if (body === null) {
+    deps.logger.debug("routing: issue body unavailable, keeping label-only assignment", {
+      issue: issue.number,
+    });
+    return none;
+  }
+
+  const assessment = assessIssueText(issue.title, body);
+  const characteristics = applyAssessment(parseCharacteristics(issue.labels), assessment, issue.labels);
+  const decision = routeIssue(characteristics, capacityByPool, dispatchableModels());
+  const effort = deriveEffort(characteristics);
+
+  if (decision.needsInput) {
+    return { assignment: null, routing: null, needsInput: decision.reason };
+  }
+  if (!decision.selected) return none;
+
+  const assignment = assignmentForModel(decision.selected, effort.effortLabel);
+  if (!assignment.ok) return none;
+
+  return {
+    assignment: assignment.value,
+    routing: {
+      source: "automatic",
+      minimumTier: decision.minimumTier,
+      characteristicLabels: characteristicLabels(issue.labels),
+      rationaleLabels: decision.rationaleLabels,
+      confidence: decision.confidence,
+      capacitySelection: decision.capacitySelection,
+      selectedPool: decision.selected.capacityPool,
+      effortReason: effort.reason,
+      capacity: capacityEvidence(capacityByPool),
+      assignedAt: nowMs,
+      // Why this route, in the dispatcher's own words — the audit trail for a decision no
+      // label records any more.
+      assessmentEvidence: assessment.evidence,
+    },
+    needsInput: null,
+  };
+}
+
+/**
+ * Normalizes queued issues from the old intake contract to the new one (#51 §6).
+ *
+ * Runs before selection so a migrated issue is immediately eligible in the same scan, and
+ * mutates the in-memory labels to match what was just written — otherwise the issue would
+ * be judged against its pre-migration labels and skipped for one cycle.
+ *
+ * Deliberately conservative: only issues that already ask for dispatch are touched, held
+ * issues and human overrides are left exactly as they are, and an issue that cannot be
+ * normalized safely is left for a human rather than guessed at. Label writes are
+ * idempotent, so a crash mid-migration simply resumes on the next scan — no issue is
+ * claimed, duplicated, or lost by this pass.
+ */
+async function migrateIntakeLabels(deps: DispatcherDeps, issues: GithubIssue[]): Promise<void> {
+  for (const issue of issues) {
+    if (!isDispatchRequested(issue.labels)) continue;
+    if (issue.labels.some((label) => (HOLD_LABELS as readonly string[]).includes(label))) continue;
+    if (issue.labels.includes(HUMAN_OVERRIDE_LABEL)) continue;
+
+    const migration = migrationForLegacyIntakeLabels(issue.labels);
+    if (!migration.add.length && !migration.remove.length) continue;
+
+    for (const label of migration.add) {
+      if (!(await deps.github.addLabel(issue.number, label))) return;
+    }
+    for (const label of migration.remove) {
+      await deps.github.removeLabel(issue.number, label);
+    }
+    issue.labels = [...issue.labels.filter((l) => !migration.remove.includes(l)), ...migration.add];
+    deps.logger.info("migrated intake labels", {
+      issue: issue.number,
+      added: migration.add,
+      removed: migration.remove,
+      ...(migration.needsInputReason ? { needsInput: migration.needsInputReason } : {}),
+    });
+  }
+}
+
+/**
+ * Posts the issue's aggregated cost summary at a terminal state (#51 §7).
+ *
+ * Strictly best-effort: the durable telemetry record is authoritative, so a failure to
+ * aggregate or comment must never change delivery status. Runs before the issue is closed
+ * so the summary is visible on the completed issue.
+ */
+async function postCostSummary(deps: DispatcherDeps, issueNumber: number): Promise<void> {
+  if (!deps.telemetry) return;
+  try {
+    const record = deps.telemetry.aggregateOne(issueNumber, (deps.now ?? Date.now)());
+    await deps.github.comment(issueNumber, renderCostSummary(record));
+  } catch (err) {
+    deps.logger.debug("cost summary unavailable", {
+      issue: issueNumber,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 function characteristicLabels(labels: string[]): string[] {
@@ -630,6 +791,10 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
     return { started: null, message: `Could not list issues: ${listing.error}` };
   }
 
+  if (!config.dryRun) {
+    await migrateIntakeLabels(deps, listing.issues);
+  }
+
   const claimedByIssue = store.claimingRunsByIssue();
   const evidenceByIssue = new Map<number, RoutingAssignmentEvidence>();
   const cursor = store.getSettings().lastInitialCapacityPool;
@@ -716,8 +881,42 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   }
 
   const { issue } = target;
-  const { agent, modelLabel, cliModel, effortLabel, cliEffort } = target.assignment;
-  const routing = evidenceByIssue.get(issue.number)!;
+  let assignment = target.assignment;
+  let routing = evidenceByIssue.get(issue.number)!;
+
+  // Only an automatic assignment is refined: a human override is authoritative by
+  // definition, and re-reading the issue must never quietly overrule it.
+  if (routing.source === "automatic") {
+    const refined = await refineAssignmentFromIssueText(deps, issue, capacityByPool, nowMs);
+    if (refined.needsInput !== null) {
+      if (!config.dryRun) {
+        await github.addLabel(issue.number, NEEDS_INPUT_LABEL);
+        await github.comment(
+          issue.number,
+          `## Dispatcher needs input\n\n${refined.needsInput}\n\n` +
+            `Add the missing detail and remove \`${NEEDS_INPUT_LABEL}\` to requeue this issue.`,
+        );
+      }
+      return {
+        started: null,
+        message: `Issue #${issue.number} needs input: ${refined.needsInput}`,
+      };
+    }
+    if (refined.assignment && refined.routing) {
+      if (refined.assignment.cliModel !== assignment.cliModel) {
+        logger.info("routing: issue text changed the route", {
+          issue: issue.number,
+          from: assignment.cliModel,
+          to: refined.assignment.cliModel,
+          tier: refined.routing.minimumTier,
+        });
+      }
+      assignment = refined.assignment;
+      routing = refined.routing;
+    }
+  }
+
+  const { agent, modelLabel, cliModel, effortLabel, cliEffort } = assignment;
   const branch = branchNameFor(issue.number, issue.title);
 
   if (config.dryRun) {
@@ -1037,20 +1236,86 @@ async function repairRun(
  * The relevant ledger entry is set before launching so autoship never grants a second
  * frontier attempt for the same failure kind.
  */
+/**
+ * Which failure the recovery ledger is actually escalating, so the plan can pick a
+ * proportionate response instead of treating every red phase as "needs a bigger brain".
+ *
+ * `agent` exhaustion is the only kind that genuinely indicates the model could not do the
+ * work. CI, merge, and deploy failures are *test* failures in the taxonomy's sense: the
+ * change exists and something objective rejected it, which one capability tier up is the
+ * right answer to — not a jump to the most expensive model available.
+ */
+function failureCategoryFor(kind: RecoveryKind): FailureCategory {
+  return kind === "agent" ? "implementation-failure" : "test-failure";
+}
+
+/**
+ * Chooses the escalation model from evidence rather than a fixed constant (#51 §5).
+ *
+ * `DISPATCHER_CI_ESCALATION_MODEL` remains the floor: if planning cannot produce a
+ * candidate — no capacity at the next rung, an unrecognised model, a legacy run with no
+ * durable route evidence — the configured model is still used, so this can only ever
+ * improve on the previous fixed behaviour, never strand a run.
+ *
+ * Escalation walks the *route* ladder recorded at pickup, so a frontier model borrowed to
+ * repair one phase does not turn the next phase's ordinary repairs into frontier attempts.
+ */
+async function resolveEscalationModel(
+  deps: DispatcherDeps,
+  run: RunRecord,
+  kind: RecoveryKind,
+  fallbackCliModel: string,
+  nowMs: number,
+): Promise<{ cliModel: string; effortLabel: string; rationale: string }> {
+  // The historical behaviour: the configured model at maximum persistence.
+  const fallback = {
+    cliModel: fallbackCliModel,
+    effortLabel: "effort:max",
+    rationale: "configured escalation model",
+  };
+  const currentModel = modelByCliModel(run.cliModel);
+  if (!currentModel) return fallback;
+
+  const routeTier = run.routing?.minimumTier ?? currentModel.tier;
+  const capacityByPool = await pickupCapacity(deps, nowMs);
+  const plan = planNextAttempt(
+    failureCategoryFor(kind),
+    currentModel,
+    capacityByPool,
+    dispatchableModels(),
+    { routeTier },
+  );
+  if (!plan.model) return fallback;
+
+  // Effort follows the route the plan escalated to, not a blanket maximum. Spending xhigh
+  // on a `capable` repair burns headroom the run may still need for a later phase.
+  const escalatedTier =
+    plan.action === "escalate-tier" || plan.action === "escalate-frontier"
+      ? MODEL_TIERS[Math.min(tierRank(routeTier) + 1, tierRank("frontier"))]!
+      : routeTier;
+  return {
+    cliModel: plan.model.cliModel,
+    effortLabel: effortForRouteTier(escalatedTier).effortLabel,
+    rationale: plan.rationale,
+  };
+}
+
 async function escalateRun(
   deps: DispatcherDeps,
   run: RunRecord,
-  cliModel: string,
+  fallbackCliModel: string,
   kind: RecoveryKind,
   reason: string,
 ): Promise<void> {
   const { config, store, github, logger, notifier } = deps;
   const now = deps.now ?? (() => Date.now());
 
+  const escalation = await resolveEscalationModel(deps, run, kind, fallbackCliModel, now());
+  const cliModel = escalation.cliModel;
   const modelEntry = modelByCliModel(cliModel);
   const agent: DispatcherAgent = modelEntry?.cli === "codex" ? "codex" : "claude";
   const modelLabel = modelEntry?.modelLabel ?? cliModel;
-  const cliEffort = agent === "claude" ? "xhigh" : "high";
+  const cliEffort = EFFORT_LABELS[escalation.effortLabel]?.[agent] ?? (agent === "claude" ? "xhigh" : "high");
 
   const reentered = store.updateRun(run.id, {
     status: "claimed",
@@ -1059,7 +1324,7 @@ async function escalateRun(
     agent,
     modelLabel,
     cliModel,
-    effortLabel: "effort:max",
+    effortLabel: escalation.effortLabel,
     cliEffort,
     recovery: updateRecovery(run.recovery, kind, { escalated: true }),
     ...nextRecoveryLaunch(run),
@@ -1075,6 +1340,8 @@ async function escalateRun(
     issue: run.issueNumber,
     agent,
     cliModel,
+    effort: escalation.effortLabel,
+    rationale: escalation.rationale,
   });
 
   await github.addLabel(run.issueNumber, WORKING_LABEL);
@@ -1115,6 +1382,7 @@ async function exhaustRun(
     });
   }
   await deps.github.removeLabel(run.issueNumber, WORKING_LABEL);
+  await postCostSummary(deps, run.issueNumber);
   await deps.github.comment(
     run.issueNumber,
     [
@@ -1320,6 +1588,7 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
             productionStatus: "deployed",
             finalCompletingModel: run.cliModel,
           });
+          await postCostSummary(deps, run.issueNumber);
         } catch (err) {
           // Evidence must never turn a verified production success into a deploy repair.
           logger.warn("telemetry outcome update failed", {
@@ -1517,6 +1786,24 @@ export async function recheckHeldRun(deps: DispatcherDeps, run: RunRecord): Prom
  * by the terminal timestamp — `resumeCount` alone is not unique because a resume that made
  * progress resets it to 0, which would collide with the first attempt.
  */
+/**
+ * Economic evidence for one attempt (#51 §7).
+ *
+ * The three measures stay strictly separate and each carries its provenance. Nothing here
+ * is inferred: `billedCost` is null because no provider reports a billed amount to this
+ * service, and the list-price equivalent is `unavailable` because trusted token counts do
+ * not exist — not because they are zero.
+ */
+function attemptCostEvidence(model: ModelEntry | null, startedAt: number): AttemptCostEvidence {
+  return {
+    priceSnapshot: model ? effectiveModelPrice(model, new Date(startedAt)) : null,
+    billedCost: null,
+    listPriceEquivalent: { amountUsd: null, source: "unavailable", confidence: "unavailable" },
+    subscriptionConsumption: null,
+    toolCharges: [],
+  };
+}
+
 export function attemptRecordFromRun(run: RunRecord, _nowMs: number): AttemptRecord {
   const model = modelByCliModel(run.cliModel);
   const selectedCapacity = run.routing?.capacity.find(
@@ -1546,7 +1833,12 @@ export function attemptRecordFromRun(run: RunRecord, _nowMs: number): AttemptRec
     startedAt: run.startedAt,
     endedAt: run.finishedAt,
     activeDurationMs,
+    // The launcher emits no usage counts, so token-derived measures stay `unavailable`
+    // rather than being estimated from wall-clock time (#51 §7). The price snapshot is
+    // still captured: it is the one economic fact that is knowable at attempt time, and
+    // recording it now is what stops a later price change from rewriting history.
     tokens: UNAVAILABLE_TOKENS,
+    cost: attemptCostEvidence(model, run.startedAt),
     cliExitCode: run.exitCode,
     retryReason: run.trigger === "resume" ? "resume" : null,
     testsRun: false,
