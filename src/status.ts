@@ -2,6 +2,7 @@ import { parseArgs } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   CLAIMING_STATUSES,
+  WORKING_LABEL,
   PARKED_STATUSES,
   PR_READY_STATUSES,
   HELD_STATUSES,
@@ -15,14 +16,16 @@ import {
   type RunRecord,
 } from "./state.ts";
 import { readRunOutputEntries, type RunOutputEntry } from "./run-output.ts";
-import { expandHome } from "./config.ts";
+import { expandHome, parseRepoSlug } from "./config.ts";
+import { run, type ExecFn } from "./exec.ts";
 
 const STATUS_JSON_VERSION = 1;
 const DEFAULT_HISTORY_LIMIT = 20;
 const FOLLOW_POLL_MS = 500;
+const GITHUB_STATUS_TIMEOUT_MS = 10_000;
 
 type StatusArgs =
-  | { ok: true; stateDir: string; json: boolean; follow: boolean }
+  | { ok: true; stateDir: string; json: boolean; follow: boolean; repo: string | null; github: boolean }
   | { ok: false; message: string };
 
 type HistoryArgs =
@@ -34,6 +37,7 @@ export interface StatusJson {
   service: DispatcherLiveness;
   stateSource: "primary" | "backup" | "empty";
   current: null | ReturnType<typeof runSummary>;
+  github: GithubStatusEvidence;
 }
 
 export interface HistoryJson {
@@ -45,6 +49,13 @@ function stateDirForValue(raw: string | undefined, env: NodeJS.ProcessEnv): stri
   return expandHome(raw ?? env.DISPATCHER_STATE_DIR ?? "./state");
 }
 
+function repoForValue(raw: string | undefined): { ok: true; repo: string | null } | { ok: false; message: string } {
+  if (raw === undefined || raw.trim() === "") return { ok: true, repo: null };
+  const parsed = parseRepoSlug(raw);
+  if (!parsed.ok) return { ok: false, message: `Invalid repository: ${parsed.reason}` };
+  return { ok: true, repo: parsed.value.slug };
+}
+
 function parseStatusArgs(argv: string[], env: NodeJS.ProcessEnv): StatusArgs {
   try {
     const parsed = parseArgs({
@@ -52,15 +63,21 @@ function parseStatusArgs(argv: string[], env: NodeJS.ProcessEnv): StatusArgs {
       allowPositionals: false,
       options: {
         "state-dir": { type: "string" },
+        repo: { type: "string" },
         json: { type: "boolean", default: false },
         follow: { type: "boolean", default: false },
+        "no-github": { type: "boolean", default: false },
       },
     });
+    const repo = repoForValue((parsed.values.repo as string | undefined) ?? env.DISPATCHER_REPO);
+    if (!repo.ok) return { ok: false, message: repo.message };
     return {
       ok: true,
       stateDir: stateDirForValue(parsed.values["state-dir"] as string | undefined, env),
       json: Boolean(parsed.values.json),
       follow: Boolean(parsed.values.follow),
+      repo: repo.repo,
+      github: !Boolean(parsed.values["no-github"]),
     };
   } catch (err) {
     return { ok: false, message: (err as Error).message };
@@ -113,6 +130,20 @@ function ghCommandFor(run: RunRecord): string | null {
   return `gh issue view ${run.issueNumber} --repo ${repo} --comments`;
 }
 
+function repoFromIssueUrl(url: string): string | null {
+  return /^https:\/\/github\.com\/([^/]+\/[^/]+)\//.exec(url)?.[1] ?? null;
+}
+
+function inferRepoFromRuns(runs: RunRecord[]): string | null {
+  return (
+    runs
+      .slice()
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map((run) => repoFromIssueUrl(run.issueUrl))
+      .find((repo) => repo !== null) ?? null
+  );
+}
+
 function durationMs(run: RunRecord): number | null {
   const end = run.finishedAt ?? Date.now();
   return Math.max(0, end - run.startedAt);
@@ -151,6 +182,28 @@ function runSummary(run: RunRecord) {
   };
 }
 
+export interface GithubWorkingIssue {
+  number: number;
+  title: string;
+  url: string;
+  labels: string[];
+  issueCommand: string;
+  prSearchCommand: string;
+}
+
+export type GithubStatusEvidence =
+  | { state: "not_configured"; repo: null; workingIssues: []; warning: null }
+  | { state: "skipped"; repo: string | null; workingIssues: []; warning: null }
+  | { state: "unavailable"; repo: string; workingIssues: []; warning: string }
+  | { state: "ok"; repo: string; workingIssues: GithubWorkingIssue[]; warning: null };
+
+const NO_GITHUB: GithubStatusEvidence = {
+  state: "not_configured",
+  repo: null,
+  workingIssues: [],
+  warning: null,
+};
+
 export function statusSnapshot(stateDir: string): StatusJson {
   const snapshot = readOnlyStateSnapshot(stateDir);
   const run = activeStatusRun(snapshot.state.runs);
@@ -159,6 +212,86 @@ export function statusSnapshot(stateDir: string): StatusJson {
     service: snapshot.liveness,
     stateSource: snapshot.source,
     current: run ? runSummary(run) : null,
+    github: NO_GITHUB,
+  };
+}
+
+interface RawGithubIssue {
+  number?: unknown;
+  title?: unknown;
+  url?: unknown;
+  labels?: Array<{ name?: unknown }>;
+}
+
+async function readGithubWorkingIssues(repo: string, exec: ExecFn): Promise<GithubStatusEvidence> {
+  const result = await exec(
+    "gh",
+    [
+      "issue",
+      "list",
+      "--repo",
+      repo,
+      "--state",
+      "open",
+      "--label",
+      WORKING_LABEL,
+      "--limit",
+      "100",
+      "--json",
+      "number,title,url,labels",
+    ],
+    { timeoutMs: GITHUB_STATUS_TIMEOUT_MS },
+  );
+  if (!result.ok) {
+    return {
+      state: "unavailable",
+      repo,
+      workingIssues: [],
+      warning: result.stderr.trim() || `gh exited ${result.code}`,
+    };
+  }
+  try {
+    const raw = JSON.parse(result.stdout.trim() || "[]") as RawGithubIssue[];
+    const workingIssues = raw
+      .filter(
+        (issue) =>
+          typeof issue.number === "number" &&
+          typeof issue.title === "string" &&
+          typeof issue.url === "string",
+      )
+      .map((issue) => ({
+        number: issue.number as number,
+        title: issue.title as string,
+        url: issue.url as string,
+        labels: (issue.labels ?? [])
+          .map((label) => label.name)
+          .filter((name): name is string => typeof name === "string"),
+        issueCommand: `gh issue view ${issue.number as number} --repo ${repo} --comments`,
+        prSearchCommand: `gh pr list --repo ${repo} --state all --search "${issue.number as number}"`,
+      }))
+      .sort((a, b) => a.number - b.number);
+    return { state: "ok", repo, workingIssues, warning: null };
+  } catch {
+    return { state: "unavailable", repo, workingIssues: [], warning: "gh returned unparseable JSON" };
+  }
+}
+
+export async function statusSnapshotWithGithub(
+  stateDir: string,
+  repo: string | null,
+  exec: ExecFn = run,
+): Promise<StatusJson> {
+  const snapshot = readOnlyStateSnapshot(stateDir);
+  const run = activeStatusRun(snapshot.state.runs);
+  const inferredRepo = repo ?? inferRepoFromRuns(snapshot.state.runs);
+  const github =
+    inferredRepo === null ? NO_GITHUB : await readGithubWorkingIssues(inferredRepo, exec);
+  return {
+    version: STATUS_JSON_VERSION,
+    service: snapshot.liveness,
+    stateSource: snapshot.source,
+    current: run ? runSummary(run) : null,
+    github,
   };
 }
 
@@ -178,7 +311,24 @@ function formatDuration(ms: number | null): string {
 
 export function renderStatusHuman(snapshot: StatusJson): string {
   if (!snapshot.current) {
-    return snapshot.service.state === "online" ? "idle" : "offline";
+    if (snapshot.github.state === "ok" && snapshot.github.workingIssues.length > 0) {
+      const lines = [
+        "attention:",
+        `  service: ${snapshot.service.state}`,
+        "  state: no durable claiming run, but GitHub has agent-working",
+      ];
+      for (const issue of snapshot.github.workingIssues) {
+        lines.push(`  issue: #${issue.number} ${issue.title}`);
+        lines.push(`  inspect: ${issue.issueCommand}`);
+        lines.push(`  pr-search: ${issue.prSearchCommand}`);
+      }
+      return lines.join("\n");
+    }
+    const base = snapshot.service.state === "online" ? "idle" : "offline";
+    if (snapshot.github.state === "unavailable") {
+      return `${base}\n  github: unavailable for ${snapshot.github.repo}: ${snapshot.github.warning}`;
+    }
+    return base;
   }
   const run = snapshot.current;
   const lines = [
@@ -194,6 +344,19 @@ export function renderStatusHuman(snapshot: StatusJson): string {
   if (run.lastCommit) lines.push(`  commit: ${run.lastCommit}`);
   if (run.failureSummary) lines.push(`  summary: ${run.failureSummary}`);
   if (run.ghCommand) lines.push(`  inspect: ${run.ghCommand}`);
+  if (snapshot.github.state === "unavailable") {
+    lines.push(`  github: unavailable for ${snapshot.github.repo}: ${snapshot.github.warning}`);
+  } else if (snapshot.github.state === "ok") {
+    const currentHasWorkingLabel = snapshot.github.workingIssues.some(
+      (issue) => issue.number === run.issue.number,
+    );
+    if (!currentHasWorkingLabel) lines.push(`  github: ${WORKING_LABEL} label is absent on current issue`);
+    const extras = snapshot.github.workingIssues.filter((issue) => issue.number !== run.issue.number);
+    for (const issue of extras) {
+      lines.push(`  github-extra: #${issue.number} ${issue.title}`);
+      lines.push(`  github-extra-inspect: ${issue.issueCommand}`);
+    }
+  }
   return lines.join("\n");
 }
 
@@ -287,7 +450,12 @@ export async function runStatusCommand(
     return 2;
   }
   try {
-    const snapshot = statusSnapshot(parsed.stateDir);
+    const snapshot = parsed.github
+      ? await statusSnapshotWithGithub(parsed.stateDir, parsed.repo)
+      : {
+          ...statusSnapshot(parsed.stateDir),
+          github: { state: "skipped", repo: parsed.repo, workingIssues: [], warning: null } as GithubStatusEvidence,
+        };
     if (parsed.json && !parsed.follow) out(`${JSON.stringify(snapshot)}\n`);
     else if (!parsed.follow) out(`${renderStatusHuman(snapshot)}\n`);
     if (parsed.follow && snapshot.current) {
