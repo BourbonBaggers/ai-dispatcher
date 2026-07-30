@@ -7,6 +7,7 @@ import {
   isModelCapacityExhausted,
   isPoolExhausted,
   DORMANCY_IDLE_MS,
+  poolScarcityMultiplier,
 } from "../src/capacity.ts";
 
 const NOW = 1_700_000_000_000;
@@ -160,4 +161,58 @@ test("model-specific windows constrain only their matching model", () => {
   assert.equal(capacityHeadroomForModel(assessment, "model:claude-opus-4.8"), 0);
   assert.equal(isModelCapacityExhausted(assessment, "model:claude-sonnet-5"), false);
   assert.equal(isModelCapacityExhausted(assessment, "model:claude-opus-4.8"), true);
+});
+
+// ── Scarcity weighting (#51 follow-up) ───────────────────────────────────────────
+//
+// Exhausting a provider window can remove the pool for days, so scarcity has to be able
+// to override a modest price difference — but only near the limit. Routine consumption
+// must not perturb routing, or the dispatcher chases quota jitter instead of picking the
+// cheapest adequate model.
+
+function poolAt(usedPercent: number, dormant = false) {
+  return {
+    pool: "p",
+    state: "available" as const,
+    confidence: "provider-reported" as const,
+    resetAt: null,
+    dormant,
+    lastActivityAt: NOW,
+    observedAt: NOW,
+    windows: [{ name: "five-hour", usedPercent, resetAt: null }],
+    headroomPercent: 100 - usedPercent,
+    reason: "test",
+  };
+}
+
+test("scarcity stays neutral through routine consumption", () => {
+  for (const used of [0, 25, 50]) {
+    const m = poolScarcityMultiplier(poolAt(used), "model:x");
+    assert.ok(m < 1.2, `${used}% spent produced x${m}, which would perturb routing`);
+  }
+});
+
+test("scarcity climbs steeply once a window is nearly spent", () => {
+  assert.ok(poolScarcityMultiplier(poolAt(80), "model:x") > 3);
+  assert.ok(poolScarcityMultiplier(poolAt(95), "model:x") > 8);
+});
+
+test("scarcity is monotonic in consumption", () => {
+  let previous = 0;
+  for (const used of [0, 10, 30, 50, 70, 90, 100]) {
+    const m = poolScarcityMultiplier(poolAt(used), "model:x");
+    assert.ok(m >= previous, `x${m} at ${used}% is below the previous rung`);
+    previous = m;
+  }
+});
+
+// An unknown reading must never be optimistic, and must never be a fabricated estimate.
+test("an absent capacity assessment is neutral, not free", () => {
+  assert.equal(poolScarcityMultiplier(undefined, "model:x"), 1);
+});
+
+test("dormancy is only a tie-break, never a quota estimate", () => {
+  const noReading = { ...poolAt(0), windows: [], headroomPercent: null, dormant: true };
+  const m = poolScarcityMultiplier(noReading, "model:x");
+  assert.ok(m > 0.9 && m < 1, `dormant tie-break x${m} is too strong to be a tie-break`);
 });

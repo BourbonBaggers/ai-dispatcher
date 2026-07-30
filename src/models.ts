@@ -44,7 +44,20 @@ export interface ModelEntry {
   cli: string;
   cliModel: string;
   role: ModelRole;
+  /**
+   * The model's home capability class. Used for registry ordering, display, and as the
+   * escalation anchor when a run has no durable route evidence. Must appear in
+   * `routeTiers`.
+   */
   tier: ModelTier;
+  /**
+   * Every route tier this model is a valid selection for, cheapest-first. A model spans
+   * several routes because *effort* — not a different model — supplies the extra
+   * persistence a harder route needs (issue #51 §4). This is the single source of
+   * eligibility: routing must never re-derive a model's route span from its label, or the
+   * registry stops being the one place a model is configured.
+   */
+  routeTiers: readonly ModelTier[];
   frontier: boolean;
   taskClasses: readonly string[];
   contextWindow: number;
@@ -78,6 +91,9 @@ export const MODELS: readonly ModelEntry[] = [
     cliModel: "claude-haiku-4-5-20251001",
     role: "tiny",
     tier: "tiny",
+    // Haiku carries the Claude side of every cheap lane up to `standard`; effort, not a
+    // bigger model, is what separates those routes (#51 §3 catalog).
+    routeTiers: ["tiny", "cheap", "standard"],
     frontier: false,
     taskClasses: ["fast", "simple", "small-scope", "low-risk"],
     contextWindow: STANDARD_CONTEXT_TOKENS,
@@ -103,6 +119,7 @@ export const MODELS: readonly ModelEntry[] = [
     cliModel: "claude-sonnet-5",
     role: "capable",
     tier: "capable",
+    routeTiers: ["capable", "hard"],
     frontier: false,
     taskClasses: ["general", "implementation", "large-context", "planning", "refactor"],
     contextWindow: STANDARD_CONTEXT_TOKENS,
@@ -135,6 +152,7 @@ export const MODELS: readonly ModelEntry[] = [
     cliModel: "claude-opus-4-8",
     role: "frontier-reserve",
     tier: "frontier",
+    routeTiers: ["frontier"],
     frontier: true,
     taskClasses: ["complex", "high-risk", "planning", "deep-reasoning", "large-blast-radius"],
     contextWindow: STANDARD_CONTEXT_TOKENS,
@@ -160,6 +178,7 @@ export const MODELS: readonly ModelEntry[] = [
     cliModel: "claude-fable-5",
     role: "ultra-frontier-reserve",
     tier: "ultra-frontier",
+    routeTiers: ["ultra-frontier"],
     frontier: true,
     taskClasses: ["ultra-frontier", "explicit-reserve"],
     contextWindow: STANDARD_CONTEXT_TOKENS,
@@ -185,6 +204,7 @@ export const MODELS: readonly ModelEntry[] = [
     cliModel: "gpt-5.4-mini",
     role: "tiny",
     tier: "tiny",
+    routeTiers: ["tiny", "cheap"],
     frontier: false,
     taskClasses: ["tiny", "cheap", "simple", "small-scope", "low-risk"],
     contextWindow: STANDARD_CONTEXT_TOKENS,
@@ -210,6 +230,7 @@ export const MODELS: readonly ModelEntry[] = [
     cliModel: "gpt-5.6-luna",
     role: "standard",
     tier: "standard",
+    routeTiers: ["standard"],
     frontier: false,
     taskClasses: ["standard", "general", "implementation"],
     contextWindow: STANDARD_CONTEXT_TOKENS,
@@ -235,6 +256,7 @@ export const MODELS: readonly ModelEntry[] = [
     cliModel: "gpt-5.6-terra",
     role: "capable",
     tier: "capable",
+    routeTiers: ["capable", "hard"],
     frontier: false,
     taskClasses: ["capable", "hard", "implementation", "refactor", "cross-provider-comparable"],
     contextWindow: STANDARD_CONTEXT_TOKENS,
@@ -260,6 +282,9 @@ export const MODELS: readonly ModelEntry[] = [
     cliModel: "gpt-5.4",
     role: "capable",
     tier: "capable",
+    // Assignable alternate only: it shares terra's price but not its `hard` span, so it
+    // never wins routine traffic on a tie (#51 §3 "dominated alternates").
+    routeTiers: ["capable"],
     frontier: false,
     taskClasses: ["capable", "alternate", "implementation"],
     contextWindow: STANDARD_CONTEXT_TOKENS,
@@ -285,6 +310,9 @@ export const MODELS: readonly ModelEntry[] = [
     cliModel: "gpt-5.6-sol",
     role: "frontier-reserve",
     tier: "frontier",
+    // Sol is the Codex option at both reserve routes (#51 §3); `ultra-frontier` still
+    // requires explicit reserve selection, so spanning it here grants no automatic reach.
+    routeTiers: ["frontier", "ultra-frontier"],
     frontier: true,
     taskClasses: ["frontier", "complex", "deep-reasoning"],
     contextWindow: STANDARD_CONTEXT_TOKENS,
@@ -310,6 +338,7 @@ export const MODELS: readonly ModelEntry[] = [
     cliModel: "gpt-5.5",
     role: "frontier-reserve",
     tier: "frontier",
+    routeTiers: ["frontier"],
     frontier: true,
     taskClasses: ["frontier", "alternate", "implementation"],
     contextWindow: STANDARD_CONTEXT_TOKENS,
@@ -335,6 +364,7 @@ export const MODELS: readonly ModelEntry[] = [
     cliModel: "gemini-2.5-pro",
     role: "large-context",
     tier: "standard",
+    routeTiers: ["standard", "capable"],
     frontier: false,
     taskClasses: ["general", "large-context", "free-capacity"],
     contextWindow: 1_000_000,
@@ -367,24 +397,54 @@ export function effectiveModelPrice(
   return active ?? model.listPrice.standardContext[0]!;
 }
 
+/**
+ * Effort multiplies tokens consumed, so it scales the burn estimate. Within a single
+ * routing decision every candidate shares one effort, so this factor cancels out of the
+ * ranking — it is retained because the score is also persisted as telemetry, where a
+ * low-effort and an xhigh attempt must not look equally expensive.
+ */
+const EFFORT_BURN_MULTIPLIER: Record<string, number> = {
+  "effort:low": 1,
+  "effort:medium": 1.6,
+  "effort:high": 2.5,
+  "effort:xhigh": 4,
+  "effort:max": 5,
+  "effort:ultra": 6,
+};
+
+/** Coding agents emit far fewer output than input tokens, but output is priced ~5-6x. */
+const OUTPUT_TOKEN_WEIGHT = 2;
+
+/**
+ * Relative cost of running one attempt on this model, in list-price units.
+ *
+ * Under flat subscriptions the dollar figure is not what is actually spent — but price
+ * tracks how fast a model consumes a provider's rolling usage window, and *that* is the
+ * scarce resource (exhausting a window can lock the pool out for days). So this doubles
+ * as the headroom-burn proxy, which is why routing minimizes it rather than treating it
+ * as a billing estimate. It is never reported as money: see `telemetry.ts` for the
+ * strictly separated billed / list-price-equivalent / subscription measures.
+ */
 export function modelExpectedCostScore(
   model: ModelEntry,
   effortLabel: string,
   at: Date = new Date(),
 ): number {
   const price = effectiveModelPrice(model, at);
-  const effortMultiplier: Record<string, number> = {
-    "effort:low": 1,
-    "effort:medium": 1.6,
-    "effort:high": 2.5,
-    "effort:xhigh": 4,
-    "effort:max": 5,
-    "effort:ultra": 6,
-  };
   return (
-    price.inputUsdPerMillion +
-    price.outputUsdPerMillion * 2
-  ) * (effortMultiplier[effortLabel] ?? 1.6);
+    (price.inputUsdPerMillion + price.outputUsdPerMillion * OUTPUT_TOKEN_WEIGHT) *
+    (EFFORT_BURN_MULTIPLIER[effortLabel] ?? EFFORT_BURN_MULTIPLIER["effort:medium"]!)
+  );
+}
+
+/** Whether this model is a valid selection for `tier`. The registry is the only authority. */
+export function servesRoute(model: ModelEntry, tier: ModelTier): boolean {
+  return model.routeTiers.includes(tier);
+}
+
+/** Every dispatchable model that serves `tier`, in registry order. */
+export function modelsForRoute(tier: ModelTier): ModelEntry[] {
+  return dispatchableModels().filter((model) => servesRoute(model, tier));
 }
 
 export const LIVE_DISPATCH_CLIS = ["codex", "claude"] as const;
