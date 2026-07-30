@@ -174,6 +174,8 @@ Usage:
   ai-dispatcher --repo <owner/repository> [options]
   ai-dispatcher status [--state-dir <path>] [--repo <owner/repo>] [--json] [--follow] [--no-github]
   ai-dispatcher history [--state-dir <path>] [--json] [--limit <count>]
+  ai-dispatcher dashboard [--host <host>] [--port <port>] [--unit <systemd-unit>...]
+                             Serve the local web status dashboard.
   ai-dispatcher report [--state-dir <path>]   Print the routing analytics report.
   ai-dispatcher ship --repo <owner/repo> --pr <n> [--issue <n>]
                              Merge, deploy, and verify one ad hoc pull request without a
