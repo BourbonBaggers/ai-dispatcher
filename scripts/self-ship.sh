@@ -44,6 +44,32 @@ die() { echo "[self-ship] FAIL: $*" >&2; exit 1; }
 report() { # state health pr_head merged deployed rollback last_good
   echo "::autoship:: state=$1 health=$2 pr_head=${3:--} merged=${4:--} deployed=${5:--} rollback=${6:--} last_good=${7:--} checkout=$CHECKOUT"
 }
+ci_state_from_checks_json() {
+  node -e '
+const { readFileSync } = require("node:fs");
+let checks;
+try {
+  checks = JSON.parse(readFileSync(0, "utf8") || "[]");
+} catch {
+  console.log("unknown");
+  process.exit(0);
+}
+if (!Array.isArray(checks) || checks.length === 0) {
+  console.log("unknown");
+  process.exit(0);
+}
+const buckets = checks.map((check) => check && check.bucket);
+if (buckets.some((bucket) => bucket === "fail" || bucket === "cancel")) {
+  console.log("fail");
+} else if (buckets.some((bucket) => bucket === "pending")) {
+  console.log("pending");
+} else if (buckets.every((bucket) => bucket === "pass" || bucket === "skipping")) {
+  console.log("pass");
+} else {
+  console.log("unknown");
+}
+'
+}
 healthy() {
   local state sub
   state="$(systemctl --user show -p ActiveState --value "$UNIT" 2>/dev/null || echo unknown)"
@@ -119,13 +145,21 @@ PR_HEAD="${AUTOSHIP_PR_HEAD_SHA:-}"
 [[ -n "$PR" || -n "$MERGED_SHA" ]] || die "AUTOSHIP_PR_NUMBER or AUTOSHIP_MERGED_SHA is required"
 
 if [[ -z "$MERGED_SHA" ]]; then
-  # gh pr checks: 0 green, 8 pending, else failed. Capture explicitly (set -e safe).
+  # Classify structured check buckets instead of trusting raw gh exit-code semantics.
+  # A transient CLI/reporting failure must not fabricate red CI when GitHub's current
+  # check rollup is actually green; unreadable state remains a repairable unknown.
+  ci_json=""
   ci_rc=0
-  gh pr checks "$PR" --repo "$REPO" >/dev/null 2>&1 || ci_rc=$?
-  case "$ci_rc" in
-    0) log "CI green for PR #$PR" ;;
-    8) die "CI pending for PR #$PR" ;;
-    *) die "CI not green for PR #$PR (exit $ci_rc)" ;;
+  ci_json="$(gh pr checks "$PR" --repo "$REPO" --json bucket 2>/dev/null)" || ci_rc=$?
+  ci_state="$(printf '%s' "$ci_json" | ci_state_from_checks_json)"
+  if [[ "$ci_state" == "unknown" && "$ci_rc" -eq 8 ]]; then
+    ci_state="pending"
+  fi
+  case "$ci_state" in
+    pass) log "CI green for PR #$PR" ;;
+    pending) die "CI pending for PR #$PR" ;;
+    fail) die "CI not green for PR #$PR" ;;
+    *) die "CI state unknown for PR #$PR (gh exit $ci_rc)" ;;
   esac
 fi
 
