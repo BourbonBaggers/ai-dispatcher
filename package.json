@@ -12,6 +12,7 @@
   },
   "scripts": {
     "start": "node bin/ai-dispatcher.mjs",
+    "dashboard": "node bin/ai-dispatcher.mjs dashboard",
     "docs:routing": "node scripts/generate-routing-docs.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test \"test/**/*.test.ts\""
