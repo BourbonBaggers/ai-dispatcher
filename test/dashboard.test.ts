@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  capReplayBatch,
   computeNextRunAt,
   dashboardRecentRuns,
   dashboardPayload,
@@ -14,6 +15,11 @@ import {
 } from "../src/dashboard.ts";
 import { StateStore } from "../src/state.ts";
 import type { StatusJson } from "../src/status.ts";
+import type { RunOutputEntry } from "../src/run-output.ts";
+
+function outputEntry(seq: number): RunOutputEntry {
+  return { version: 1, runId: "run-1", seq, timestamp: seq, type: "output", stream: "stdout", line: `line ${seq}` };
+}
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "ai-dispatcher-dashboard-"));
@@ -199,4 +205,27 @@ test("dashboardRecentRuns returns the five newest non-idle runs", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("capReplayBatch passes small batches through untouched", () => {
+  const entries = [outputEntry(1), outputEntry(2), outputEntry(3)];
+  const batch = capReplayBatch(entries, 200, 0);
+  assert.deepEqual(batch.toSend, entries);
+  assert.equal(batch.omitted, 0);
+  assert.equal(batch.nextSeq, 3);
+});
+
+test("capReplayBatch caps a large backlog but still advances seq past every omitted entry", () => {
+  const entries = Array.from({ length: 5000 }, (_, i) => outputEntry(i + 1));
+  const batch = capReplayBatch(entries, 200, 0);
+  assert.equal(batch.toSend.length, 200);
+  assert.equal(batch.omitted, 4800);
+  assert.equal(batch.toSend[0]?.seq, 4801);
+  assert.equal(batch.toSend[199]?.seq, 5000);
+  assert.equal(batch.nextSeq, 5000);
+});
+
+test("capReplayBatch on an empty batch keeps the caller's resume point", () => {
+  const batch = capReplayBatch([], 200, 42);
+  assert.deepEqual(batch, { toSend: [], omitted: 0, nextSeq: 42 });
 });

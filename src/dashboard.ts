@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { run, type ExecFn } from "./exec.ts";
-import { readRunOutputEntries } from "./run-output.ts";
+import { readRunOutputEntries, type RunOutputEntry } from "./run-output.ts";
 import { readOnlyStateSnapshot } from "./state.ts";
 import { recentNonIdleRunSummaries, statusSnapshotWithGithub, type RunSummary, type StatusJson } from "./status.ts";
 
@@ -14,6 +14,12 @@ const DEFAULT_PORT = 8787;
 const STATUS_REFRESH_MS = 15_000;
 const STREAM_POLL_MS = 1_000;
 const RECENT_RUN_LIMIT = 5;
+// A run can already have thousands of recorded lines by the time a browser tab opens
+// the accordion. Replaying all of them in one synchronous burst is what freezes the
+// page (thousands of DOM appends + forced reflows back to back), so a fresh stream
+// attachment only replays the most recent slice; `seq` still advances past the
+// omitted entries so later polls only ever send new output.
+const STREAM_REPLAY_LIMIT = 200;
 
 type DashboardArgs =
   | { ok: true; host: string; port: number; units: string[]; help: false }
@@ -362,6 +368,24 @@ function sseSend(res: ServerResponse, event: string, payload: unknown): void {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
+export interface ReplayBatch {
+  /** Entries to actually emit, oldest first, capped to the replay limit. */
+  toSend: RunOutputEntry[];
+  /** How many older entries were dropped from this batch. */
+  omitted: number;
+  /** The seq a caller should resume polling from, even when entries were omitted. */
+  nextSeq: number;
+}
+
+/** Pure so the "never flood the client, never lose the resume point" rule is unit-tested directly. */
+export function capReplayBatch(entries: RunOutputEntry[], limit: number, previousSeq: number): ReplayBatch {
+  if (entries.length === 0) return { toSend: [], omitted: 0, nextSeq: previousSeq };
+  const omitted = Math.max(0, entries.length - limit);
+  const toSend = omitted > 0 ? entries.slice(-limit) : entries;
+  const nextSeq = entries[entries.length - 1]!.seq;
+  return { toSend, omitted, nextSeq };
+}
+
 async function streamInstance(
   unit: string,
   explicitUnits: string[],
@@ -384,6 +408,7 @@ async function streamInstance(
     const instance = payload.instances.find((candidate) => candidate.unit === unit);
     if (!instance) {
       sseSend(res, "error", { message: `unknown dispatcher unit ${unit}` });
+      res.end();
       return;
     }
     sseSend(res, "status", instance);
@@ -393,8 +418,13 @@ async function streamInstance(
       seq = 0;
     }
     if (runId) {
-      for (const entry of readRunOutputEntries(instance.stateDir, runId, seq)) {
-        seq = Math.max(seq, entry.seq);
+      const entries = readRunOutputEntries(instance.stateDir, runId, seq);
+      const batch = capReplayBatch(entries, STREAM_REPLAY_LIMIT, seq);
+      seq = batch.nextSeq;
+      if (batch.omitted > 0) {
+        sseSend(res, "notice", { message: `${batch.omitted} earlier output line(s) omitted from this stream.` });
+      }
+      for (const entry of batch.toSend) {
         sseSend(res, "entry", entry);
       }
     }
