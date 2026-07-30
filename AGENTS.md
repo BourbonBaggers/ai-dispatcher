@@ -95,6 +95,7 @@ src/
   generated-conflict-*.ts generated-only resolution + agent conflict-repair plumbing
   capture.ts              the uncommitted-work capture DECISION (mirrors the shell)
   sanitize.ts             redaction + stream-json rendering + control-line parsing
+  dashboard.ts            read-only one-page status dashboard + SSE stream endpoints
   notify.ts  logger.ts    ntfy push + JSON line logger (both best-effort/zero-dep)
   dispatcher.ts           the scan/claim/launch/resume/reconcile loop; records attempt telemetry
   main.ts                 entrypoint: parse → validate → open state → reconcile → loop; `report` subcommand

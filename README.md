@@ -181,6 +181,30 @@ resolved — an already-merged PR is redeployed and reverified by its exact merg
 rerunning after a partial failure is safe. `--issue` is optional; without it, no issue
 operation occurs at all. Exit code is `0` only when production is verified delivered.
 
+## Web dashboard
+
+`dashboard` serves a read-only one-page HTML status view for every local user-level
+`ai-dispatcher*.service` instance it can discover. Each dispatcher instance appears under
+its own tab. The page shows the same durable/GitHub status evidence as `status`, the
+systemd process state, the most recent scan, and the next poll time when an instance is
+idle. Expanding **Live stream** opens an on-demand SSE stream for the current run output;
+closed accordions do not hold a stream open.
+
+```bash
+ai-dispatcher dashboard --host 0.0.0.0 --port 8787
+```
+
+On the dev server, install it as an auto-starting user service:
+
+```bash
+scripts/install-dashboard-service.sh
+```
+
+The installer creates and enables `ai-dispatcher-dashboard.service`, binding to
+`0.0.0.0:8787` by default so the dashboard is reachable at
+`http://<dev-server>:8787/` after reboot. Override with `DASHBOARD_HOST`,
+`DASHBOARD_PORT`, `DASHBOARD_CHECKOUT`, `DASHBOARD_NODE_BIN`, or `DASHBOARD_UNIT`.
+
 ## On-demand policy cleanup for target repositories (#28)
 
 `target policy-cleanup` uses the configured escalation model
@@ -480,8 +504,6 @@ per-run branch/checkout are always preserved.
 
 - **Default path ends at a ready PR.** It never merges, closes issues, or deploys unless
   an operator explicitly configures `DISPATCHER_AUTOSHIP_CMD`.
-- **No web UI / SSE.** The embedded version's dashboard is intentionally dropped; the
-  interface is the CLI, the logs, and the issue comments it posts.
 - **Serial, single-host.** One agent at a time, on the host where the CLIs are installed.
 
 ## Development
