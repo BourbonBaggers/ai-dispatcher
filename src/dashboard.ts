@@ -5,13 +5,15 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { run, type ExecFn } from "./exec.ts";
 import { readRunOutputEntries } from "./run-output.ts";
-import { statusSnapshotWithGithub, type StatusJson } from "./status.ts";
+import { readOnlyStateSnapshot } from "./state.ts";
+import { recentNonIdleRunSummaries, statusSnapshotWithGithub, type RunSummary, type StatusJson } from "./status.ts";
 
 const DASHBOARD_VERSION = 1;
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 8787;
 const STATUS_REFRESH_MS = 15_000;
 const STREAM_POLL_MS = 1_000;
+const RECENT_RUN_LIMIT = 5;
 
 type DashboardArgs =
   | { ok: true; host: string; port: number; units: string[]; help: false }
@@ -47,6 +49,7 @@ export interface DashboardInstanceStatus {
     mainPid: number | null;
   };
   status: StatusJson;
+  recentRuns: RunSummary[];
   recentScan: RecentScan | null;
   nextRunAt: number | null;
   kind: "active" | "attention" | "idle" | "offline";
@@ -296,6 +299,11 @@ async function readRecentScan(unit: string, exec: ExecFn): Promise<RecentScan | 
   return result.ok ? parseRecentScan(result.stdout) : null;
 }
 
+export function dashboardRecentRuns(stateDir: string): RunSummary[] {
+  const snapshot = readOnlyStateSnapshot(stateDir);
+  return recentNonIdleRunSummaries(snapshot.state.runs, RECENT_RUN_LIMIT);
+}
+
 export async function dashboardPayload(
   explicitUnits: string[] = [],
   exec: ExecFn = run,
@@ -308,6 +316,7 @@ export async function dashboardPayload(
         statusSnapshotWithGithub(instance.stateDir, instance.repo, exec),
         readRecentScan(instance.unit, exec),
       ]);
+      const recentRuns = dashboardRecentRuns(instance.stateDir);
       return {
         unit: instance.unit,
         description: instance.description,
@@ -316,6 +325,7 @@ export async function dashboardPayload(
         intervalSeconds: instance.intervalSeconds,
         systemd,
         status,
+        recentRuns,
         recentScan,
         nextRunAt: computeNextRunAt(status, recentScan, instance.intervalSeconds),
         kind: classifyDashboardStatus(status),
@@ -410,7 +420,7 @@ export async function runDashboardCommand(
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     void (async () => {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-      if (url.pathname === "/") return sendHtml(res);
+      if (url.pathname === "/" || url.pathname === "/compact") return sendHtml(res);
       if (url.pathname === "/api/instances") {
         return sendJson(res, 200, await dashboardPayload(parsed.units, exec));
       }
@@ -438,4 +448,3 @@ export async function runDashboardCommand(
 }
 
 const DASHBOARD_HTML = readFileSync(new URL("../dashboard/dispatcher-status.html", import.meta.url), "utf8");
-
