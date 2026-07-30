@@ -86,18 +86,31 @@ human override is rejected visibly rather than silently violated.
 
 ## Capacity-aware routing & evidence (#319)
 
-At pickup the dispatcher derives a base route from type/risk, adjusts at most one route
-down or up from internal evidence, derives effort from the route, then reads live Codex
-and Claude usage windows. It excludes unavailable candidates, chooses the lowest expected
-cost adequate model from effective price and observed evidence, uses capacity as an
-availability constraint or close-cost tie-breaker, and protects frontier.
+At pickup the dispatcher derives a base route from type/risk, **reads the issue text** to
+derive the technical axes the author is no longer asked for, adjusts at most one route down
+or up from that evidence, derives effort from the route, then reads live Codex and Claude
+usage windows.
+
+Candidates come from the registry's declared route span, and the winner is the one with the
+lowest **scarcity-weighted burn**. Under flat subscriptions the real currency is a
+provider's rolling usage window — running one dry can remove the pool for days — and list
+price is the best proxy for how fast a model drains it. So cheapest-first and headroom
+preservation are the same rule, right up until a window nears its limit, where scarcity
+overtakes the price gap and work moves to the other provider on its own. Below roughly 60%
+of a window spent, capacity has no effect on the choice at all.
+
+Issue text is untrusted input: it can move the route one step, never into a frontier model.
 The complete decision and failure policy is in [`ROUTING.md`](ROUTING.md).
 
 Every terminal run records an **attempt** into `telemetry.json` (alongside dispatcher
-state); attempts fold into per-issue records. The model is honest about what it can't
-measure: token counts are `unavailable` (the launcher emits none), capacity falls back to
-`unknown` when the bounded live readers fail, and an issue is _successful_ only when merged **and**
-deployed **and** free of material human repair — never on a clean exit or a PR alone.
+state); attempts fold into per-issue records, and a terminal issue gets a cost-summary
+comment. The model is honest about what it can't measure: token counts are `unavailable`
+(the launcher emits none) and are never estimated from elapsed time, billed cost is only
+ever an amount a provider actually reported, a total nothing contributed to reads as
+`unavailable` rather than `$0.00`, capacity falls back to `unknown` when the bounded live
+readers fail, and an issue is _successful_ only when merged **and** deployed **and** free of
+material human repair — never on a clean exit or a PR alone. Each attempt stores the price
+snapshot active when it ran, so a later price change cannot rewrite historical cost.
 
 ```bash
 # Print the routing analytics report (completed features by model, success by task

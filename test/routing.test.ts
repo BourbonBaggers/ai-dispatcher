@@ -7,6 +7,7 @@ import {
   DEFAULT_CHARACTERISTICS,
   ROUTING_RATIONALE,
   deriveEffort,
+  effortForRouteTier,
   deriveMinimumTier,
   hasRecoverabilityDiscount,
   parseCharacteristics,
@@ -180,4 +181,126 @@ test("implementation failure escalates one route and frontier failure holds", ()
 
   const exhausted = planNextAttempt("test-failure", M("model:claude-opus-4.8"), capacity());
   assert.equal(exhausted.action, "hold");
+});
+
+// ── Truthful rationale labels (#51 follow-up) ────────────────────────────────────
+//
+// These labels are the learning dataset's ground truth. Claiming that capacity or
+// portfolio balance drove a plain cheapest-first pick poisons every later cost comparison,
+// so each label must describe what actually decided the route.
+
+function pool(usedPercent: number): CapacityAssessment {
+  return {
+    pool: "",
+    state: "available",
+    confidence: "provider-reported",
+    resetAt: null,
+    dormant: false,
+    lastActivityAt: NOW,
+    observedAt: NOW,
+    windows: [{ name: "five-hour", usedPercent, resetAt: null }],
+    headroomPercent: 100 - usedPercent,
+    reason: "test",
+  };
+}
+
+function pools(claudeUsed: number, codexUsed: number): Map<string, CapacityAssessment> {
+  return new Map([
+    ["claude-subscription", { ...pool(claudeUsed), pool: "claude-subscription" }],
+    ["codex-subscription", { ...pool(codexUsed), pool: "codex-subscription" }],
+  ]);
+}
+
+test("a healthy fleet routes cheapest-first and claims no capacity rationale", () => {
+  const c = parseCharacteristics(["type:bug", "risk:normal"]);
+  const d = routeIssue(c, pools(20, 20));
+  assert.equal(d.capacitySelection, "lowest-burn");
+  assert.ok(!d.rationaleLabels.includes(ROUTING_RATIONALE.portfolioBalance));
+  assert.ok(!d.rationaleLabels.includes(ROUTING_RATIONALE.capacityConstrained));
+});
+
+test("a nearly-spent pool moves the pick and is labelled as portfolio balance", () => {
+  const c = parseCharacteristics(["type:bug", "risk:normal"]);
+  const healthy = routeIssue(c, pools(20, 20)).selected!;
+  const strained = routeIssue(c, pools(92, 10));
+  assert.notEqual(strained.selected!.modelLabel, healthy.modelLabel);
+  assert.equal(strained.selected!.capacityPool, "codex-subscription");
+  assert.equal(strained.capacitySelection, "scarcity-weighted");
+  assert.ok(strained.rationaleLabels.includes(ROUTING_RATIONALE.portfolioBalance));
+});
+
+test("capacity-constrained is claimed only when a cheaper model was actually blocked", () => {
+  const c = parseCharacteristics(["type:docs", "risk:normal"]);
+  const open = routeIssue(c, capacity());
+  assert.ok(!open.rationaleLabels.includes(ROUTING_RATIONALE.capacityConstrained));
+  const blocked = routeIssue(c, capacity({ exhausted: ["codex-subscription"] }));
+  assert.equal(blocked.selected!.capacityPool, "claude-subscription");
+  assert.ok(blocked.rationaleLabels.includes(ROUTING_RATIONALE.capacityConstrained));
+});
+
+// Every base-matrix cell must resolve to a model. Before the tier ladder was filled,
+// `cheap` and `hard` routes silently fell through to a neighbouring tier.
+test("every base-matrix cell routes to a model that serves that exact tier", () => {
+  for (const type of Object.keys(BASE_ROUTE_MATRIX) as (keyof typeof BASE_ROUTE_MATRIX)[]) {
+    for (const risk of ["low-stakes", "normal", "destructive"] as const) {
+      const c = parseCharacteristics([`type:${type}`, `risk:${risk}`]);
+      const d = routeIssue(c, capacity());
+      assert.ok(d.selected, `${type}/${risk} routed to nothing`);
+      assert.ok(
+        d.selected!.routeTiers.includes(d.minimumTier),
+        `${type}/${risk}: ${d.selected!.modelLabel} does not serve ${d.minimumTier}`,
+      );
+    }
+  }
+});
+
+// The assigned route is immutable for the life of the issue. If escalation walked the
+// *model's* home tier instead, a frontier model borrowed to repair one phase would make
+// the next phase's ordinary repairs frontier attempts too.
+test("escalation walks the assigned route, not the current model's home tier", () => {
+  const plan = planNextAttempt("test-failure", M("model:claude-opus-4.8"), capacity(), undefined, {
+    routeTier: "standard",
+  });
+  assert.ok(plan.model, "expected a next attempt");
+  assert.equal(plan.model!.frontier, false);
+  assert.ok(plan.model!.routeTiers.includes("capable"));
+});
+
+test("a frontier model that was assigned a frontier route still exhausts automation", () => {
+  const plan = planNextAttempt("test-failure", M("model:claude-opus-4.8"), capacity(), undefined, {
+    routeTier: "frontier",
+  });
+  assert.equal(plan.action, "hold");
+  assert.equal(plan.model, null);
+});
+
+test("recovery prefers comparable capacity on the route, not a stronger tier", () => {
+  const plan = planNextAttempt("usage-limit", M("model:claude-haiku-4.5"), capacity(), undefined, {
+    routeTier: "standard",
+  });
+  assert.equal(plan.action, "handoff");
+  assert.equal(plan.model!.capacityPool, "codex-subscription");
+  assert.ok(plan.model!.routeTiers.includes("standard"));
+});
+
+test("effort follows the route tier for both pickup and recovery", () => {
+  assert.equal(effortForRouteTier("tiny").effortLabel, "effort:low");
+  assert.equal(effortForRouteTier("cheap").effortLabel, "effort:low");
+  assert.equal(effortForRouteTier("standard").effortLabel, "effort:medium");
+  assert.equal(effortForRouteTier("hard").effortLabel, "effort:high");
+  assert.equal(effortForRouteTier("frontier").effortLabel, "effort:xhigh");
+});
+
+// Two dimensions share the `risk:` prefix during migration. Matching on the prefix alone
+// made the result depend on label order and read a legacy risk:high issue as `normal`.
+test("legacy risk:high does not masquerade as business risk normal", () => {
+  const c = parseCharacteristics(["type:bug", "risk:high"]);
+  assert.equal(c.risk, "high");
+  assert.equal(c.businessRisk, "normal");
+  const both = parseCharacteristics(["type:bug", "risk:high", "risk:destructive"]);
+  assert.equal(both.businessRisk, "destructive");
+  assert.equal(both.risk, "high");
+  const reordered = parseCharacteristics(["type:bug", "risk:destructive", "risk:high"]);
+  assert.equal(reordered.businessRisk, "destructive");
+  assert.equal(reordered.risk, "high");
 });

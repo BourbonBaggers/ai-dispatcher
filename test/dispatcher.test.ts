@@ -956,7 +956,11 @@ test("runScanOnce resumes autoship for a stranded pr_ready capacity exit", async
   }
 });
 
-test("runScanOnce derives model and effort from an unassigned issue after reading live capacity", async () => {
+// Claude is 90% through its window and Codex is 10% through its own. Cheapest-first alone
+// would keep feeding Claude (haiku is the cheaper standard lane), which is exactly how a
+// pool gets driven into a multi-day lockout. Scarcity weighting must move this pickup to
+// Codex even though the per-attempt list price is higher.
+test("runScanOnce routes away from a nearly-spent pool after reading live capacity", async () => {
   const dir = tmp();
   try {
     const store = StateStore.open(dir);
@@ -998,6 +1002,7 @@ test("runScanOnce derives model and effort from an unassigned issue after readin
         },
         removeLabel: async () => true,
         issueState: async () => "OPEN",
+        issueBody: async () => "Add a retry helper in src/util.ts. Expected behaviour: retries twice.",
         comment: async () => true,
       } as unknown as DispatcherDeps["github"],
       readCapacity: async (nowMs) => {
@@ -1034,17 +1039,22 @@ test("runScanOnce derives model and effort from an unassigned issue after readin
 
     const result = await runScanOnce(deps);
     const claimed = store.allRuns()[0]!;
-    assert.match(result.message, /Ran claude/);
-    assert.equal(capacityReads, 1);
-    assert.equal(claimed.assignedModelLabel, "model:claude-haiku-4.5");
+    assert.match(result.message, /Ran codex/);
+    // Two reads: once at pickup, then again when the interrupted run escalates. The scan's
+    // reading can be hours stale by the time a long run finishes, and escalation is rare
+    // and expensive, so it re-reads rather than escalating on a stale window.
+    assert.equal(capacityReads, 2);
+    assert.equal(claimed.assignedModelLabel, "model:gpt-5.6-luna");
     assert.equal(claimed.assignedEffortLabel, "effort:medium");
     assert.equal(claimed.routing?.source, "automatic");
-    assert.equal(claimed.routing?.capacitySelection, "only-capable");
-    assert.equal(claimed.routing?.selectedPool, "claude-subscription");
-    assert.equal(store.getSettings().lastInitialCapacityPool, "claude-subscription");
+    // The label must say scarcity moved this pick, not that Codex was the only option.
+    assert.equal(claimed.routing?.capacitySelection, "scarcity-weighted");
+    assert.ok(claimed.routing?.rationaleLabels.includes("route:portfolio-balance"));
+    assert.equal(claimed.routing?.selectedPool, "codex-subscription");
+    assert.equal(store.getSettings().lastInitialCapacityPool, "codex-subscription");
     assert.equal(store.getProviderSuppression("codex"), null);
-    assert.ok(added.includes("agent:claude"));
-    assert.ok(added.includes("model:claude-haiku-4.5"));
+    assert.ok(added.includes("agent:codex"));
+    assert.ok(added.includes("model:gpt-5.6-luna"));
     assert.ok(added.includes("effort:medium"));
     store.releaseLock();
   } finally {
@@ -1093,6 +1103,7 @@ test("runScanOnce does not audit blocked issues while normal eligible work exist
         addLabel: async () => true,
         removeLabel: async () => true,
         issueState: async () => "OPEN",
+        issueBody: async () => "Normal eligible work.",
         comment: async () => true,
       } as unknown as DispatcherDeps["github"],
       blockedQueueAuditor: async () => {

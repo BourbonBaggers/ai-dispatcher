@@ -162,7 +162,14 @@ export const WORKING_LABEL = "agent-working";
  *
  * An issue held for a decision is NOT eligible work — hold it, notify once, move on.
  */
-export const HOLD_LABELS = ["needs-input", "blocked", "autoship-held"] as const;
+/**
+ * Applied when the dispatcher cannot proceed without a human clarifying the ask — an
+ * untrusted author, or requirements too thin to route. It is a hold, never an escalation:
+ * a vague issue is answered by asking, not by spending a more expensive model on it.
+ */
+export const NEEDS_INPUT_LABEL = "needs-input";
+
+export const HOLD_LABELS = [NEEDS_INPUT_LABEL, "blocked", "autoship-held"] as const;
 
 /**
  * Legacy label retained for compatibility with existing repositories. It is deliberately
@@ -450,6 +457,10 @@ export function migrationForLegacyIntakeLabels(labels: string[]): LabelMigration
   };
   if (!labelsIn(labels, BUSINESS_RISK_LABELS).length && legacyRisk) {
     add.add(riskMap[legacyRisk]!);
+    // Retire the legacy label in the same pass. Leaving both would keep two different
+    // dimensions on one `risk:` prefix, which is exactly the ambiguity migration exists
+    // to remove.
+    remove.add(legacyRisk);
   }
 
   const projected = [...labels.filter((label) => !remove.has(label)), ...add];
