@@ -24,6 +24,7 @@ import {
   suppressesPool,
   type ProviderCapacitySignal,
 } from "./token-exhaustion.ts";
+import { classifyAgentFailure, type FailureClassification } from "./failure-classification.ts";
 import type { DispatcherAgent } from "./labels.ts";
 import type { DispatcherConfig } from "./config.ts";
 import { phaseForStatus, type StateStore, type RunPhase, type RunRecord } from "./state.ts";
@@ -140,8 +141,8 @@ export type TerminalStatus =
   | "token_exhausted";
 
 export type RunOutcome =
-  | { status: "token_exhausted"; exitCode: number; signal: ProviderCapacitySignal }
-  | { status: Exclude<TerminalStatus, "token_exhausted">; exitCode: number; summary: string | null };
+  | { status: "token_exhausted"; exitCode: number; signal: ProviderCapacitySignal; classification?: FailureClassification }
+  | { status: Exclude<TerminalStatus, "token_exhausted">; exitCode: number; summary: string | null; classification?: FailureClassification };
 
 /**
  * Classifies a finished run into exactly one terminal state.
@@ -187,6 +188,17 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
     return { status: "abandoned", exitCode: 0, summary: "Issue closed before agent launch." };
   }
 
+  // Classify agent failure based on exit evidence and run status
+  let classification: FailureClassification | undefined;
+  // Classify if there's a non-zero exit, no result, or if we're about to classify as failed/interrupted
+  if (exitCode !== 0 || !sawResult || (exitCode === 0 && resultCommits === 0)) {
+    classification = classifyAgentFailure({
+      exitCode,
+      sawResult,
+      providerCapacitySignal: tokenExhaustion ? { kind: tokenExhaustion.kind } : undefined,
+    });
+  }
+
   // `timeout` reports 124; 137 is a SIGKILL that outran the grace period. Both leave the
   // branch and checkout intact, so both are resumable.
   const timedOut = exitCode === 124 || exitCode === 137;
@@ -198,7 +210,7 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
   // per-request limit, not proof the whole provider pool is unavailable, so it falls
   // through to the ordinary failure ladder instead of pausing the provider.
   if (tokenExhaustion && suppressesPool(tokenExhaustion.kind) && exitCode !== 0 && !timedOut) {
-    return { status: "token_exhausted", exitCode, signal: tokenExhaustion };
+    return { status: "token_exhausted", exitCode, signal: tokenExhaustion, classification };
   }
 
   if (timedOut) {
@@ -206,6 +218,7 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
       status: "timed_out",
       exitCode,
       summary: `Exceeded the ${maxRuntimeMinutes}-minute budget. The branch and checkout are preserved — resume to continue.`,
+      classification,
     };
   }
 
@@ -218,6 +231,7 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
       status: "interrupted",
       exitCode,
       summary: `The agent process was interrupted by signal (exit ${exitCode}). Its work will resume automatically.`,
+      classification,
     };
   }
 
@@ -231,6 +245,7 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
       exitCode,
       summary:
         "The agent process ended before reporting a result. Its branch and checkout are preserved — resume to continue from the plan.",
+      classification,
     };
   }
 
@@ -242,6 +257,7 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
       exitCode: 0,
       summary:
         "The agent exited cleanly but made no commits — it did not complete the work. Check the run output for what stopped it.",
+      classification,
     };
   }
 
@@ -255,6 +271,7 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
       exitCode: 0,
       summary:
         "The agent opened a PR, but its CI is red. The work is not mergeable — see the failing checks in the run output.",
+      classification,
     };
   }
 
@@ -267,14 +284,15 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
       exitCode: 0,
       summary:
         "The agent opened a PR; CI had not finished when the run ended. The dispatcher will re-check CI on its own, without relaunching the agent, until it resolves.",
+      classification,
     };
   }
 
   if (exitCode === 0) {
-    return { status: "pr_ready", exitCode: 0, summary: null };
+    return { status: "pr_ready", exitCode: 0, summary: null, classification };
   }
 
-  return { status: "failed", exitCode, summary: `The agent exited with code ${exitCode}.` };
+  return { status: "failed", exitCode, summary: `The agent exited with code ${exitCode}.`, classification };
 }
 
 export function requirePrForDelivery(
@@ -524,6 +542,10 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
         phase: phaseForStatus(status),
         exitCode: effectiveOutcome.exitCode,
         failureSummary: summary ? redact(summary) : null,
+        failureCategory: effectiveOutcome.classification?.category,
+        failureEvidence: effectiveOutcome.classification?.evidence
+          ? redact(effectiveOutcome.classification.evidence)
+          : undefined,
         outputSeq,
         finishedAt: now(),
         finalizationPending: true,
