@@ -308,3 +308,58 @@ test("resolveCapacitySuppression falls back to a bounded window when nothing par
   assert.match(resolution.summary, /Codex/);
   assert.match(resolution.summary, /unconfirmed/);
 });
+
+// ── failure classification ──────────────────────────────────────────────────────
+
+test("non-zero exit classifies as implementation-failure by default", () => {
+  const outcome = classifyRunOutcome(
+    signals({ resultExit: 1, resultCommits: 0, resultCi: "none" }),
+  );
+  assert.equal(outcome.status, "failed");
+  assert.equal("classification" in outcome ? outcome.classification?.category : undefined, "implementation-failure");
+});
+
+test("interrupted run (no result line) classifies as transient", () => {
+  const outcome = classifyRunOutcome(signals({ sawResult: false, closeCode: 143 }));
+  assert.equal(outcome.status, "interrupted");
+  assert.equal("classification" in outcome ? outcome.classification?.category : undefined, "transient");
+});
+
+test("clean exit with zero commits classifies as implementation-failure", () => {
+  const outcome = classifyRunOutcome(signals({ resultExit: 0, resultCommits: 0 }));
+  assert.equal(outcome.status, "failed");
+  assert.equal("classification" in outcome ? outcome.classification?.category : undefined, "implementation-failure");
+});
+
+test("context exhaustion provides distinct failure classification", () => {
+  const outcome = classifyRunOutcome(
+    signals({
+      resultExit: 1,
+      tokenExhaustion: {
+        kind: "context-exhaustion",
+        wallClock: null,
+        resetAt: null,
+        resetLabel: null,
+        excerpt: "context window exceeded",
+      },
+    }),
+  );
+  assert.equal(outcome.status, "failed");
+  assert.equal("classification" in outcome ? outcome.classification?.category : undefined, "context-exhaustion");
+});
+
+test("provider capacity signal provides failure classification", () => {
+  const outcome = classifyRunOutcome(
+    signals({
+      resultExit: 1,
+      tokenExhaustion: {
+        kind: "quota-exhaustion",
+        wallClock: null,
+        resetAt: null,
+        resetLabel: null,
+        excerpt: "quota exceeded",
+      },
+    }),
+  );
+  assert.equal("classification" in outcome ? outcome.classification?.category : undefined, "usage-limit");
+});
