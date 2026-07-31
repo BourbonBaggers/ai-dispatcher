@@ -70,7 +70,7 @@ function toolResultPreview(content: unknown): string {
 }
 
 /** Renders one line of raw agent stdout into zero or more terminal lines. */
-export function toTerminalLines(line: string, agent: "codex" | "claude"): string[] {
+export function toTerminalLines(line: string, agent: "codex" | "claude" | "opencode"): string[] {
   const trimmed = line.trim();
   if (!trimmed.startsWith("{")) return [line];
 
@@ -82,7 +82,18 @@ export function toTerminalLines(line: string, agent: "codex" | "claude"): string
   }
 
   if (agent === "codex") return renderCodexEvent(event);
+  // OpenCode and Claude both use Claude-like JSON format
+  return renderClaudeEvent(event);
+}
 
+function nestedMessage(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  const record = value as Record<string, unknown>;
+  return typeof record["message"] === "string" ? record["message"] : "";
+}
+
+function renderClaudeEvent(event: Record<string, unknown>): string[] {
   switch (event["type"]) {
     case "system": {
       if (event["subtype"] !== "init") return [];
@@ -127,13 +138,6 @@ export function toTerminalLines(line: string, agent: "codex" | "claude"): string
     default:
       return [];
   }
-}
-
-function nestedMessage(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (!value || typeof value !== "object") return "";
-  const record = value as Record<string, unknown>;
-  return typeof record["message"] === "string" ? record["message"] : "";
 }
 
 function renderCodexEvent(event: Record<string, unknown>): string[] {

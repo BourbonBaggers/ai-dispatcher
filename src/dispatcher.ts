@@ -35,7 +35,7 @@ import {
 import { assessIssueText, applyAssessment } from "./issue-assessment.ts";
 import { selectEligibleIssue } from "./selection.ts";
 import { untrustedAuthorComment, UNTRUSTED_AUTHOR_LABEL } from "./author-auth.ts";
-import { detectAgentOverride, conflictCommentFor } from "./agent-override.ts";
+import { detectAgentOverride, conflictCommentFor, selectAgentModel } from "./agent-override.ts";
 import { isProviderSuppressed } from "./token-exhaustion.ts";
 import { launchRun } from "./runner.ts";
 import { join } from "node:path";

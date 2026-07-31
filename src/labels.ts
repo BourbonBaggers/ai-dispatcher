@@ -51,14 +51,15 @@ export const MODEL_LABELS: Record<string, { agent: DispatcherAgent; cliModel: st
  *
  * Codex does not accept Claude's xhigh/max levels; `effort:max` deliberately caps
  * Codex at `high`, while Claude gets the highest supported non-experimental value.
+ * OpenCode effort levels map to their CLI values (likely similar to Claude's).
  */
 export const EFFORT_LABELS: Record<string, Record<DispatcherAgent, string>> = {
-  "effort:low": { codex: "low", claude: "low" },
-  "effort:medium": { codex: "medium", claude: "medium" },
-  "effort:high": { codex: "high", claude: "high" },
-  "effort:xhigh": { codex: "high", claude: "xhigh" },
-  "effort:max": { codex: "high", claude: "max" },
-  "effort:ultra": { codex: "high", claude: "max" },
+  "effort:low": { codex: "low", claude: "low", opencode: "low" },
+  "effort:medium": { codex: "medium", claude: "medium", opencode: "medium" },
+  "effort:high": { codex: "high", claude: "high", opencode: "high" },
+  "effort:xhigh": { codex: "high", claude: "xhigh", opencode: "high" },
+  "effort:max": { codex: "high", claude: "max", opencode: "high" },
+  "effort:ultra": { codex: "high", claude: "max", opencode: "high" },
 };
 
 export const DEFAULT_EFFORT_LABEL = "effort:medium";

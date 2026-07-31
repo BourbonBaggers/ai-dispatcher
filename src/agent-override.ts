@@ -86,7 +86,7 @@ export function selectAgentModel(
     const burn = modelExpectedCostScore(model, "effort:medium");
     const scarcity = poolScarcityMultiplier(capacityByPool.get(model.capacityPool), model.modelLabel);
     const capacity = capacityByPool.get(model.capacityPool);
-    const hasCapacity = !capacity || capacity.status === "available";
+    const hasCapacity = !capacity || capacity.state === "available";
     return { model, burn, scarcity, score: burn * scarcity, hasCapacity };
   });
 

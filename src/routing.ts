@@ -364,10 +364,12 @@ export const CAPACITY_SELECTION_BASES = [
   "lowest-burn",
   "scarcity-weighted",
   "sole-candidate",
+  "agent-override",
   // historical, no longer produced:
   "live-headroom",
   "rotation",
   "only-capable",
+  "human-override",
 ] as const;
 export type CapacitySelectionBasis = (typeof CAPACITY_SELECTION_BASES)[number];
 
