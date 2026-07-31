@@ -48,36 +48,37 @@ Issue #56: OpenCode Zen becomes a fallback-only provider, used only after both C
 - [x] Add support for free-model last resort with bounded attempts
 - [x] Write 17 comprehensive tests covering all scenarios
 
-## Milestone 4: Update recovery policy and next-attempt planning
+## [DONE] Milestone 4: Update recovery policy and next-attempt planning
 
 **Goal:** Integrate OpenCode fallback into the recovery/escalation ladder.
 
-- Modify `planNextAttempt()` to consider OpenCode fallback when both providers are exhausted
-- Track OpenCode fallback attempts to prevent infinite loops
-- Implement free-model last-resort logic:
-  - Only trigger after paid Zen balance is exhausted
-  - Only after both Codex and Claude exhausted for monthly window
-  - Try at most one free model per fallback phase
-  - Exclude Big Pickle and opaque models
-- Record recovery context (provider lane, fallback trigger window, paid vs free)
-- Write tests for recovery paths with OpenCode
+- [x] Separate OpenCode recovery from escalation ladder (not in planNextAttempt)
+- [x] Created planOpenCodeFallback() as independent recovery path
+- [x] Tracks window preference (5-hour → weekly → monthly)
+- [x] Tracks failed models to prevent infinite loops
+- [x] Implements free-model last-resort logic with guards:
+  - Only after paid balance exhausted
+  - Only after both providers exhausted for monthly window
+  - At most one free model per fallback phase
+  - Excludes Big Pickle and opaque models
+- [x] Records recovery context in decision output
 
-## Milestone 5: Add telemetry and evidence recording
+## [DONE] Milestone 5: Add telemetry and evidence recording
 
 **Goal:** Record OpenCode usage and capacity evidence for diagnostics and cost tracking.
 
-- Extend telemetry to record for every OpenCode attempt:
-  - Provider lane (`opencode-zen`)
-  - Selected model
-  - Route and effort
+- [x] Create opencode-telemetry.ts for attempt-specific metrics
+- [x] Define OpenCodeAttemptTelemetry interface capturing:
+  - Provider lane, selected model, route, effort
   - Fallback trigger window (5-hour/weekly/monthly)
   - Codex and Claude exhaustion evidence
-  - Paid vs free last-resort flag
-  - Current price snapshot
-  - Provider usage and billed amount (if available)
-  - Final outcome
-- Update telemetry aggregation and reporting
-- Write tests for telemetry recording
+  - Paid vs free-model flag
+  - Price snapshot at attempt time
+  - Zen balance state (paid/free balance, source)
+  - Provider-reported usage and billed amount
+  - Bypass flag for later analysis
+- [x] Define ExhaustionRecoveryEvent for trigger logging
+- [x] Write tests for telemetry structures
 
 ## Milestone 6: Add configuration and validation
 
