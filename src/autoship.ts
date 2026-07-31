@@ -357,6 +357,10 @@ async function recoveryOutcome(
       return { action: "escalate", kind, model: deps.ciEscalationModel, reason };
     case "exhausted":
       return { action: "exhausted", kind, reason };
+    case "hold":
+    case "unknown":
+      // Hold and unknown conditions exit autoship; treat as exhausted
+      return { action: "exhausted", kind, reason: decision.reason };
   }
 }
 

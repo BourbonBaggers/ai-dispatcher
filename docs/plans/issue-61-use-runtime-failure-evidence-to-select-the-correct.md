@@ -31,6 +31,8 @@ Create `src/failure-classification.ts` with:
 
 Update related `test/failure-classification.test.ts`.
 
+Done: pure classification layer with 21 tests covering all failure categories.
+
 ## [DONE] Milestone 2: update recovery-policy.ts with failure-aware decisions
 
 Enhance `src/recovery-policy.ts`:
