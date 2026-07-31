@@ -5,7 +5,13 @@
  * frontier-model attempt. Only a failure after that frontier attempt is exhausted.
  * Keeping this decision pure prevents CI, merge, deploy, and agent-exit paths from
  * quietly growing different human-handoff rules again.
+ *
+ * Each recovery decision is evidence-driven: the failure category determines the action
+ * (retry transient, hand off capacity issues, escalate capability gaps, hold on
+ * requirements/human decisions) rather than just attempt counts alone.
  */
+
+import type { FailureCategory } from "./failure-classification.ts";
 
 export const RECOVERY_KINDS = ["agent", "ci", "merge", "deploy"] as const;
 export type RecoveryKind = (typeof RECOVERY_KINDS)[number];
@@ -13,20 +19,24 @@ export type RecoveryKind = (typeof RECOVERY_KINDS)[number];
 export interface RecoveryState {
   attempts: number;
   escalated: boolean;
+  lastFailureCategory?: FailureCategory | undefined;
 }
 
 export type RecoveryLedger = Partial<Record<RecoveryKind, RecoveryState>>;
 
 export type RecoveryDecision =
-  | { action: "retry"; attempt: number; maxAttempts: number }
-  | { action: "escalate" }
-  | { action: "exhausted" };
+  | { action: "retry"; attempt: number; maxAttempts: number; reason: string }
+  | { action: "escalate"; reason: string }
+  | { action: "hold"; reason: string }
+  | { action: "exhausted"; reason: string }
+  | { action: "unknown"; reason: string };
 
 export function recoveryState(ledger: RecoveryLedger | undefined, kind: RecoveryKind): RecoveryState {
   const current = ledger?.[kind];
   return {
     attempts: Math.max(0, current?.attempts ?? 0),
     escalated: current?.escalated ?? false,
+    lastFailureCategory: current?.lastFailureCategory,
   };
 }
 
@@ -34,16 +44,95 @@ export function decideRecovery(
   ledger: RecoveryLedger | undefined,
   kind: RecoveryKind,
   maxAttempts: number,
+  failureCategory?: FailureCategory,
 ): RecoveryDecision {
   const current = recoveryState(ledger, kind);
+
+  // Failure category drives evidence-based recovery decisions
+  if (failureCategory) {
+    switch (failureCategory) {
+      case "transient":
+        // Retry transient failures using the same model (doesn't count toward escalation)
+        if (current.attempts < Math.max(0, maxAttempts)) {
+          return {
+            action: "retry",
+            attempt: current.attempts + 1,
+            maxAttempts: Math.max(0, maxAttempts),
+            reason: "Transient infrastructure failure; retry same model",
+          };
+        }
+        // After exhausting retries on transient failure, escalate capability
+        return current.escalated
+          ? { action: "exhausted", reason: "Transient failures persist after escalation" }
+          : {
+              action: "escalate",
+              reason: "Transient failures continue despite retries; escalate for more capability",
+            };
+
+      case "usage-limit":
+      case "context-exhaustion":
+        // Hand off to comparable/larger capacity rather than retrying
+        return current.escalated
+          ? {
+              action: "exhausted",
+              reason: `${failureCategory === "context-exhaustion" ? "Context" : "Capacity"} exhaustion persists after escalation`,
+            }
+          : {
+              action: "escalate",
+              reason: `${failureCategory === "context-exhaustion" ? "Context window" : "Provider capacity"} exhausted; hand off to available capacity`,
+            };
+
+      case "implementation-failure":
+      case "test-failure":
+        // Deterministic failures need capability escalation, not retries
+        if (current.attempts < Math.max(0, maxAttempts)) {
+          // Try the same model once more before escalating
+          return {
+            action: "retry",
+            attempt: current.attempts + 1,
+            maxAttempts: Math.max(0, maxAttempts),
+            reason: `${failureCategory === "test-failure" ? "Deterministic test" : "Implementation"} failure; retry same model`,
+          };
+        }
+        return current.escalated
+          ? {
+              action: "exhausted",
+              reason: `${failureCategory === "test-failure" ? "Test" : "Implementation"} failures persist after escalation`,
+            }
+          : {
+              action: "escalate",
+              reason: `${failureCategory === "test-failure" ? "Deterministic test" : "Implementation"} failures; escalate capability`,
+            };
+
+      case "requirements-block":
+      case "human-intervention":
+        // These require explicit operator decision, not automated recovery
+        return {
+          action: "hold",
+          reason: `${failureCategory === "requirements-block" ? "Requirements" : "Explicit"} block requires human intervention`,
+        };
+
+      case "unknown":
+        // Unknown state: park and recheck without spending budget
+        return {
+          action: "unknown",
+          reason: "Insufficient evidence to classify failure; park and recheck",
+        };
+    }
+  }
+
+  // Fallback: legacy behavior when no category is provided
   if (current.attempts < Math.max(0, maxAttempts)) {
     return {
       action: "retry",
       attempt: current.attempts + 1,
       maxAttempts: Math.max(0, maxAttempts),
+      reason: "Retry available",
     };
   }
-  return current.escalated ? { action: "exhausted" } : { action: "escalate" };
+  return current.escalated
+    ? { action: "exhausted", reason: "Recovery exhausted" }
+    : { action: "escalate", reason: "Retries exhausted; escalate" };
 }
 
 export function updateRecovery(

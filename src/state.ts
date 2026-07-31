@@ -123,6 +123,10 @@ export interface RunRecord {
   prNumber: number | null;
   exitCode: number | null;
   failureSummary: string | null;
+  /** Classification of the failure (if any) — drives evidence-based recovery decisions. */
+  failureCategory?: string;
+  /** Redacted evidence excerpt explaining the failure classification. */
+  failureEvidence?: string;
   resumeCount: number;
   /** Monotonic launch sequence; telemetry idempotency must not depend on clock timing. */
   attemptNumber: number;
