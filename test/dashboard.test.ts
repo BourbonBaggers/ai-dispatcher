@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -347,4 +347,11 @@ test("streamInstance closes the response cleanly for an unknown unit instead of 
   assert.equal(errors.length, 1);
   assert.match(errors[0]!.message, /unknown dispatcher unit/);
   assert.equal(fake.ended, true);
+});
+
+test("compact dashboard markup keeps dispatcher tabs visible", () => {
+  const html = readFileSync("dashboard/dispatcher-status.html", "utf8");
+  assert.doesNotMatch(html, /body\.compact \.tabs,\s*body\.compact \.side/);
+  assert.doesNotMatch(html, /if \(compact\) return;/);
+  assert.match(html, /aria-label="Dispatcher instances"/);
 });
