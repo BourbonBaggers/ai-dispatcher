@@ -34,19 +34,19 @@ Issue #56: OpenCode Zen becomes a fallback-only provider, used only after both C
 - [x] Export exhaustion signals for routing decisions
 - [x] Write comprehensive tests for exhaustion classification (10+ cases)
 
-## Milestone 3: Implement fallback-only routing logic
+## [DONE] Milestone 3: Implement fallback-only routing logic
 
 **Goal:** Modify routing to exclude OpenCode during normal pickup and enable it only after exhaustion.
 
-- Update `routeIssue()` to filter out fallback-only models during normal pickup
-- Implement `routeFallbackOpenCode()` function that:
-  - Verifies both Codex and Claude are exhausted for the same window
-  - Selects OpenCode model by the priority table in the spec
-  - Preserves original route tier and effort
-  - Records exhaustion evidence in the decision
-- Create helper `determineBestOpenCodeModel()` to apply the ordered candidate table
-- Handle model eligibility (disabled, unavailable, failed in current sequence)
-- Write comprehensive tests for all exhaustion scenarios
+- [x] Create `opencode-fallback.ts` with `planOpenCodeFallback()` function
+- [x] Implement deterministic model selection per spec table
+- [x] Verify both Codex and Claude are exhausted for the same window
+- [x] Preserve original route tier and effort
+- [x] Record exhaustion evidence (window, paid vs free, model selected)
+- [x] Implement helper for ordered candidate table
+- [x] Handle model eligibility (disabled, unavailable, failed in sequence)
+- [x] Add support for free-model last resort with bounded attempts
+- [x] Write 17 comprehensive tests covering all scenarios
 
 ## Milestone 4: Update recovery policy and next-attempt planning
 
