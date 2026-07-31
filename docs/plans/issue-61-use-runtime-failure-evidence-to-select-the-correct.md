@@ -36,20 +36,27 @@ Done: pure classification layer with 21 tests covering all failure categories.
 ## [DONE] Milestone 2: update recovery-policy.ts with failure-aware decisions
 
 Enhance `src/recovery-policy.ts`:
-- Add `FailureCategory` to `RecoveryState` and `RecoveryLedger`
-- Update `decideRecovery` to accept `FailureCategory` and return category-based decisions
-- Implement category-to-action mapping (transient→retry, etc.)
-- Keep independent attempt ledgers per recovery kind
+- Add `FailureCategory` to `RecoveryState` and `RecoveryLedger` ✓
+- Update `decideRecovery` to accept `FailureCategory` and return category-based decisions ✓
+- Implement category-to-action mapping (transient→retry, usage-limit→escalate, context→escalate, impl/test→escalate, requirements/human→hold, unknown→park) ✓
+- Keep independent attempt ledgers per recovery kind ✓
 
-Update `test/recovery-policy.test.ts` to verify each category produces correct actions.
+Update `test/recovery-policy.test.ts` to verify each category produces correct actions. ✓
+Added 11 new tests covering all 8 failure categories.
 
 ## [DONE] Milestone 3: wire agent failure classification
 
 Update `src/runner.ts`:
-- Import failure-classification functions
-- Classify agent-exit outcomes using `classifyAgentFailure`
-- Persist failure category and evidence in RunRecord
-- Update `test/runner.test.ts` to cover each failure category
+- Import failure-classification functions ✓
+- Classify agent-exit outcomes using `classifyAgentFailure` ✓
+- Persist failure category and evidence in RunRecord via new fields ✓
+- Update `test/runner.test.ts` to cover each failure category ✓
+
+Updates:
+- Added `failureCategory` and `failureEvidence` fields to RunRecord in state.ts
+- Updated `RunOutcome` type to include optional `classification`
+- Integrated `classifyAgentFailure` into `classifyRunOutcome`
+- Added 5 new tests verifying category persistence
 
 ## [DONE] Milestone 4: wire CI failure classification
 
