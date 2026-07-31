@@ -79,6 +79,14 @@ Claude CLIs from tiny through frontier and explicit ultra-frontier reserve, incl
 `model:claude-sonnet-5`, `model:claude-opus-4.8`, and `model:claude-fable-5`.
 A disabled or future-provider registry entry is documentation and is not dispatchable.
 
+**OpenCode Zen fallback** (#56): When both Codex and Claude are confirmed exhausted for
+the same quota window (5-hour, weekly, or monthly), the recovery ladder uses OpenCode Zen
+instead of escalating the route tier. OpenCode models are excluded from normal pickup and
+scarcity-weighted routing; they are eligible *only* after quota exhaustion is proven on
+both primary providers. OpenCode selection preserves the original route and does not reset
+the recovery ledger. Enable with `OPENCODE_API_KEY` and `OPENCODE_FALLBACK_ENABLED=true`
+(disabled by default). See ROUTING.md for the deterministic model-selection table.
+
 Labels are never passed to a shell. The dispatcher looks up its selected registry entry
 and effort in frozen maps; only those constants reach the CLI. Missing, partial, stale,
 or conflicting ordinary assignment labels cannot wedge an issue. An invalid explicit
