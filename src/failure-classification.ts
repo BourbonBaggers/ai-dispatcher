@@ -29,11 +29,9 @@ export interface FailureClassification {
 
 export interface AgentFailureSignals {
   exitCode: number;
-  outputContains?: string[];
+  outputContains?: string[] | undefined;
   sawResult: boolean;
-  providerCapacitySignal?: {
-    kind: string;
-  };
+  providerCapacitySignal?: { kind: string } | undefined;
 }
 
 export function classifyAgentFailure(signals: AgentFailureSignals): FailureClassification {

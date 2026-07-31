@@ -353,7 +353,7 @@ test("provider capacity signal provides failure classification", () => {
     signals({
       resultExit: 1,
       tokenExhaustion: {
-        kind: "quota-exhaustion",
+        kind: "unconfirmed-quota",
         wallClock: null,
         resetAt: null,
         resetLabel: null,

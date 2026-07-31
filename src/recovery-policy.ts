@@ -19,7 +19,7 @@ export type RecoveryKind = (typeof RECOVERY_KINDS)[number];
 export interface RecoveryState {
   attempts: number;
   escalated: boolean;
-  lastFailureCategory?: FailureCategory;
+  lastFailureCategory?: FailureCategory | undefined;
 }
 
 export type RecoveryLedger = Partial<Record<RecoveryKind, RecoveryState>>;
