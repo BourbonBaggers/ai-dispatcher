@@ -259,10 +259,30 @@ assignment labels remain migration signals, but are advisory/stale and cannot we
 queue. After the
 durable claim, the dispatcher rewrites them best-effort for visibility.
 
+### Model-level overrides (human-override)
+
 Only `route:human-override` makes assignment labels authoritative. It requires exactly one
 compatible `agent:*` and `model:*`; `effort:*` is optional. Without explicit effort, the
 dispatcher still derives it. Invalid explicit overrides are visible human-input errors
 rather than silently ignored instructions.
+
+### Agent-level overrides (pickup-time constraint)
+
+An issue with a single `agent:*` label constrains the initial pickup to that agent:
+`agent:codex`, `agent:claude`, or `agent:opencode`. The dispatcher then selects the best
+compatible model and effort within that agent's supported routes using the standard
+capacity-aware ranking. `agent:opencode` is valid even though OpenCode remains
+fallback-only during normal routing.
+
+When multiple `agent:*` labels conflict on the same issue, the dispatcher blocks the issue
+with the `blocked` label and posts a comment once. It does not claim the issue until
+exactly one `agent:*` label remains.
+
+Agent overrides:
+- work independently of model-level overrides (but not simultaneously);
+- respect existing capacity and tier constraints;
+- do not override the `route:human-override` signal;
+- do not change the frontier or quota handoff policy.
 
 Overrides pin the initial launch only. Automatic quota handoff and the normal repair →
 frontier → exhaustion contract still apply. Override attempts are recorded but excluded
