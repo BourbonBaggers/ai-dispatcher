@@ -35,6 +35,7 @@ import {
 import { assessIssueText, applyAssessment } from "./issue-assessment.ts";
 import { selectEligibleIssue } from "./selection.ts";
 import { untrustedAuthorComment, UNTRUSTED_AUTHOR_LABEL } from "./author-auth.ts";
+import { detectAgentOverride, conflictCommentFor, selectAgentModel } from "./agent-override.ts";
 import { isProviderSuppressed } from "./token-exhaustion.ts";
 import { launchRun } from "./runner.ts";
 import { join } from "node:path";
@@ -51,6 +52,7 @@ import {
 } from "./models.ts";
 import {
   deriveEffort,
+  deriveMinimumTier,
   effortForRouteTier,
   parseCharacteristics,
   planNextAttempt,
@@ -426,6 +428,38 @@ async function migrateIntakeLabels(deps: DispatcherDeps, issues: GithubIssue[]):
 }
 
 /**
+ * Detects and blocks issues with conflicting agent labels.
+ *
+ * When an issue has multiple agent labels, the dispatcher cannot select a single agent.
+ * This function applies the `blocked` label and posts an explanatory comment once,
+ * then updates the in-memory labels to prevent the issue from being claimed.
+ *
+ * Runs before assignment evaluation so conflicts are caught early.
+ */
+async function handleAgentLabelConflicts(deps: DispatcherDeps, issues: GithubIssue[]): Promise<void> {
+  for (const issue of issues) {
+    const override = detectAgentOverride(issue.labels);
+    if (!override.hasConflict) continue;
+    if (issue.labels.includes("blocked")) continue; // Already blocked
+
+    const comment = conflictCommentFor(override.conflictingLabels ?? []);
+    if (!(await deps.github.addLabel(issue.number, "blocked"))) return;
+    if (!(await deps.github.comment(issue.number, comment))) {
+      deps.logger.warn("failed to post agent conflict comment", {
+        issue: issue.number,
+        labels: override.conflictingLabels,
+      });
+    }
+
+    issue.labels = [...issue.labels, "blocked"];
+    deps.logger.info("blocked issue with conflicting agent labels", {
+      issue: issue.number,
+      conflicts: override.conflictingLabels,
+    });
+  }
+}
+
+/**
  * Posts the issue's aggregated cost summary at a terminal state (#51 §7).
  *
  * Strictly best-effort: the durable telemetry record is authoritative, so a failure to
@@ -793,6 +827,7 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
 
   if (!config.dryRun) {
     await migrateIntakeLabels(deps, listing.issues);
+    await handleAgentLabelConflicts(deps, listing.issues);
   }
 
   const claimedByIssue = store.claimingRunsByIssue();
@@ -835,6 +870,35 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
             override.value.effortLabel === null
               ? derivedEffort.reason
               : `explicit human override ${override.value.effortLabel}`,
+          capacity: capacityEvidence(capacityByPool),
+          assignedAt: nowMs,
+        });
+        return assignment;
+      }
+
+      // Agent-level override: constrain model selection to a specific agent.
+      const agentOverride = detectAgentOverride(issue.labels);
+      if (agentOverride.agent && !agentOverride.hasConflict) {
+        const minimumTier = deriveMinimumTier(characteristics);
+        const needsLargeContext = characteristics.contextSize === "large";
+        const model = selectAgentModel(agentOverride.agent, minimumTier, needsLargeContext, capacityByPool);
+        if (!model) {
+          return {
+            ok: false,
+            reason: `no ${agentOverride.agent} model available for ${minimumTier} tier`,
+          };
+        }
+        const assignment = assignmentForModel(model, derivedEffort.effortLabel);
+        if (!assignment.ok) return assignment;
+        evidenceByIssue.set(issue.number, {
+          source: "automatic",
+          minimumTier: model.tier,
+          characteristicLabels: characteristicLabels(issue.labels),
+          rationaleLabels: [`agent:${agentOverride.agent}`],
+          confidence: "high",
+          capacitySelection: "agent-override",
+          selectedPool: model.capacityPool,
+          effortReason: derivedEffort.reason,
           capacity: capacityEvidence(capacityByPool),
           assignedAt: nowMs,
         });

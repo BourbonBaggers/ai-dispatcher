@@ -66,7 +66,8 @@ model, and effort atomically at pickup:
 | `priority:*`                    | exactly one of `queue-jump`, `normal`, `background`; affects queue order only       |
 | `risk:*`                        | exactly one of `low-stakes`, `normal`, `destructive`; informs route safeguards      |
 | legacy workload characteristics | migration/advisory evidence; no longer required from issue authors                 |
-| `agent:*` / `model:*` / `effort:*` | dispatcher output for visibility; non-authoritative unless explicitly overridden |
+| `agent:codex` / `agent:claude` / `agent:opencode` | constrains pickup to that specific agent; selects the best model within that agent's supported routes |
+| `model:*` / `effort:*`          | dispatcher output for visibility; non-authoritative unless `route:human-override` is present |
 | `route:human-override`          | makes one compatible agent/model pair and optional effort an explicit initial pin  |
 | `agent-working`                 | the dispatcher is actively on it (added on claim, cleared on non-resumable finish) |
 | `needs-input` / `blocked`       | held for a human during normal selection; `blocked` can be conservatively re-audited only when the queue is otherwise idle |
@@ -83,9 +84,16 @@ A disabled or future-provider registry entry is documentation and is not dispatc
 the same quota window (5-hour, weekly, or monthly), the recovery ladder uses OpenCode Zen
 instead of escalating the route tier. OpenCode models are excluded from normal pickup and
 scarcity-weighted routing; they are eligible *only* after quota exhaustion is proven on
-both primary providers. OpenCode selection preserves the original route and does not reset
-the recovery ledger. Enable with `OPENCODE_API_KEY` and `OPENCODE_FALLBACK_ENABLED=true`
-(disabled by default). See ROUTING.md for the deterministic model-selection table.
+both primary providers OR when explicitly requested via `agent:opencode`. OpenCode selection
+preserves the original route and does not reset the recovery ledger. Enable with
+`OPENCODE_API_KEY` and `OPENCODE_FALLBACK_ENABLED=true` (disabled by default). See ROUTING.md
+for the deterministic model-selection table.
+
+**Agent-level overrides** (#58): A single `agent:codex`, `agent:claude`, or `agent:opencode`
+label constrains the initial pickup to that agent. When present, the dispatcher selects the
+best compatible model within that agent's supported routes using the same capacity-aware
+ranking as normal. Multiple conflicting agent labels block the issue with explanatory feedback.
+This is independent of model-level overrides and the recovery ladder.
 
 Labels are never passed to a shell. The dispatcher looks up its selected registry entry
 and effort in frozen maps; only those constants reach the CLI. Missing, partial, stale,
