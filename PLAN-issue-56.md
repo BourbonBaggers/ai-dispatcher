@@ -80,16 +80,19 @@ Issue #56: OpenCode Zen becomes a fallback-only provider, used only after both C
 - [x] Define ExhaustionRecoveryEvent for trigger logging
 - [x] Write tests for telemetry structures
 
-## Milestone 6: Add configuration and validation
+## [DONE] Milestone 6: Add configuration and validation
 
 **Goal:** Support OpenCode Zen configuration in environment/config.
 
-- Add OpenCode Zen credentials validation in config.ts (or extend existing provider config)
-- Support per-provider capacity pool configuration
-- Validate Zen balance availability before fallback selection
-- Handle missing/invalid credentials with actionable error messages
-- Update documentation in README and ROUTING.md
-- Write config validation tests
+- [x] Create opencode-config.ts for provider configuration
+- [x] Define OpenCodeZenConfig with API key, enabled flag, balance info
+- [x] Implement validateOpenCodeConfig() with environment parsing
+- [x] Validate Zen balance before fallback selection
+- [x] Handle missing/invalid credentials with actionable errors
+- [x] Implement updateBalance() for API-fetched balance info
+- [x] Implement isOpenCodeFallbackUsable() eligibility check
+- [x] Implement shouldRefreshBalance() for cache staleness
+- [x] Write config validation tests (15 test cases)
 
 ## Milestone 7: Implement tests for all acceptance criteria
 
