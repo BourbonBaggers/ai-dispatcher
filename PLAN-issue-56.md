@@ -20,19 +20,19 @@ Issue #56: OpenCode Zen becomes a fallback-only provider, used only after both C
 - Update cost scoring for OpenCode models (pricing metadata per spec)
 - Write tests for model registry changes
 
-## Milestone 2: Detect and classify provider exhaustion
+## [DONE] Milestone 2: Detect and classify provider exhaustion
 
 **Goal:** Track exhaustion state per provider and quota window, distinguishing from other capacity issues.
 
-- Add exhaustion tracking in state.ts or telemetry.ts:
+- [x] Add exhaustion tracking in exhaustion-state.ts:
   - Per-provider (Codex, Claude) exhaustion status
   - Per quota window (5-hour, weekly, monthly)
   - Timestamp of exhaustion detection
   - Evidence (capacity signal kind, reset time if available)
-- Create functions to detect "both primary providers exhausted" for a given window
-- Track OpenCode Zen balance state (paid/free, remaining balance)
-- Export exhaustion signals for routing decisions
-- Write tests for exhaustion classification
+- [x] Create functions to detect "both primary providers exhausted" for a given window
+- [x] Track OpenCode Zen balance state (paid/free, remaining balance)
+- [x] Export exhaustion signals for routing decisions
+- [x] Write comprehensive tests for exhaustion classification (10+ cases)
 
 ## Milestone 3: Implement fallback-only routing logic
 
