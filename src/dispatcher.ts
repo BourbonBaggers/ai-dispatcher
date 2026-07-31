@@ -1773,7 +1773,15 @@ export async function recheckHeldRun(deps: DispatcherDeps, run: RunRecord): Prom
     issue: run.issueNumber,
     pr: run.prNumber ?? undefined,
   });
-  await evaluateAutoship(deps, run);
+  // A frontier-exhausted run normally has a non-zero agent exit and therefore is not
+  // eligible for autoship's ordinary PR-ready candidacy check. Removing the durable
+  // hold is the explicit authorization to resume the existing PR, not to rerun the
+  // failed agent; re-enter the delivery path with the retained artifact evidence.
+  const resumed = recordRunPhase(deps, run, "autoshipping", "Resuming autoship for the un-held PR.", {
+    status: "pr_ready",
+    finalizationPending: false,
+  });
+  await evaluateAutoship(deps, resumed);
   return { rechecked: true };
 }
 
