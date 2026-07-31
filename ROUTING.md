@@ -338,3 +338,93 @@ to `priority:queue-jump` and `priority:background`.
 To add a provider, add the complete disabled catalog entry in `src/models.ts`, implement
 its launch and bounded capacity adapters, test its safety contract, then enable it. Never
 mirror the model allowlist outside the registry.
+
+## OpenCode Zen quota-exhaustion fallback (#56)
+
+OpenCode Zen is a consumption-based fallback provider, not a normal dispatch provider.
+Codex and Claude are the primary subscription providers; OpenCode is used only after
+both primary providers are confirmed exhausted for the same quota window (5-hour, weekly,
+or monthly).
+
+### Pickup and normal routing
+
+OpenCode models are marked `fallbackOnly` in the registry and excluded from
+`dispatchableModels()`, so they never participate in normal issue pickup or scarcity-weighted
+routing. Only the primary providers (Codex and Claude) are candidates at assignment time.
+
+### Quota-window exhaustion and fallback
+
+When a run fails with both primary providers exhausted for the same window, the recovery
+ladder tries OpenCode *instead of* escalating the route tier. The selection preserves the
+original route tier and effort, preventing silent tier escalation across phases.
+
+**Window preference order** (applies only to the triggering failure):
+1. 5-hour: OpenCode eligible if both exhausted for the 5-hour window
+2. Weekly: OpenCode eligible if both exhausted for the weekly window
+3. Monthly: OpenCode eligible if both exhausted for the monthly window
+
+### Deterministic OpenCode model selection
+
+Within the selected route tier, the dispatcher chooses the first eligible candidate from
+the preference table, per `src/opencode-fallback.ts`:
+
+| Route | Model 1 | Model 2 | Model 3 |
+|---|---|---|---|
+| `tiny` / `cheap` | DeepSeek V4 Flash | MiniMax M3 | Grok Build 0.1 |
+| `standard` | MiniMax M3 | Grok Build 0.1 | DeepSeek V4 Flash |
+| `capable` / `hard` | GLM 5.2 | DeepSeek V4 Pro | Kimi K2.7 Code |
+| `frontier` | DeepSeek V4 Pro | GLM 5.2 | Kimi K3 or Qwen3.7 Max |
+| `ultra-frontier` | Kimi K3 | Qwen3.7 Max | DeepSeek V4 Pro |
+
+Grok Build 0.1 is selected for a `standard` fallback only when:
+- both Codex and Claude are exhausted for the relevant window;
+- Zen paid balance is available;
+- MiniMax M3 is unavailable, disabled, incompatible, or has already failed; and
+- Grok Build is eligible.
+
+Models are filtered out if:
+- disabled in the OpenCode configuration;
+- not from OpenCode (e.g., Anthropic or OpenAI models exposed through Zen);
+- already failed in the current fallback sequence (prevents loops);
+- capacity exhausted in the `opencode-zen` pool.
+
+### Free-model last resort
+
+If OpenCode's monthly paid Zen limit is exhausted, the dispatcher may attempt one free
+Zen model, but only after:
+- both Codex and Claude are exhausted for the *monthly* window;
+- paid Zen balance is truly exhausted (not just unavailable);
+- free monthly quota remains; and
+- the monthly reset time hasn't passed.
+
+**Free-model order** (try at most one):
+1. `deepseek-v4-flash-free`
+2. `mimo-v2.5-free`
+3. `north-mini-code-free`
+
+Free fallback is not activated by OpenCode's 5-hour or weekly limit alone, and Big
+Pickle and other opaque free models are excluded unless they later receive stable
+capability metadata.
+
+### Telemetry and evidence
+
+Every OpenCode attempt records:
+- provider lane (`opencode-zen`), selected model, route, effort
+- fallback trigger window (5-hour/weekly/monthly)
+- Codex and Claude exhaustion evidence for that window
+- whether paid Zen or free last resort
+- price snapshot, Zen balance state at attempt time
+- provider-reported usage and billed amount if available
+- final outcome
+
+The exhaustion evidence persists through `src/exhaustion-state.ts`, which tracks
+per-provider, per-window exhaustion with reset times and signal classifications.
+
+### Configuration
+
+OpenCode fallback is enabled via environment:
+- `OPENCODE_API_KEY`: OpenCode API key (required if fallback enabled)
+- `OPENCODE_FALLBACK_ENABLED`: true/false (defaults to false for safety)
+
+Fallback is disabled by default. Enable only if OpenCode Zen credentials are configured
+and the organization has Zen balance.
