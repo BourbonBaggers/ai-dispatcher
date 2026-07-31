@@ -811,6 +811,7 @@ function heldRun(store: StateStore): RunRecord {
   const created = parkedRun(store);
   return store.updateRun(created.id, {
     status: "held",
+    exitCode: 75,
     exhaustion: { kind: "ci", reason: "frontier failed", at: 1000, labelApplied: true },
   });
 }
