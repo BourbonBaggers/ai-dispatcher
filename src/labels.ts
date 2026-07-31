@@ -19,12 +19,13 @@ import { dispatchableModels, modelByLabel, type ModelEntry } from "./models.ts";
 export const AGENT_LABELS = {
   "agent:codex": "codex",
   "agent:claude": "claude",
+  "agent:opencode": "opencode",
 } as const;
 
 export type DispatcherAgent = (typeof AGENT_LABELS)[keyof typeof AGENT_LABELS];
 
 export function isDispatcherAgent(cli: string): cli is DispatcherAgent {
-  return cli === "codex" || cli === "claude";
+  return cli === "codex" || cli === "claude" || cli === "opencode";
 }
 
 /**
