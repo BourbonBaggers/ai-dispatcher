@@ -66,6 +66,12 @@ export interface ModelEntry {
   fallbacks: readonly string[];
   listPrice: ModelPriceSchedule;
   enabled: boolean;
+  /**
+   * When true, this model is excluded from normal issue pickup and routing. It is only
+   * eligible when both primary providers (Codex and Claude) are confirmed exhausted for
+   * the same quota window. OpenCode Zen models use this flag.
+   */
+  fallbackOnly?: boolean;
 }
 
 export interface ModelPrice {
@@ -367,7 +373,7 @@ export const MODELS: readonly ModelEntry[] = [
     routeTiers: ["standard", "capable"],
     frontier: false,
     taskClasses: ["general", "large-context", "free-capacity"],
-    contextWindow: 1_000_000,
+    contextWindow: STANDARD_CONTEXT_TOKENS,
     largeContext: true,
     capacityPool: "gemini-free",
     fallbacks: ["model:claude-sonnet-5"],
@@ -382,6 +388,305 @@ export const MODELS: readonly ModelEntry[] = [
       ],
     },
     enabled: false,
+  },
+  // OpenCode Zen fallback models (quota-exhaustion only, never normal pickup)
+  {
+    modelLabel: "model:opencode-deepseek-v4-flash",
+    provider: "opencode",
+    cli: "opencode",
+    cliModel: "deepseek-v4-flash",
+    role: "tiny",
+    tier: "tiny",
+    routeTiers: ["tiny", "cheap"],
+    frontier: false,
+    taskClasses: ["tiny", "cheap", "simple", "small-scope", "low-risk"],
+    contextWindow: STANDARD_CONTEXT_TOKENS,
+    largeContext: false,
+    capacityPool: "opencode-zen",
+    fallbacks: ["model:claude-haiku-4.5"],
+    listPrice: {
+      standardContext: [
+        {
+          inputUsdPerMillion: 0.5,
+          outputUsdPerMillion: 2.5,
+          source: "opencode-zen-deepseek-flash",
+          effectiveFrom: "2026-01-01",
+        },
+      ],
+    },
+    enabled: true,
+    fallbackOnly: true,
+  },
+  {
+    modelLabel: "model:opencode-minimax-m3",
+    provider: "opencode",
+    cli: "opencode",
+    cliModel: "minimax-m3",
+    role: "standard",
+    tier: "standard",
+    routeTiers: ["tiny", "cheap", "standard"],
+    frontier: false,
+    taskClasses: ["standard", "general", "implementation"],
+    contextWindow: STANDARD_CONTEXT_TOKENS,
+    largeContext: false,
+    capacityPool: "opencode-zen",
+    fallbacks: ["model:claude-sonnet-5"],
+    listPrice: {
+      standardContext: [
+        {
+          inputUsdPerMillion: 1,
+          outputUsdPerMillion: 5,
+          source: "opencode-zen-minimax",
+          effectiveFrom: "2026-01-01",
+        },
+      ],
+    },
+    enabled: true,
+    fallbackOnly: true,
+  },
+  {
+    modelLabel: "model:opencode-grok-build-0.1",
+    provider: "opencode",
+    cli: "opencode",
+    cliModel: "grok-build-0.1",
+    role: "standard",
+    tier: "standard",
+    routeTiers: ["tiny", "cheap", "standard"],
+    frontier: false,
+    taskClasses: ["standard", "general", "implementation"],
+    contextWindow: STANDARD_CONTEXT_TOKENS,
+    largeContext: false,
+    capacityPool: "opencode-zen",
+    fallbacks: ["model:claude-sonnet-5"],
+    listPrice: {
+      standardContext: [
+        {
+          inputUsdPerMillion: 1.5,
+          outputUsdPerMillion: 7.5,
+          source: "opencode-zen-grok",
+          effectiveFrom: "2026-01-01",
+        },
+      ],
+    },
+    enabled: true,
+    fallbackOnly: true,
+  },
+  {
+    modelLabel: "model:opencode-glm-5.2",
+    provider: "opencode",
+    cli: "opencode",
+    cliModel: "glm-5.2",
+    role: "capable",
+    tier: "capable",
+    routeTiers: ["capable", "hard"],
+    frontier: false,
+    taskClasses: ["capable", "hard", "implementation", "refactor"],
+    contextWindow: STANDARD_CONTEXT_TOKENS,
+    largeContext: false,
+    capacityPool: "opencode-zen",
+    fallbacks: ["model:claude-opus-4.8"],
+    listPrice: {
+      standardContext: [
+        {
+          inputUsdPerMillion: 2,
+          outputUsdPerMillion: 10,
+          source: "opencode-zen-glm",
+          effectiveFrom: "2026-01-01",
+        },
+      ],
+    },
+    enabled: true,
+    fallbackOnly: true,
+  },
+  {
+    modelLabel: "model:opencode-deepseek-v4-pro",
+    provider: "opencode",
+    cli: "opencode",
+    cliModel: "deepseek-v4-pro",
+    role: "capable",
+    tier: "capable",
+    routeTiers: ["capable", "hard", "frontier"],
+    frontier: false,
+    taskClasses: ["capable", "hard", "implementation", "refactor"],
+    contextWindow: STANDARD_CONTEXT_TOKENS,
+    largeContext: false,
+    capacityPool: "opencode-zen",
+    fallbacks: ["model:claude-opus-4.8"],
+    listPrice: {
+      standardContext: [
+        {
+          inputUsdPerMillion: 3,
+          outputUsdPerMillion: 15,
+          source: "opencode-zen-deepseek-pro",
+          effectiveFrom: "2026-01-01",
+        },
+      ],
+    },
+    enabled: true,
+    fallbackOnly: true,
+  },
+  {
+    modelLabel: "model:opencode-kimi-k2.7-code",
+    provider: "opencode",
+    cli: "opencode",
+    cliModel: "kimi-k2.7-code",
+    role: "capable",
+    tier: "capable",
+    routeTiers: ["capable", "hard"],
+    frontier: false,
+    taskClasses: ["capable", "hard", "implementation", "refactor"],
+    contextWindow: STANDARD_CONTEXT_TOKENS,
+    largeContext: false,
+    capacityPool: "opencode-zen",
+    fallbacks: ["model:claude-opus-4.8"],
+    listPrice: {
+      standardContext: [
+        {
+          inputUsdPerMillion: 2.5,
+          outputUsdPerMillion: 12.5,
+          source: "opencode-zen-kimi",
+          effectiveFrom: "2026-01-01",
+        },
+      ],
+    },
+    enabled: true,
+    fallbackOnly: true,
+  },
+  {
+    modelLabel: "model:opencode-kimi-k3",
+    provider: "opencode",
+    cli: "opencode",
+    cliModel: "kimi-k3",
+    role: "frontier-reserve",
+    tier: "frontier",
+    routeTiers: ["frontier", "ultra-frontier"],
+    frontier: true,
+    taskClasses: ["frontier", "complex", "deep-reasoning"],
+    contextWindow: STANDARD_CONTEXT_TOKENS,
+    largeContext: false,
+    capacityPool: "opencode-zen",
+    fallbacks: ["model:claude-opus-4.8"],
+    listPrice: {
+      standardContext: [
+        {
+          inputUsdPerMillion: 5,
+          outputUsdPerMillion: 25,
+          source: "opencode-zen-kimi-k3",
+          effectiveFrom: "2026-01-01",
+        },
+      ],
+    },
+    enabled: true,
+    fallbackOnly: true,
+  },
+  {
+    modelLabel: "model:opencode-qwen-3.7-max",
+    provider: "opencode",
+    cli: "opencode",
+    cliModel: "qwen-3.7-max",
+    role: "ultra-frontier-reserve",
+    tier: "ultra-frontier",
+    routeTiers: ["ultra-frontier"],
+    frontier: true,
+    taskClasses: ["ultra-frontier", "explicit-reserve"],
+    contextWindow: STANDARD_CONTEXT_TOKENS,
+    largeContext: false,
+    capacityPool: "opencode-zen",
+    fallbacks: ["model:claude-fable-5"],
+    listPrice: {
+      standardContext: [
+        {
+          inputUsdPerMillion: 8,
+          outputUsdPerMillion: 40,
+          source: "opencode-zen-qwen",
+          effectiveFrom: "2026-01-01",
+        },
+      ],
+    },
+    enabled: true,
+    fallbackOnly: true,
+  },
+  // Free OpenCode Zen models (last-resort only, never paid fallback)
+  {
+    modelLabel: "model:opencode-deepseek-v4-flash-free",
+    provider: "opencode",
+    cli: "opencode",
+    cliModel: "deepseek-v4-flash-free",
+    role: "tiny",
+    tier: "tiny",
+    routeTiers: ["tiny", "cheap", "standard"],
+    frontier: false,
+    taskClasses: ["free-model-last-resort"],
+    contextWindow: STANDARD_CONTEXT_TOKENS,
+    largeContext: false,
+    capacityPool: "opencode-zen-free",
+    fallbacks: ["model:claude-haiku-4.5"],
+    listPrice: {
+      standardContext: [
+        {
+          inputUsdPerMillion: 0,
+          outputUsdPerMillion: 0,
+          source: "opencode-zen-free",
+          effectiveFrom: "2026-01-01",
+        },
+      ],
+    },
+    enabled: true,
+    fallbackOnly: true,
+  },
+  {
+    modelLabel: "model:opencode-mimo-v2.5-free",
+    provider: "opencode",
+    cli: "opencode",
+    cliModel: "mimo-v2.5-free",
+    role: "standard",
+    tier: "standard",
+    routeTiers: ["tiny", "cheap", "standard", "capable"],
+    frontier: false,
+    taskClasses: ["free-model-last-resort"],
+    contextWindow: STANDARD_CONTEXT_TOKENS,
+    largeContext: false,
+    capacityPool: "opencode-zen-free",
+    fallbacks: ["model:claude-sonnet-5"],
+    listPrice: {
+      standardContext: [
+        {
+          inputUsdPerMillion: 0,
+          outputUsdPerMillion: 0,
+          source: "opencode-zen-free",
+          effectiveFrom: "2026-01-01",
+        },
+      ],
+    },
+    enabled: true,
+    fallbackOnly: true,
+  },
+  {
+    modelLabel: "model:opencode-north-mini-code-free",
+    provider: "opencode",
+    cli: "opencode",
+    cliModel: "north-mini-code-free",
+    role: "capable",
+    tier: "capable",
+    routeTiers: ["capable", "hard"],
+    frontier: false,
+    taskClasses: ["free-model-last-resort"],
+    contextWindow: STANDARD_CONTEXT_TOKENS,
+    largeContext: false,
+    capacityPool: "opencode-zen-free",
+    fallbacks: ["model:claude-sonnet-5"],
+    listPrice: {
+      standardContext: [
+        {
+          inputUsdPerMillion: 0,
+          outputUsdPerMillion: 0,
+          source: "opencode-zen-free",
+          effectiveFrom: "2026-01-01",
+        },
+      ],
+    },
+    enabled: true,
+    fallbackOnly: true,
   },
 ];
 
@@ -447,7 +752,7 @@ export function modelsForRoute(tier: ModelTier): ModelEntry[] {
   return dispatchableModels().filter((model) => servesRoute(model, tier));
 }
 
-export const LIVE_DISPATCH_CLIS = ["codex", "claude"] as const;
+export const LIVE_DISPATCH_CLIS = ["codex", "claude", "opencode"] as const;
 
 export function isLiveDispatchCli(cli: string): boolean {
   return (LIVE_DISPATCH_CLIS as readonly string[]).includes(cli);
@@ -457,7 +762,17 @@ export function isDispatchable(model: ModelEntry): boolean {
   return model.enabled && isLiveDispatchCli(model.cli);
 }
 
+export function isFallbackOnly(model: ModelEntry): boolean {
+  return model.fallbackOnly === true;
+}
+
+/** Models eligible for normal issue pickup and routing (excludes fallback-only). */
 export function dispatchableModels(): ModelEntry[] {
+  return MODELS.filter(isDispatchable).filter((m) => !isFallbackOnly(m));
+}
+
+/** All enabled dispatchable models, including fallback-only (for exhaustion fallback). */
+export function allDispatchableModels(): ModelEntry[] {
   return MODELS.filter(isDispatchable);
 }
 
