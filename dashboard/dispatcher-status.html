@@ -89,9 +89,10 @@
     body.compact h1 { font-size: 17px; }
     body.compact h2 { font-size: 15px; }
     body.compact #clock,
-    body.compact .tabs,
     body.compact .side,
     body.compact .desktop-only { display: none; }
+    body.compact .tabs { margin-bottom: 10px; }
+    body.compact .tab { min-width: 140px; padding: 8px 12px; }
     body.compact .panel { border: 0; border-radius: 0; padding: 0; box-shadow: none; }
     body.compact .status-row,
     body.compact .grid { display: block; }
@@ -188,7 +189,6 @@
     }
     function renderTabs() {
       tabs.innerHTML = "";
-      if (compact) return;
       for (const instance of state.payload?.instances ?? []) {
         const button = document.createElement("button");
         button.className = "tab";
