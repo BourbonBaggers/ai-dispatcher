@@ -1634,6 +1634,9 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
               "; awaiting verified production health.",
           });
         },
+        recordMissingChecksAt: (at) => {
+          store.updateRun(run.id, { ciChecksFirstObservedAt: at });
+        },
       },
       run,
     );
