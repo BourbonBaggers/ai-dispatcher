@@ -31,17 +31,20 @@ The deployment process should:
 - [x] Add comprehensive unit tests (10 passing tests)
 - [x] Commit: `milestone(1): define image-acquisition module with CI lookup`
 
-## Milestone 2: Integration with deployment script
+## [DONE] Milestone 2: Integration with deployment script
 
 **Goal:** Wire image acquisition into the autoship deployment path.
 
-- [ ] Identify deployment entry point (self-ship.sh or dedicated deploy command)
-- [ ] Add CI image lookup before rebuild step
-- [ ] Implement fallback to rebuild if CI images unavailable
-- [ ] Add structured output reporting image source (CI/fallback)
-- [ ] Record timing for acquisition and fallback paths
-- [ ] Add error handling and specific fallback reasons
-- [ ] Commit: `milestone(2): integrate image acquisition into deployment`
+- [x] Identify deployment entry point (self-ship.sh or dedicated deploy command)
+- [x] Add CI image lookup before rebuild step
+- [x] Implement fallback to rebuild if CI images unavailable
+- [x] Add structured output reporting image source (CI/fallback)
+- [x] Record timing for acquisition and fallback paths
+- [x] Add error handling and specific fallback reasons
+- [x] Created github-ci-images.ts with GitHub-based lookup
+- [x] Integrated selectImages() into autoship.ts and ship.ts
+- [x] Pass image selection via environment variables to ship command
+- [x] Commit: `milestone(2): integrate image acquisition into deployment`
 
 ## Milestone 3: Observability and deployment status
 
