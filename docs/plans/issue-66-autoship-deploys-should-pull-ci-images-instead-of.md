@@ -46,17 +46,18 @@ The deployment process should:
 - [x] Pass image selection via environment variables to ship command
 - [x] Commit: `milestone(2): integrate image acquisition into deployment`
 
-## Milestone 3: Observability and deployment status
+## [DONE] Milestone 3: Observability and deployment status
 
 **Goal:** Make image acquisition and deployment phases observable.
 
-- [ ] Extend deployment status report with image-acquisition phase
-- [ ] Report image source (CI or fallback build)
-- [ ] Record elapsed time for CI image pull vs fallback build
-- [ ] Add structured logging with acquisition details
-- [ ] Update AutoshipStatusReport type if needed
-- [ ] Ensure lock ownership/phase/timing are observable
-- [ ] Commit: `milestone(3): add image-acquisition observability to deployment status`
+- [x] Extend deployment status report with image-acquisition phase
+- [x] Report image source (CI or fallback build)
+- [x] Record elapsed time for CI image pull vs fallback build
+- [x] Add structured logging with acquisition details
+- [x] Update AutoshipStatusReport type with image-related fields
+- [x] Ensure lock ownership/phase/timing are observable
+- [x] Parse image fields from ::autoship:: control line output
+- [x] Commit: `milestone(3): add image-acquisition observability to deployment status`
 
 ## Milestone 4: Regression tests and verification
 
