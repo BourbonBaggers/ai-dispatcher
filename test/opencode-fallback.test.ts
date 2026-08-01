@@ -87,6 +87,7 @@ describe("opencode-fallback", () => {
         "standard",
         emptyCapacity,
         allDispatchableModels(),
+        { now },
       );
 
       assert.equal(result, null);
@@ -109,6 +110,7 @@ describe("opencode-fallback", () => {
         "standard",
         emptyCapacity,
         allDispatchableModels(),
+        { now },
       );
 
       assert.equal(result, null);
@@ -132,6 +134,7 @@ describe("opencode-fallback", () => {
         "standard",
         emptyCapacity,
         allDispatchableModels(),
+        { now },
       );
 
       assert(result);
@@ -159,6 +162,7 @@ describe("opencode-fallback", () => {
         "capable",
         emptyCapacity,
         allDispatchableModels(),
+        { now },
       );
 
       assert(result);
@@ -184,6 +188,7 @@ describe("opencode-fallback", () => {
         "frontier",
         emptyCapacity,
         allDispatchableModels(),
+        { now },
       );
 
       assert(result);
@@ -209,6 +214,7 @@ describe("opencode-fallback", () => {
         "standard",
         emptyCapacity,
         allDispatchableModels(),
+        { now },
       );
 
       assert(result);
@@ -236,7 +242,7 @@ describe("opencode-fallback", () => {
         "standard",
         emptyCapacity,
         allDispatchableModels(),
-        { failedModelsInSequence: failed },
+        { failedModelsInSequence: failed, now },
       );
 
       assert(result);
@@ -263,6 +269,7 @@ describe("opencode-fallback", () => {
         "standard",
         emptyCapacity,
         allDispatchableModels(),
+        { now },
       );
 
       assert(result);
@@ -289,6 +296,7 @@ describe("opencode-fallback", () => {
         "standard",
         emptyCapacity,
         allDispatchableModels(),
+        { now },
       );
 
       // Should return null since paid balance is exhausted and monthly is not exhausted
@@ -313,6 +321,7 @@ describe("opencode-fallback", () => {
         "tiny",
         emptyCapacity,
         allDispatchableModels(),
+        { now },
       );
 
       const resultCapable = planOpenCodeFallback(
@@ -321,6 +330,7 @@ describe("opencode-fallback", () => {
         "capable",
         emptyCapacity,
         allDispatchableModels(),
+        { now },
       );
 
       assert(resultTiny?.selected);
