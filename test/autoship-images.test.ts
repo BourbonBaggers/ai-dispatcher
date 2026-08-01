@@ -87,7 +87,7 @@ test("parseLegacyAutoshipStatusReport ignores image fields (legacy format doesn'
 
 test("createGitHubCiImageLookup returns a CiImageLookup", () => {
   const mockConfig: GitHubCiImageConfig = {
-    repoSlug: { owner: "test", repo: "repo" },
+    repoSlug: { owner: "test", repo: "repo", slug: "test/repo" },
     productionImages: ["api", "web"],
     registryUrl: "ghcr.io/test",
   };
@@ -102,7 +102,7 @@ test("createGitHubCiImageLookup returns a CiImageLookup", () => {
 test("createGitHubCiImageLookup queryImages returns null for non-successful workflows", async () => {
   let queryCalled = false;
   const mockConfig: GitHubCiImageConfig = {
-    repoSlug: { owner: "test", repo: "repo" },
+    repoSlug: { owner: "test", repo: "repo", slug: "test/repo" },
     productionImages: ["api"],
     registryUrl: "ghcr.io/test",
     queryWorkflowRuns: async (sha: string) => {
@@ -125,7 +125,7 @@ test("createGitHubCiImageLookup queryImages returns null for non-successful work
 
 test("createGitHubCiImageLookup queryImages builds image references", async () => {
   const mockConfig: GitHubCiImageConfig = {
-    repoSlug: { owner: "test", repo: "myrepo" },
+    repoSlug: { owner: "test", repo: "myrepo", slug: "test/myrepo" },
     productionImages: ["api", "web", "worker"],
     registryUrl: "ghcr.io/test",
     queryWorkflowRuns: async (sha: string) => ({
@@ -149,7 +149,7 @@ test("createGitHubCiImageLookup queryImages builds image references", async () =
 
 test("createGitHubCiImageLookup queryImages returns null if no required checks", async () => {
   const mockConfig: GitHubCiImageConfig = {
-    repoSlug: { owner: "test", repo: "repo" },
+    repoSlug: { owner: "test", repo: "repo", slug: "test/repo" },
     productionImages: ["api"],
     registryUrl: "ghcr.io/test",
     queryWorkflowRuns: async (sha: string) => ({
@@ -169,7 +169,7 @@ test("createGitHubCiImageLookup queryImages returns null if no required checks",
 test("createGitHubCiImageLookup verifyImageSha uses provided verifier", async () => {
   let verifyCallCount = 0;
   const mockConfig: GitHubCiImageConfig = {
-    repoSlug: { owner: "test", repo: "repo" },
+    repoSlug: { owner: "test", repo: "repo", slug: "test/repo" },
     productionImages: ["api"],
     registryUrl: "ghcr.io/test",
     verifyImageInRegistry: async (ref: string, digest: string) => {
@@ -192,7 +192,7 @@ test("createGitHubCiImageLookup verifyImageSha uses provided verifier", async ()
 
 test("createGitHubCiImageLookup verifyImageSha returns false on verification error", async () => {
   const mockConfig: GitHubCiImageConfig = {
-    repoSlug: { owner: "test", repo: "repo" },
+    repoSlug: { owner: "test", repo: "repo", slug: "test/repo" },
     productionImages: ["api"],
     registryUrl: "ghcr.io/test",
     verifyImageInRegistry: async () => {
