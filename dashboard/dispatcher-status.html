@@ -91,8 +91,13 @@
     body.compact #clock,
     body.compact .side,
     body.compact .desktop-only { display: none; }
-    body.compact .tabs { margin-bottom: 10px; }
-    body.compact .tab { min-width: 140px; padding: 8px 12px; }
+    body.compact .tabs { gap: 6px; margin-bottom: 10px; }
+    body.compact .tab {
+      flex: 1 0 0;
+      min-width: 0;
+      padding: 7px 8px;
+      font-size: 12px;
+    }
     body.compact .panel { border: 0; border-radius: 0; padding: 0; box-shadow: none; }
     body.compact .status-row,
     body.compact .grid { display: block; }
@@ -123,7 +128,14 @@
     const STREAM_MAX_LINES = 500;
     const STREAM_FLUSH_MS = 100;
     const compact = location.pathname === "/compact" || new URLSearchParams(location.search).get("view") === "compact";
-    const state = { payload: null, selected: null, mountedUnit: null, streams: new Map() };
+    const SELECTED_REPO_KEY = "ai-dispatcher.dashboard.selected-repo";
+    const state = {
+      payload: null,
+      selected: null,
+      selectedRepo: localStorage.getItem(SELECTED_REPO_KEY),
+      mountedUnit: null,
+      streams: new Map(),
+    };
     const tabs = document.getElementById("tabs");
     const content = document.getElementById("content");
     const updated = document.getElementById("updated");
@@ -196,7 +208,12 @@
         button.setAttribute("role", "tab");
         button.setAttribute("aria-selected", String(instance.unit === state.selected));
         button.innerHTML = `${escapeHtml(instanceTitle(instance))}<br><span class="subtle">${escapeHtml(instance.kind)}</span>`;
-        button.onclick = () => { state.selected = instance.unit; render(); };
+        button.onclick = () => {
+          state.selected = instance.unit;
+          state.selectedRepo = instance.repo;
+          localStorage.setItem(SELECTED_REPO_KEY, instance.repo);
+          render();
+        };
         tabs.appendChild(button);
       }
     }
@@ -281,7 +298,16 @@
         content.innerHTML = '<div class="empty">No dispatcher instances discovered.</div>';
         return;
       }
-      if (!state.selected || !instances.some((instance) => instance.unit === state.selected)) state.selected = instances[0].unit;
+      const remembered = state.selectedRepo
+        ? instances.find((instance) => instance.repo === state.selectedRepo)
+        : null;
+      const current = state.selected
+        ? instances.find((instance) => instance.unit === state.selected)
+        : null;
+      const next = remembered ?? current ?? instances[0];
+      state.selected = next.unit;
+      state.selectedRepo = next.repo;
+      localStorage.setItem(SELECTED_REPO_KEY, next.repo);
       renderTabs();
       const instance = instances.find((candidate) => candidate.unit === state.selected);
       if (instance.unit !== state.mountedUnit) {
