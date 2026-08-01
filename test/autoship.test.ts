@@ -71,6 +71,8 @@ function harness(opts: {
   closeIssueOk?: boolean;
   /** PR lifecycle state returned by prState() -- default "open". */
   prState?: "open" | "merged" | "closed" | "unknown";
+  issueBody?: string | null;
+  prText?: { title: string; body: string } | null;
   beforeShip?: AutoshipDeps["beforeShip"];
 }): Harness {
   const shipped: Harness["shipped"] = [];
@@ -111,6 +113,12 @@ function harness(opts: {
         mergeCommitOid: "merge789",
       }),
       prDiff: async () => (opts.diff === undefined ? "" : opts.diff),
+      ...(opts.issueBody !== undefined
+        ? {
+            issueBody: async () => opts.issueBody!,
+            prTitleAndBody: async () => opts.prText ?? { title: "Issue: #1", body: "" },
+          }
+        : {}),
       comment: async (_i, b) => { comments.push(b); return true; },
       addLabel: async (_i, l) => {
         if (opts.addLabelFails) return false;
@@ -164,6 +172,24 @@ function harness(opts: {
 }
 
 describe("autoshipRun — gating", () => {
+  it("repairs instead of shipping when explicit business criteria are omitted", async () => {
+    const h = harness({
+      issueBody: [
+        "## Desired behavior",
+        "- The card-paid workflow must deliver an invoice to the customer",
+        "- Payment-menu labels must describe the new payment flow",
+      ].join("\n"),
+      diff: "The card-paid path does not send an invoice to the customer.",
+      prText: { title: "Implement card payments", body: "Tests pass." },
+    });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.equal(r.action, "repair");
+    assert.equal(h.shipped.length, 0);
+    assert.equal(h.closedIssues.length, 0);
+    assert.match(h.comments[0]!, /acceptance criteria need repair/i);
+    assert.match(h.comments[0]!, /Payment-menu labels/i);
+  });
+
   it("skips when autoship is not configured", async () => {
     const h = harness({ autoshipCmd: null });
     const r = await autoshipRun(h.deps, succeededRun());
