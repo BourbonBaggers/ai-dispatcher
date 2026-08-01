@@ -12,6 +12,7 @@
  */
 
 import { classifyShipResult } from "./autoship-deployment.ts";
+import { selectImages, formatImageSelectionResult, type CiImageLookup } from "./ci-image-acquisition.ts";
 import type { ExecResult } from "./exec.ts";
 import type { GithubPrMergeInfo } from "./github.ts";
 import type { Logger } from "./logger.ts";
@@ -39,6 +40,8 @@ export interface ShipDeps {
   autoshipCmd: string;
   repoSlug: string;
   autoshipDeploymentCheckout: string;
+  /** Optional CI image lookup for selecting CI-built images over dev-server rebuilds. */
+  ciImageLookup?: CiImageLookup;
 }
 
 export interface ShipRequest {
@@ -130,9 +133,27 @@ export async function shipRun(deps: ShipDeps, request: ShipRequest): Promise<Shi
     baseSha: mergeInfo.baseRefOid,
     deploymentCheckout: deps.autoshipDeploymentCheckout,
   });
+
+  const env = shipEnv(deps, mergeInfo, request);
+
+  // Determine which images to use: CI images if available, otherwise fallback to rebuild.
+  if (deps.ciImageLookup) {
+    const startMs = Date.now?.() ?? 0;
+    const imageResult = await selectImages(deps.ciImageLookup, mergeInfo.headRefOid, startMs).catch(
+      () => ({ source: "fallback" as const, reason: "ci_evidence_unknown" as const }),
+    );
+    const formatted = formatImageSelectionResult(imageResult);
+    Object.assign(env, formatted);
+
+    logger.info("ship: image selection determined", {
+      pr,
+      ...formatted,
+    });
+  }
+
   const result = await deps.ship(
     deps.autoshipCmd,
-    shipEnv(deps, mergeInfo, request),
+    env,
     { cwd: deps.autoshipDeploymentCheckout },
   );
   return await resolveShipResult(deps, request, result);
