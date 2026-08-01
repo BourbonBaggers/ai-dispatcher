@@ -32,6 +32,12 @@ export interface GithubPrMergeInfo {
   mergeCommitOid: string | null;
 }
 
+export interface GithubPrChecksEvidence {
+  state: "pass" | "pending" | "fail" | "unknown";
+  /** null means the checks command itself could not be parsed/read. */
+  checkCount: number | null;
+}
+
 /** Issues are pulled newest-last so the scan can prefer the oldest actionable one. */
 const ISSUE_FETCH_LIMIT = 100;
 
@@ -268,18 +274,36 @@ export class GithubClient {
    * fresh reading at ship time; a verdict observed minutes earlier is not trusted.
    */
   async prChecksState(pr: number): Promise<"pass" | "pending" | "fail" | "unknown"> {
+    return (await this.prChecksEvidence(pr)).state;
+  }
+
+  /**
+   * Reads both the verdict and whether GitHub returned any check suite entries.
+   * The empty-list distinction is essential: `gh pr checks` can exit successfully
+   * before Actions has created a suite, and that condition must not park forever.
+   */
+  async prChecksEvidence(pr: number): Promise<GithubPrChecksEvidence> {
     const result = await this.exec("gh", prChecksArgs(this.repo.slug, pr));
     try {
       const checks = JSON.parse(result.stdout.trim()) as Array<{ bucket?: unknown }>;
-      if (!Array.isArray(checks) || checks.length === 0) return "unknown";
+      if (!Array.isArray(checks)) return { state: "unknown", checkCount: null };
+      if (checks.length === 0) return { state: "unknown", checkCount: 0 };
       const buckets = checks.map((check) => check.bucket);
-      if (buckets.some((bucket) => bucket === "fail" || bucket === "cancel")) return "fail";
-      if (buckets.some((bucket) => bucket === "pending")) return "pending";
-      if (buckets.every((bucket) => bucket === "pass" || bucket === "skipping")) return "pass";
-      return "unknown";
+      if (buckets.some((bucket) => bucket === "fail" || bucket === "cancel")) {
+        return { state: "fail", checkCount: checks.length };
+      }
+      if (buckets.some((bucket) => bucket === "pending")) {
+        return { state: "pending", checkCount: checks.length };
+      }
+      if (buckets.every((bucket) => bucket === "pass" || bucket === "skipping")) {
+        return { state: "pass", checkCount: checks.length };
+      }
+      return { state: "unknown", checkCount: checks.length };
     } catch {
       // Exit 8 is a documented pending result even if an older gh omitted JSON.
-      return result.code === 8 ? "pending" : "unknown";
+      return result.code === 8
+        ? { state: "pending", checkCount: null }
+        : { state: "unknown", checkCount: null };
     }
   }
 

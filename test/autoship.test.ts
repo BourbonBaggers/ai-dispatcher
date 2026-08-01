@@ -51,6 +51,7 @@ interface Harness {
 function harness(opts: {
   autoshipCmd?: string | null;
   ci?: "pass" | "pending" | "fail" | "unknown";
+  checkCount?: number | null;
   waitedCi?: "pass" | "pending" | "fail" | "unknown";
   mergeStateStatus?: string;
   isDraft?: boolean;
@@ -94,6 +95,10 @@ function harness(opts: {
     github: {
       prState: async () => opts.prState ?? "open",
       prChecksState: async () => opts.ci ?? "pass",
+      prChecksEvidence: async () => ({
+        state: opts.ci ?? "pass",
+        checkCount: opts.checkCount === undefined ? null : opts.checkCount,
+      }),
       waitForPrChecks: async () => opts.waitedCi ?? "pass",
       prMergeInfo: async () => ({
         baseRefName: "main",
@@ -205,6 +210,28 @@ describe("autoshipRun — gating", () => {
     const h = harness({ ci: "pending" });
     const r = await autoshipRun(h.deps, succeededRun());
     assert.deepEqual(r, { action: "ci_not_green", state: "pending" });
+    assert.equal(h.shipped.length, 0);
+  });
+
+  it("repairs a durable no-checks PR after the delayed-workflow grace period", async () => {
+    const h = harness({ ci: "unknown", checkCount: 0 });
+    const r = await autoshipRun(
+      h.deps,
+      succeededRun({
+        ciChecksFirstObservedAt: Date.now() - 10 * 60 * 1000,
+      } as Partial<RunRecord>),
+    );
+    assert.equal(r.action, "repair");
+    if (r.action === "repair") assert.equal(r.kind, "ci");
+    assert.equal(h.shipped.length, 0);
+    assert.match(h.comments[0] ?? "", /missing CI checks/i);
+  });
+
+  it("repairs a stale-base PR before reading it as pending CI", async () => {
+    const h = harness({ ci: "pending", checkCount: 1, mergeStateStatus: "BEHIND" });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.equal(r.action, "repair");
+    if (r.action === "repair") assert.equal(r.kind, "merge");
     assert.equal(h.shipped.length, 0);
   });
 
