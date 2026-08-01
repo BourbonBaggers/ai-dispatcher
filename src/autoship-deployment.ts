@@ -54,6 +54,11 @@ export interface AutoshipStatusReport {
   rollbackSha: string | null;
   lastKnownGoodSha: string | null;
   deploymentCheckoutPath: string | null;
+  // Image acquisition observability (optional, added by image-aware ship commands)
+  imageSource?: "ci" | "fallback";
+  fallbackReason?: string; // Reason if imageSource is "fallback"
+  ciElapsedMs?: number; // Time spent acquiring CI images
+  fallbackElapsedMs?: number; // Time spent on fallback build/selection
 }
 
 export interface ClassifiedShipResult {
@@ -121,7 +126,8 @@ export function parseAutoshipStatusReport(output: string): AutoshipStatusReport 
   if (!state || !(SHIP_STATES as readonly string[]).includes(state)) return null;
 
   const health = fields.get("health") ?? "unknown";
-  return {
+  const imageSource = fields.get("image_source");
+  const report: AutoshipStatusReport = {
     state: state as AutoshipShipState,
     health: (HEALTH_STATES as readonly string[]).includes(health)
       ? (health as AutoshipHealthState)
@@ -133,6 +139,21 @@ export function parseAutoshipStatusReport(output: string): AutoshipStatusReport 
     lastKnownGoodSha: nullableField(fields, "last_good"),
     deploymentCheckoutPath: nullableField(fields, "checkout"),
   };
+
+  // Image acquisition observability (optional, from image-aware ship commands)
+  if (imageSource === "ci" || imageSource === "fallback") {
+    report.imageSource = imageSource;
+  }
+  if (imageSource === "fallback") {
+    const fallbackReason = nullableField(fields, "fallback_reason");
+    if (fallbackReason) report.fallbackReason = fallbackReason;
+  }
+  const ciElapsedMs = parseInt(fields.get("ci_elapsed_ms") ?? "", 10);
+  if (!isNaN(ciElapsedMs)) report.ciElapsedMs = ciElapsedMs;
+  const fallbackElapsedMs = parseInt(fields.get("fallback_elapsed_ms") ?? "", 10);
+  if (!isNaN(fallbackElapsedMs)) report.fallbackElapsedMs = fallbackElapsedMs;
+
+  return report;
 }
 
 /**
