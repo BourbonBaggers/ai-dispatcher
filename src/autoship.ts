@@ -38,6 +38,7 @@ import {
   type GeneratedConflictRepairRequest,
   type GeneratedConflictRepairResult,
 } from "./generated-conflict-repair.ts";
+import { selectImages, formatImageSelectionResult, type CiImageLookup } from "./ci-image-acquisition.ts";
 import type { RunRecord } from "./state.ts";
 import type { ExecResult } from "./exec.ts";
 import { NOTIFY_PRIORITY_DEFAULT, type Notifier } from "./notify.ts";
@@ -123,6 +124,8 @@ export interface AutoshipDeps {
   repairGeneratedConflicts?: (
     request: GeneratedConflictRepairRequest,
   ) => Promise<GeneratedConflictRepairResult>;
+  /** Optional CI image lookup for selecting CI-built images over dev-server rebuilds. */
+  ciImageLookup?: CiImageLookup;
 }
 
 export type AutoshipOutcome =
@@ -291,8 +294,10 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
     baseSha: mergeInfo.baseRefOid,
     deploymentCheckout: deps.autoshipDeploymentCheckout,
   });
-  await deps.beforeShip?.({ pr, mergedSha: null });
-  const result = await deps.ship(deps.autoshipCmd, {
+
+  // Determine which images to use: CI images if available, otherwise fallback to rebuild.
+  // We query based on the PR head SHA; the ship command can re-query if the merged SHA differs.
+  const shipEnv: Record<string, string> = {
     AUTOSHIP_PR_NUMBER: String(pr),
     AUTOSHIP_ISSUE_NUMBER: String(run.issueNumber),
     AUTOSHIP_BRANCH: run.branch,
@@ -300,7 +305,27 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
     AUTOSHIP_PR_HEAD_SHA: mergeInfo.headRefOid,
     AUTOSHIP_BASE_SHA: mergeInfo.baseRefOid,
     AUTOSHIP_DEPLOYMENT_CHECKOUT: deps.autoshipDeploymentCheckout,
-  }, { cwd: deps.autoshipDeploymentCheckout });
+  };
+
+  if (deps.ciImageLookup) {
+    const startMs = Date.now?.() ?? 0;
+    const imageResult = await selectImages(deps.ciImageLookup, mergeInfo.headRefOid, startMs).catch(
+      () => ({ source: "fallback" as const, reason: "ci_evidence_unknown" as const }),
+    );
+    const formatted = formatImageSelectionResult(imageResult);
+    Object.assign(shipEnv, formatted);
+
+    logger.info("autoship: image selection determined", {
+      issue: run.issueNumber,
+      pr,
+      ...formatted,
+    });
+  }
+
+  await deps.beforeShip?.({ pr, mergedSha: null });
+  const result = await deps.ship(deps.autoshipCmd, shipEnv, {
+    cwd: deps.autoshipDeploymentCheckout,
+  });
   const classified = classifyShipResult(result);
 
   if (

@@ -18,18 +18,18 @@ The deployment process should:
 4. Fall back to rebuild only if CI images unavailable
 5. Record timing and source (CI vs fallback) separately in deployment output
 
-## Milestone 1: Image acquisition module with CI lookup and fallback
+## [DONE] Milestone 1: Image acquisition module with CI lookup and fallback
 
 **Goal:** Create a pure module that encapsulates image-acquisition logic.
 
-- [ ] Define `ImageSet` type representing the production image requirements
-- [ ] Define image identifiers tied to merged SHA (immutable identity)
-- [ ] Create `fetchCiImages()` function: validate CI status → resolve image set
-- [ ] Create `verifyImageSha()` function: confirm image digest matches expected SHA
-- [ ] Create `selectImages()` decision function: CI images if available → fallback to rebuild
-- [ ] Document decision criteria and fallback reasons
-- [ ] Add comprehensive unit tests
-- [ ] Commit: `milestone(1): define image-acquisition module with CI lookup`
+- [x] Define `ImageSet` type representing the production image requirements
+- [x] Define image identifiers tied to merged SHA (immutable identity)
+- [x] Create `fetchCiImages()` function: validate CI status → resolve image set
+- [x] Create `verifyImageSha()` function: confirm image digest matches expected SHA
+- [x] Create `selectImages()` decision function: CI images if available → fallback to rebuild
+- [x] Document decision criteria and fallback reasons
+- [x] Add comprehensive unit tests (10 passing tests)
+- [x] Commit: `milestone(1): define image-acquisition module with CI lookup`
 
 ## Milestone 2: Integration with deployment script
 
