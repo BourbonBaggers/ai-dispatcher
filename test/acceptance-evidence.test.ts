@@ -51,3 +51,29 @@ test("ignores generic acceptance prose and bounds issue scanning", () => {
   );
   assert.equal(result.status, "insufficient");
 });
+
+test("does not turn problem narrative or regression fixtures into criteria", () => {
+  const issueWithNarrative = [
+    "## Problem",
+    "- The issue required customer invoice delivery, but the old implementation omitted it",
+    "## Desired behavior",
+    "- The card-paid workflow must deliver an invoice to the customer",
+    "## Regression test",
+    "- The candidate implementation explicitly omits customer invoice delivery",
+  ].join("\n");
+  assert.deepEqual(extractAcceptanceCriteria(issueWithNarrative), [
+    "The card-paid workflow must deliver an invoice to the customer",
+  ]);
+});
+
+test("ignores business nouns used in evaluator policy prose", () => {
+  const issueWithPolicy = [
+    "## Desired behavior",
+    "- The issue author should describe the business outcome in normal business terms",
+    "- Avoid requiring risky external actions, such as sending a real Stripe invoice",
+    "- The card-paid workflow must deliver an invoice to the customer",
+  ].join("\n");
+  assert.deepEqual(extractAcceptanceCriteria(issueWithPolicy), [
+    "The card-paid workflow must deliver an invoice to the customer",
+  ]);
+});

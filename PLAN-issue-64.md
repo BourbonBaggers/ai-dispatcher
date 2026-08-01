@@ -33,10 +33,10 @@ verified-deploy protections.
 ## [DONE] Milestone 3: Full verification and delivery
 
 - Run the complete test and typecheck suites. (`npm test`, `npm run typecheck`)
-- Update this plan with final verification results.
+- Update this plan with final verification results and regression/policy-narrative filtering.
 - Commit, push the branch, and open a ready-for-review PR referencing `Issue: #64`.
 
 ## Verification
 
-- `npm test` — passed (637 tests)
+- `npm test` — passed (640 tests)
 - `npm run typecheck` — passed

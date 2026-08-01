@@ -35,7 +35,12 @@ function materialWords(text: string): string[] {
 }
 
 function inCriteriaSection(line: string): boolean {
-  return /\b(acceptance criteria|desired behavior|desired behaviour|expected behavior|expected behaviour|regression test|requirements?)\b/i.test(line);
+  // A regression-test section often repeats the incident narrative, including the
+  // intentionally broken candidate. Treating that fixture as a requirement makes the
+  // fix's own PR description look like a contradiction. Business requirements belong in
+  // the explicit acceptance/desired-behavior sections; regression examples are evidence,
+  // not additional criteria.
+  return /\b(acceptance criteria|desired behavior|desired behaviour|expected behavior|expected behaviour|requirements?)\b/i.test(line);
 }
 
 function isBusinessCriterion(line: string): boolean {
@@ -45,7 +50,13 @@ function isBusinessCriterion(line: string): boolean {
   // nouns, or when it is a generic acceptance section with no operational vocabulary.
   const business = /\b(customer|user|invoice|payment|menu|label|order|account|email|price|charge|refund|delivery|workflow|checkout)\b/i.test(line);
   const operational = /\b(dispatcher|continuous integration|\bci\b|pull request|\bpr\b|deploy(?:ed|ment)?|production health|agent|model|issue claim|operator|autoship|evidence|test suite|risky external|human review)\b/i.test(line);
-  return !operational || business;
+  // Business nouns can also occur in policy examples (for example, "avoid sending a
+  // real invoice"). Those describe how to evaluate the work, not behavior the change
+  // must implement. Meta language is therefore excluded even when it contains a
+  // business noun; actionable criteria such as "deliver an invoice to the customer"
+  // remain eligible.
+  const meta = /\b(author|devops|verification|framework|omission|contradiction|criteria|risky external|solely|evidence|regression|candidate implementation|test suite)\b/i.test(line);
+  return !operational && business && !meta;
 }
 
 /** Extracts explicit, human-authored criteria without treating all issue prose as a gate. */
@@ -58,7 +69,7 @@ export function extractAcceptanceCriteria(issueText: string): string[] {
     if (/^#{1,6}\s+/.test(line)) section = inCriteriaSection(line);
     const bullet = line.match(/^(?:[-*]|\d+[.)])\s+(?:\[[ xX]\]\s*)?(.*)$/)?.[1] ??
       (/^(?:the issue|it|the system|the dispatcher)\b.*\b(must|should|required|needs to)\b/i.test(line) ? line : null);
-    if (!bullet || (!section && !/\b(acceptance criteria|must|required|should)\b/i.test(bullet))) continue;
+    if (!bullet || !section) continue;
     if (!isBusinessCriterion(bullet)) continue;
     const criterion = bullet.trim().replace(/[.!]+$/, "");
     if (materialWords(criterion).length >= 2 && !criteria.includes(criterion)) criteria.push(criterion);
