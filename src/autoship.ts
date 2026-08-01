@@ -43,6 +43,7 @@ import type { ExecResult } from "./exec.ts";
 import { NOTIFY_PRIORITY_DEFAULT, type Notifier } from "./notify.ts";
 import type { Logger } from "./logger.ts";
 import type { GithubPrMergeInfo } from "./github.ts";
+import { classifyMissingChecksAfterGrace } from "./ci-readiness.ts";
 import {
   decideRecovery,
   type RecoveryDecision,
@@ -51,12 +52,19 @@ import {
 
 /** Label left on a PR that autoship refused to ship, so it is easy to find and requeue. */
 export const AUTOSHIP_HELD_LABEL = "autoship-held";
+/** GitHub occasionally creates Actions checks shortly after PR creation. */
+export const MISSING_CHECKS_GRACE_MS = 5 * 60 * 1000;
 
 /** The GitHub surface autoship needs. A subset of GithubClient, so tests inject a fake. */
 export interface AutoshipGithub {
   /** PR lifecycle state — used to recognise an already-merged PR and stand down (#10). */
   prState(pr: number): Promise<"open" | "merged" | "closed" | "unknown">;
   prChecksState(pr: number): Promise<"pass" | "pending" | "fail" | "unknown">;
+  /** Optional richer read; older adapters can use prChecksState as a compatibility fallback. */
+  prChecksEvidence?(pr: number): Promise<{
+    state: "pass" | "pending" | "fail" | "unknown";
+    checkCount: number | null;
+  }>;
   waitForPrChecks(pr: number, timeoutSeconds: number): Promise<"pass" | "pending" | "fail" | "unknown">;
   prMergeInfo(pr: number): Promise<GithubPrMergeInfo | null>;
   prDiff(pr: number): Promise<string | null>;
@@ -103,6 +111,8 @@ export interface AutoshipDeps {
    * The dispatcher uses it to park the claim before a self-restart can kill its parent.
    */
   beforeShip?: (context: { pr: number; mergedSha: string | null }) => void | Promise<void>;
+  /** Persists the first empty-check observation before a delayed workflow recheck. */
+  recordMissingChecksAt?: (at: number) => void | Promise<void>;
   repairGeneratedConflicts?: (
     request: GeneratedConflictRepairRequest,
   ) => Promise<GeneratedConflictRepairResult>;
@@ -162,8 +172,52 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
     return mergeBlocked(deps, run, pr, "PR is closed without merging");
   }
 
+  // Mergeability is checked before CI. A stale/conflicted PR often has no check suite;
+  // reading CI first used to misclassify that durable state as harmless `unknown`.
+  const mergeInfo = await github.prMergeInfo(pr);
+  if (!mergeInfo) {
+    logger.warn("autoship: PR mergeability could not be read; parking without spending recovery", {
+      issue: run.issueNumber,
+      pr,
+    });
+    return { action: "ci_not_green", state: "unknown" };
+  }
+  if (mergeInfo.mergeStateStatus === "DIRTY") {
+    const recovered = await recoverGeneratedConflicts(deps, run, pr, mergeInfo);
+    if (recovered.action !== "recovered") return recovered.outcome;
+  } else if (mergeInfo.mergeStateStatus === "BEHIND") {
+    return await mergeBlocked(deps, run, pr, "PR branch is behind the current base branch");
+  } else if (mergeInfo.mergeStateStatus === "UNKNOWN") {
+    return { action: "ci_not_green", state: "unknown" };
+  }
+
   // 2. Re-confirm CI now. A verdict from when the run ended is not trusted.
-  const ci = await github.prChecksState(pr);
+  const ciEvidence = await github.prChecksEvidence?.(pr) ?? {
+    state: await github.prChecksState(pr),
+    checkCount: null,
+  };
+  const firstNoChecks = ciEvidence.checkCount === 0
+    ? run.ciChecksFirstObservedAt ?? Date.now()
+    : null;
+  const readiness = classifyMissingChecksAfterGrace(
+    { checks: ciEvidence.state, checkCount: ciEvidence.checkCount, mergeState: "clean" },
+    firstNoChecks,
+    Date.now(),
+    MISSING_CHECKS_GRACE_MS,
+  );
+  if (ciEvidence.checkCount === 0 && run.ciChecksFirstObservedAt === undefined) {
+    // The first empty result is durable evidence of when the grace clock began, not
+    // proof that CI is pending. Persist it before returning so restart cannot reset it.
+    await deps.recordMissingChecksAt?.(firstNoChecks ?? Date.now());
+  }
+  if (readiness.kind === "repair" && readiness.reason === "checks-missing") {
+    await github.comment(
+      run.issueNumber,
+      `## Autoship: missing CI checks on PR #${pr}\n\nNo check suite exists after the workflow grace period. Repairing the existing branch automatically; the issue claim and PR are retained.`,
+    ).catch(() => false);
+    return await recoveryOutcome(deps, run, "ci", `PR #${pr} has no CI check suite after the workflow grace period.`);
+  }
+  const ci = ciEvidence.state;
   if (ci !== "pass") {
     logger.info("autoship: CI not green, not shipping", { issue: run.issueNumber, pr, ci });
     if (ci === "fail") {
@@ -177,14 +231,6 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
     return { action: "ci_not_green", state: ci };
   }
 
-  const mergeInfo = await github.prMergeInfo(pr);
-  if (!mergeInfo) {
-    logger.warn("autoship: PR mergeability could not be read; parking without spending recovery", {
-      issue: run.issueNumber,
-      pr,
-    });
-    return { action: "ci_not_green", state: "unknown" };
-  }
   if (mergeInfo.isDraft) {
     // POLICY (2026-07-23): no human-review gate. Always promote a draft to ready and
     // ship it — a draft is not a safety control, CI + the escalation ladders are.
@@ -202,11 +248,6 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   if (!mergeInfo.headRefOid || !mergeInfo.baseRefOid) {
     return await mergeBlocked(deps, run, pr, "PR head/base SHA could not be read");
   }
-  if (mergeInfo.mergeStateStatus === "DIRTY") {
-    const recovered = await recoverGeneratedConflicts(deps, run, pr, mergeInfo);
-    if (recovered.action !== "recovered") return recovered.outcome;
-  }
-
   // POLICY (2026-07-23): autoship EVERYTHING. The ONLY permitted hold is after a
   // failure has been retried and escalated to the frontier model and it is still
   // stumped (the CI-exhausted and ship-failed ladders below). There is deliberately
