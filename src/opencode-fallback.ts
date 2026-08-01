@@ -112,9 +112,10 @@ export function planOpenCodeFallback(
   routeTier: ModelTier,
   capacityByPool: Map<string, CapacityAssessment>,
   models: readonly ModelEntry[] = allDispatchableModels(),
-  options: { failedModelsInSequence?: Set<string> } = {},
+  options: { failedModelsInSequence?: Set<string>; now?: Date } = {},
 ): OpenCodeFallbackDecision | null {
   const failedModels = options.failedModelsInSequence ?? new Set();
+  const now = options.now ?? new Date();
 
   // Try windows in preference order: 5-hour → weekly → monthly
   const windows: QuotaWindow[] = ["5-hour", "weekly", "monthly"];
@@ -152,7 +153,7 @@ export function planOpenCodeFallback(
 
   // Free-model last resort: both exhausted for monthly window, paid balance exhausted, free balance available
   const bothExhaustedForMonthly = areBothPrimaryProvidersExhausted(exhaustionState, "monthly");
-  if (canAttemptFreeModelLastResort(zenBalance, bothExhaustedForMonthly)) {
+  if (canAttemptFreeModelLastResort(zenBalance, bothExhaustedForMonthly, now)) {
     // Find the first available free model
     for (const modelLabel of OPENCODE_FREE_MODEL_LAST_RESORT_ORDER) {
       const model = models.find((m) => m.modelLabel === modelLabel);

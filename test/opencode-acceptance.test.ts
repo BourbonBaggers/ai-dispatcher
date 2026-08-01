@@ -57,6 +57,7 @@ describe("OpenCode Zen acceptance criteria", () => {
         "standard",
         emptyCapacity,
         allDispatchableModels(),
+        { now },
       );
 
       assert.equal(result, null, "OpenCode should not be eligible when only one provider is exhausted");
@@ -79,6 +80,7 @@ describe("OpenCode Zen acceptance criteria", () => {
         "standard",
         emptyCapacity,
         allDispatchableModels(),
+        { now },
       );
 
       assert.equal(result, null);
@@ -105,6 +107,7 @@ describe("OpenCode Zen acceptance criteria", () => {
         "standard",
         emptyCapacity,
         allDispatchableModels(),
+        { now },
       );
     };
 
@@ -152,6 +155,7 @@ describe("OpenCode Zen acceptance criteria", () => {
           routeTier,
           emptyCapacity,
           allDispatchableModels(),
+          { now },
         );
 
         if (result?.selected) {
@@ -184,6 +188,7 @@ describe("OpenCode Zen acceptance criteria", () => {
         "capable",
         emptyCapacity,
         allDispatchableModels(),
+        { now },
       );
 
       // First choice for capable should be GLM 5.2
@@ -211,7 +216,7 @@ describe("OpenCode Zen acceptance criteria", () => {
         "capable",
         emptyCapacity,
         allDispatchableModels(),
-        { failedModelsInSequence: failedModels },
+        { failedModelsInSequence: failedModels, now },
       );
 
       // Should select second choice (DeepSeek V4 Pro)
@@ -255,6 +260,7 @@ describe("OpenCode Zen acceptance criteria", () => {
         "standard",
         emptyCapacity,
         allDispatchableModels(),
+        { now },
       );
 
       // Should return null because free models require monthly exhaustion, not just 5-hour
@@ -279,6 +285,7 @@ describe("OpenCode Zen acceptance criteria", () => {
         "standard",
         emptyCapacity,
         allDispatchableModels(),
+        { now },
       );
 
       assert(result);
@@ -314,7 +321,7 @@ describe("OpenCode Zen acceptance criteria", () => {
         "standard",
         emptyCapacity,
         allDispatchableModels(),
-        { failedModelsInSequence: failedModels },
+        { failedModelsInSequence: failedModels, now },
       );
 
       // Should have no selected model after all free models exhausted
