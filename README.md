@@ -65,6 +65,15 @@ If you want to inspect the running service without mutating anything, use the re
   boundary is a ready-for-review PR. With autoship, dispatcher-owned recovery continues
   through deploy verification before an issue is closed.
 
+## Release checklist
+
+- Confirm `LICENSE`, `SECURITY.md`, and `CONTRIBUTING.md` are present and accurate.
+- Run `npm run typecheck`, `npm test`, and `bash scripts/shellcheck-ci.sh`.
+- Verify the hygiene gate passes and no tracked build artifacts, `.env` files, or
+  private-residue references were introduced.
+- Keep the macOS status app build output out of the release tree unless you are
+  intentionally producing a local artifact.
+
 ## What this is / is not
 
 **This is:**

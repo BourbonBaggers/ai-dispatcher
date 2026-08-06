@@ -8,3 +8,4 @@ state/
 
 # Build output (the service runs TypeScript directly on Node 24)
 dist/
+macos/DispatcherStatusBar/build/

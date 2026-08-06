@@ -16,7 +16,7 @@
  * Each production image must be resolvable for the exact merged commit SHA.
  */
 export interface ImageDigest {
-  /** Image reference (e.g., "ghcr.io/bourbonbaggers/internal-tools/api") */
+  /** Image reference (e.g., "ghcr.io/example/service-api") */
   ref: string;
   /** Immutable image digest (e.g., "sha256:abc123...") */
   digest: string;
