@@ -47,7 +47,7 @@ without private context.
 - [ ] Keep autoship explicitly out of the first dogfood pass.
 - [ ] Commit: `milestone(2): document the dogfood demo runbook`
 
-## [PENDING] Milestone 3: Verification
+## [DONE] Milestone 3: Verification
 
 **Goal:** Tests and typecheck pass for the final tree.
 
