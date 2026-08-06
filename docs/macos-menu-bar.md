@@ -7,16 +7,25 @@ compact dispatcher dashboard at:
 http://192.168.0.240:8787/compact
 ```
 
+The dashboard has no authentication, so reaching it at a LAN address like
+`192.168.0.240` requires explicitly opting in to a non-loopback bind (see
+[README: Web dashboard](../README.md#web-dashboard)) — that opt-in also prints a warning
+that the dashboard exposes issue metadata, live agent output, and repository state to
+anyone who can reach that address. Prefer an SSH tunnel or authenticated reverse proxy
+onto the loopback default if the dispatcher host is reachable by anyone other than its
+operator.
+
 The dashboard service must already be running on the dispatcher host:
 
 ```bash
-ai-dispatcher dashboard --host 0.0.0.0 --port 8787
+ai-dispatcher dashboard --host 0.0.0.0 --port 8787 --allow-remote
 ```
 
-or installed as the user service described in the README:
+or installed as the user service described in the README, with `DASHBOARD_HOST=0.0.0.0`
+(or the dispatcher host's LAN address) set explicitly:
 
 ```bash
-scripts/install-dashboard-service.sh
+DASHBOARD_HOST=0.0.0.0 scripts/install-dashboard-service.sh
 ```
 
 ## Build and install
