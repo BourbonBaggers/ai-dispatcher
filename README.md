@@ -1,48 +1,100 @@
 # ai-dispatcher
 
-Standalone AI issue dispatcher. Polls a GitHub repository, claims one open issue carrying
-the business-facing dispatcher intake labels, chooses provider/model/effort by expected
-completion cost at pickup, and runs Codex or Claude Code against it in an
-isolated checkout — serially, with retries, provider cooldowns, and durable file-backed
-state. Without autoship its handoff is a ready-for-review pull request. With autoship configured,
-the output is a merged PR, verified production deployment, and closed issue.
+Standalone AI issue dispatcher for a GitHub repository. It claims one issue at a time,
+runs Codex or Claude Code in an isolated checkout, and keeps the whole flow serial and
+file-backed: issue claim, isolated agent run, PR/CI, recovery, and optional deploy
+verification. Without autoship it stops at a ready-for-review pull request. With autoship
+configured, dispatcher automation carries the result through merge, deployment,
+health-check verification, and issue closure.
 
-It is extracted from the AI Issue Dispatcher that lived inside the
-previous private monorepo (issues #188/#232/#234/#245/#249/#281/#307). The behaviour is
-ported before it is extended; the one intentional change is that the target repository is
-now an explicit, required argument with **no hard-coded fallback** (issue #320). This
-package is self-contained: nothing here imports from the monorepo.
+## Five-minute read
 
-> **This repository is the dispatcher's only home.** The extraction is complete, and the
-> embedded dispatcher has been removed from the old private monorepo along with its
-> Postgres tables. Do not copy this service back into that monorepo; see AGENTS.md.
+The safe, public-facing story is:
 
-> **Agent context is one file.** `AGENTS.md` is canonical and `CLAUDE.md` is a symlink
-> to it. Do not replace the symlink with a divergent Claude-only copy.
+`issue -> claim -> isolated agent run -> PR/CI -> recovery -> optional deploy verification`
 
-## What it does
+1. A dispatcher scan finds one eligible issue.
+2. The issue is claimed in durable state before any label write.
+3. The bundled launcher creates an isolated checkout and runs the agent there.
+4. The agent either hands back a ready PR or triggers the recovery ladder.
+5. If autoship is configured, verified delivery continues through deployment checks.
 
-On each scan (when no run is active):
+The repository is self-contained and no longer embedded in the old private monorepo. The
+only intentional extraction difference is that the target repository is now an explicit,
+required argument with no hard-coded fallback. The working rules for dispatcher-launched
+agents live in [`AGENTS.md`](AGENTS.md); `CLAUDE.md` remains a symlink to it.
 
-1. **Resume first.** A run left `interrupted` / `timed_out` / `token_exhausted` still owns
-   its issue's claim, so it is picked up before any fresh work — up to an auto-resume cap,
-   and never while its provider is in a token cooldown.
-2. **Select one fresh issue.** Open issues are evaluated oldest-first and filtered by an
-   allowlist contract (below). The single highest-priority eligible issue is chosen by
-   tier: `priority:queue-jump` → `priority:normal` → `priority:background`.
-3. **Claim, then label.** The state row is the authoritative lock; the `agent-working`
-   label is added after the claim so a failed label write cannot desync the claim.
-4. **Launch and supervise.** The bundled `dispatch-agent.sh` clones an isolated checkout,
-   writes a bootstrap prompt (the issue body is never interpolated — the agent fetches it
-   itself), launches the CLI under a wall-clock budget, checkpoints the plan every 60s,
-   captures uncommitted work on a clean exit, opens a **ready** PR, and waits for the real
-   CI verdict.
-5. **Recover or finalize.** Agent/CI/merge/deploy failures choose the next action from
-   evidence: retry transient failures, repair concrete CI/merge/deploy findings, raise
-   effort for shallow/incomplete work, hand off laterally for provider misses or capacity,
-   and use frontier only after cheaper recovery options are exhausted. Only verified
-   production success or exhausted frontier failure finalizes the delivery; progress
-   attempts do not page the operator.
+## Quickstart
+
+Use the safest single-scan path first:
+
+```bash
+node bin/ai-dispatcher.mjs --repo owner/repo --dry-run
+node bin/ai-dispatcher.mjs --repo owner/repo --once \
+  --repo-dir ~/dispatcher/mirror --worktree-dir ~/dispatcher/worktrees
+```
+
+What to expect:
+
+1. `--dry-run` validates config and shows the next dispatch decision without launching an agent.
+2. `--once` performs a single scan and stops at a ready PR when autoship is disabled.
+3. The issue body is fetched by the launched agent itself; it is never interpolated into
+   the bootstrap prompt or shell command.
+4. The PR body must reference `Issue: #<number>` and must not use GitHub auto-close keywords.
+
+If you want to inspect the running service without mutating anything, use the read-only
+`status`, `history`, or `report` commands documented below.
+
+## Further reading
+
+- Architecture and lifecycle: [Lifecycle](#lifecycle), [State model](#state-model), and
+  [`ROUTING.md`](ROUTING.md)
+- Dogfood runbook: [Repeatable dogfood demo target and runbook (#71)](#repeatable-dogfood-demo-target-and-runbook-71)
+- Tests: [Development](#development) and the [`test/`](test) suite
+- Contribution and security guidance: [`AGENTS.md`](AGENTS.md), [`docs/shellcheck-ci.md`](docs/shellcheck-ci.md), and the repository policy notes
+
+## Security model
+
+- **Credentials stay outside the repo.** `gh auth` and the agent CLIs own their own login
+  state. This service never stores a GitHub, OpenAI, or Anthropic token.
+- **Issue text is untrusted data.** Bodies, titles, comments, labels, and branch names are
+  treated as input, not shell code. The agent fetches the issue body itself.
+- **The dashboard is read-only but not authenticated.** Keep it on loopback or behind an
+  authenticated proxy when you need to inspect live output.
+- **Autoship is operator-configured.** Without `DISPATCHER_AUTOSHIP_CMD`, the default
+  boundary is a ready-for-review PR. With autoship, dispatcher-owned recovery continues
+  through deploy verification before an issue is closed.
+
+## What this is / is not
+
+**This is:**
+
+- a serial issue dispatcher for one repository at a time
+- a launcher that keeps the agent in an isolated checkout
+- a recovery-driven workflow with durable state and explicit evidence
+- a ready-PR handoff by default
+
+**This is not:**
+
+- a public issue intake bot for arbitrary repos without operator review of the target
+- an always-on deployer that merges or closes issues by itself
+- a generic workflow engine with hidden defaults or a hard-coded repository fallback
+
+## Lifecycle
+
+On each scan when no run is active:
+
+1. **Resume first.** A run left `interrupted`, `timed_out`, or `token_exhausted` still
+   owns its claim and is resumed before fresh work, up to a finite cap.
+2. **Select one fresh issue.** Open issues are evaluated oldest-first and filtered by the
+   allowlist contract below.
+3. **Claim, then label.** The state row is the authoritative lock; `agent-working` is
+   written only after the claim succeeds.
+4. **Launch and supervise.** `dispatch-agent.sh` clones an isolated checkout, writes a
+   bootstrap prompt, checkpoints progress, and waits for the real CI verdict.
+5. **Recover or finalize.** Agent, CI, merge, and deploy failures use evidence-based
+   retries, repairs, lateral handoff, and final frontier escalation before a terminal
+   outcome is recorded.
 
 For coding, CI, merge, and deploy, `autoship-held` is valid only with durable evidence
 that the assigned-model repair budget and the automatic frontier attempt both failed.
@@ -50,9 +102,24 @@ Legacy holds without that proof clear and resume themselves. Markdown conflicts 
 a human gate: deterministic generated-file repair handles safe generated-only conflicts,
 and all other conflicts enter the agent repair ladder.
 
-The dispatcher is **strictly serial**: only one agent runs at a time, guaranteed by a
+The dispatcher is strictly serial: only one agent runs at a time, enforced by a
 single-instance lock plus the fact that each run is driven to completion before the loop
 continues.
+
+## Extraction history
+
+It is extracted from the AI Issue Dispatcher that lived inside the previous private
+monorepo (issues #188/#232/#234/#245/#249/#281/#307). The behaviour is ported before it
+is extended; the one intentional change is that the target repository is now an explicit,
+required argument with **no hard-coded fallback** (issue #320). This package is
+self-contained: nothing here imports from the monorepo.
+
+> **This repository is the dispatcher's only home.** The extraction is complete, and the
+> embedded dispatcher has been removed from the old private monorepo along with its
+> Postgres tables. Do not copy this service back into that monorepo; see AGENTS.md.
+
+> **Agent context is one file.** `AGENTS.md` is canonical and `CLAUDE.md` is a symlink
+> to it. Do not replace the symlink with a divergent Claude-only copy.
 
 ## The label contract
 
@@ -73,12 +140,13 @@ model, and effort atomically at pickup:
 | `needs-input` / `blocked`       | held for a human during normal selection; `blocked` can be conservatively re-audited only when the queue is otherwise idle |
 
 The `model:*` allowlist is **data-driven**: it is derived from the curated registry in
-`src/models.ts`, not hand-maintained. The live lanes cover the configured Codex and
-Claude CLIs from tiny through frontier and explicit ultra-frontier reserve, including
-`model:gpt-5.4-mini`, `model:gpt-5.6-luna`, `model:gpt-5.6-terra`, `model:gpt-5.4`,
-`model:gpt-5.6-sol`, `model:gpt-5.5`, `model:claude-haiku-4.5`,
-`model:claude-sonnet-5`, `model:claude-opus-4.8`, and `model:claude-fable-5`.
-A disabled or future-provider registry entry is documentation and is not dispatchable.
+`src/models.ts`, not hand-maintained. The dispatchable lanes cover the configured Codex
+and Claude CLIs from tiny through frontier, including `model:gpt-5.4-mini`,
+`model:gpt-5.6-luna`, `model:gpt-5.6-terra`, `model:gpt-5.4`, `model:gpt-5.6-sol`,
+`model:gpt-5.5`, `model:claude-haiku-4.5`, `model:claude-sonnet-5`, and
+`model:claude-opus-4.8`. Some registry entries are documentation-only, provider-specific
+internal names, or explicit reserve lanes such as `model:claude-fable-5`; those are
+explained in `src/models.ts` and are not treated as ordinary dispatchable choices.
 
 **OpenCode Zen fallback** (#56): When both Codex and Claude are confirmed exhausted for
 the same quota window (5-hour, weekly, or monthly), the recovery ladder uses OpenCode Zen
