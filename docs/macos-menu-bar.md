@@ -1,10 +1,10 @@
 # macOS menu bar dispatcher status app
 
 The menu bar app is a small native macOS status item for the Mac mini. It opens the
-compact dispatcher dashboard at:
+compact dispatcher dashboard at the loopback default unless you override it:
 
 ```text
-http://<dispatcher-host>:8787/compact
+http://127.0.0.1:8787/compact
 ```
 
 The dashboard has no authentication, so reaching it at a LAN address requires explicitly
@@ -21,8 +21,8 @@ ai-dispatcher dashboard --host <dispatcher-host> --port 8787 --allow-remote
 ```
 
 or installed as the user service described in the README, with
-`DASHBOARD_HOST=<dispatcher-host>` (or the dispatcher host's LAN address) set
-explicitly:
+`DASHBOARD_HOST=<dispatcher-host>` (or another explicit non-loopback address) set
+intentionally:
 
 ```bash
 DASHBOARD_HOST=<dispatcher-host> scripts/install-dashboard-service.sh

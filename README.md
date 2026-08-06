@@ -271,6 +271,28 @@ server is reachable by anyone other than its operator. Build, install, and launc
 steps are documented in
 [`docs/macos-menu-bar.md`](docs/macos-menu-bar.md).
 
+## Provisioning
+
+To prepare a fresh dispatcher host, run `scripts/provision-agents.sh` with the target
+repository and checkout paths supplied explicitly. The script accepts either CLI flags or
+documented environment variables and refuses to fall back to any private deployment
+defaults.
+
+```bash
+scripts/provision-agents.sh \
+  --repo owner/repo \
+  --repo-dir /srv/ai-dispatcher \
+  --worktree-dir /srv/ai-dispatcher-worktrees \
+  --env-source-dir /srv/ai-dispatcher-env
+```
+
+Equivalent environment variables:
+
+- `DISPATCHER_REPO`
+- `DISPATCHER_REPO_DIR`
+- `DISPATCHER_WORKTREE_DIR`
+- `DISPATCHER_ENV_SOURCE_DIR`
+
 ## On-demand policy cleanup for target repositories (#28)
 
 `target policy-cleanup` uses the configured escalation model
