@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # provision-agents.sh — one-time setup of the ai-dispatcher host.
 #
-# Run ON the host that will launch agents. Moved here from BourbonBaggers/internal-tools
-# when the dispatcher was extracted: provisioning the agent host is this service's
-# concern, not the monorepo's.
+# Run ON the host that will launch agents. The provisioning host is this service's
+# concern, not a private monorepo's.
 #
 # Installs and verifies everything the dispatcher needs to launch coding agents:
 #   • gh          — GitHub CLI (user-local; the dev server has no passwordless sudo)
@@ -27,17 +26,72 @@ if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
 fi
 
 GH_VERSION="2.63.2"
-REPO_SLUG="BourbonBaggers/internal-tools"
 
-# Where the dispatcher keeps its own checkout + agent worktrees. Deliberately NOT
-# DEV_APP_DIR: `dev-remote.sh --sync` runs `rsync --delete` against DEV_APP_DIR and
-# would clobber an agent's in-flight worktree.
-DISPATCHER_REPO_DIR="${DISPATCHER_REPO_DIR:-$HOME/dispatcher/internal-tools}"
-DISPATCHER_WORKTREE_DIR="${DISPATCHER_WORKTREE_DIR:-$HOME/dispatcher/worktrees}"
+# Configuration may come from documented environment variables or explicit CLI flags.
+# Keep the script reusable for any checkout rather than silently defaulting to the
+# old private deployment's repository and paths.
+REPO_SLUG="${DISPATCHER_REPO:-${DISPATCHER_REPO_SLUG:-}}"
+DISPATCHER_REPO_DIR="${DISPATCHER_REPO_DIR:-}"
+DISPATCHER_WORKTREE_DIR="${DISPATCHER_WORKTREE_DIR:-}"
+DISPATCHER_ENV_SOURCE_DIR="${DISPATCHER_ENV_SOURCE_DIR:-}"
 
 step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 ok()   { printf '   \033[32m✓\033[0m %s\n' "$1"; }
 warn() { printf '   \033[33m!\033[0m %s\n' "$1"; }
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/provision-agents.sh [options]
+
+Options:
+  --repo <owner/repo>               GitHub repository to clone and maintain
+  --repo-dir <path>                 Dispatcher checkout path
+  --worktree-dir <path>             Base directory for per-run worktrees
+  --env-source-dir <path>           Optional checkout whose .env seeds the checkout
+  -h, --help                        Show this help text
+
+Environment variables:
+  DISPATCHER_REPO
+  DISPATCHER_REPO_SLUG
+  DISPATCHER_REPO_DIR
+  DISPATCHER_WORKTREE_DIR
+  DISPATCHER_ENV_SOURCE_DIR
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --repo)
+      REPO_SLUG="${2:-}"
+      shift 2
+      ;;
+    --repo-dir)
+      DISPATCHER_REPO_DIR="${2:-}"
+      shift 2
+      ;;
+    --worktree-dir)
+      DISPATCHER_WORKTREE_DIR="${2:-}"
+      shift 2
+      ;;
+    --env-source-dir)
+      DISPATCHER_ENV_SOURCE_DIR="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ -n "$REPO_SLUG" ]] || { echo "missing required repo slug: set DISPATCHER_REPO or DISPATCHER_REPO_SLUG, or pass --repo" >&2; exit 1; }
+[[ -n "$DISPATCHER_REPO_DIR" ]] || { echo "missing required repo checkout path: set DISPATCHER_REPO_DIR or pass --repo-dir" >&2; exit 1; }
+[[ -n "$DISPATCHER_WORKTREE_DIR" ]] || { echo "missing required worktree base path: set DISPATCHER_WORKTREE_DIR or pass --worktree-dir" >&2; exit 1; }
 
 # ─── git ─────────────────────────────────────────────────────────────────────
 step "git"
@@ -104,12 +158,12 @@ gh auth setup-git 2>/dev/null && ok "gh is git's credential helper for github.co
 step "Dispatcher .env"
 # deploy.sh and dispatcher-autoship.sh run out of this clone and need the SSH/ntfy
 # coordinates. Copied, never committed (it is gitignored).
-if [[ -f "$HOME/internal-tools/.env" ]]; then
-  cp "$HOME/internal-tools/.env" "$DISPATCHER_REPO_DIR/.env"
+if [[ -n "$DISPATCHER_ENV_SOURCE_DIR" && -f "$DISPATCHER_ENV_SOURCE_DIR/.env" ]]; then
+  cp "$DISPATCHER_ENV_SOURCE_DIR/.env" "$DISPATCHER_REPO_DIR/.env"
   chmod 600 "$DISPATCHER_REPO_DIR/.env"
   ok "seeded .env into the dispatcher checkout"
 else
-  warn "no .env found at ~/internal-tools/.env — autonomous deploys will fail"
+  warn "no .env source configured — autonomous deploys will fail until you provide one"
 fi
 
 step "Worktree base directory"

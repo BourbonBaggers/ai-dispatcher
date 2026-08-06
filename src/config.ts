@@ -225,7 +225,7 @@ Options:
   --help                     Show this message.
 
 Example:
-  ai-dispatcher --repo BourbonBaggers/internal-tools
+  ai-dispatcher --repo owner/repo
 `;
 
 function positiveInt(raw: string | undefined, fallback: number): number {
@@ -440,7 +440,7 @@ Options:
 Requires DISPATCHER_AUTOSHIP_CMD to be configured -- ship has nothing to run otherwise.
 
 Example:
-  ai-dispatcher ship --repo BourbonBaggers/internal-tools --pr 123 --issue 456
+  ai-dispatcher ship --repo owner/repo --pr 123 --issue 456
 `;
 
 function requiredPositiveInt(raw: string | undefined, flag: string): { ok: true; value: number } | { ok: false; reason: string } {
@@ -582,7 +582,7 @@ Uses DISPATCHER_CI_ESCALATION_MODEL (same setting the polling loop uses for CI r
 escalation) rather than introducing another model setting.
 
 Example:
-  ai-dispatcher target policy-cleanup --repo BourbonBaggers/internal-tools --dry-run
+  ai-dispatcher target policy-cleanup --repo owner/repo --dry-run
 `;
 
 /** Parses `ai-dispatcher target policy-cleanup ...` args, independent of the loop config. */

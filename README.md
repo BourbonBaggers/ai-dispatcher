@@ -8,14 +8,14 @@ state. Without autoship its handoff is a ready-for-review pull request. With aut
 the output is a merged PR, verified production deployment, and closed issue.
 
 It is extracted from the AI Issue Dispatcher that lived inside the
-`BourbonBaggers/internal-tools` monorepo (issues #188/#232/#234/#245/#249/#281/#307). The
-behaviour is ported before it is extended; the one intentional change is that the target
-repository is now an explicit, required argument with **no hard-coded fallback** (issue
-#320). This package is self-contained: nothing here imports from the monorepo.
+previous private monorepo (issues #188/#232/#234/#245/#249/#281/#307). The behaviour is
+ported before it is extended; the one intentional change is that the target repository is
+now an explicit, required argument with **no hard-coded fallback** (issue #320). This
+package is self-contained: nothing here imports from the monorepo.
 
-> **This repository is the dispatcher's only home.** The extraction is complete — the
-> embedded dispatcher has been removed from `internal-tools` along with its Postgres
-> tables. Do not copy this service back into that monorepo; see AGENTS.md.
+> **This repository is the dispatcher's only home.** The extraction is complete, and the
+> embedded dispatcher has been removed from the old private monorepo along with its
+> Postgres tables. Do not copy this service back into that monorepo; see AGENTS.md.
 
 > **Agent context is one file.** `AGENTS.md` is canonical and `CLAUDE.md` is a symlink
 > to it. Do not replace the symlink with a divergent Claude-only copy.
@@ -146,7 +146,7 @@ reporting idle.
 
 ```bash
 ai-dispatcher status --state-dir ~/dispatcher/state
-ai-dispatcher status --state-dir ~/dispatcher/state --repo BourbonBaggers/internal-tools
+ai-dispatcher status --state-dir ~/dispatcher/state --repo owner/repo
 ai-dispatcher status --state-dir ~/dispatcher/state --json
 ai-dispatcher status --state-dir ~/dispatcher/state --follow
 ai-dispatcher status --state-dir ~/dispatcher/state --json --follow
@@ -262,13 +262,36 @@ warning at install time. Also override `DASHBOARD_PORT`, `DASHBOARD_CHECKOUT`,
 
 The same page is available as a compact popover-friendly view at `/compact`. The Mac mini
 menu bar app in [`macos/DispatcherStatusBar`](macos/DispatcherStatusBar) opens
-`http://192.168.0.240:8787/compact` today, which requires the dev-server instance to be
-explicitly opted in with `DASHBOARD_HOST=192.168.0.240` (or another non-loopback address)
-as described above — an explicit, documented tradeoff for that always-on menu bar view,
-not the default. Prefer switching it to an SSH tunnel or authenticated reverse proxy
-target if the dev server is reachable by anyone other than its operator. Build, install,
-and launch-at-login steps are documented in
+`http://<dispatcher-host>:8787/compact` when pointed at a non-loopback dashboard, which
+requires the dev-server instance to be explicitly opted in with
+`DASHBOARD_HOST=<dispatcher-host>` (or another non-loopback address) as described above
+— an explicit, documented tradeoff for that always-on menu bar view, not the default.
+Prefer switching it to an SSH tunnel or authenticated reverse proxy target if the dev
+server is reachable by anyone other than its operator. Build, install, and launch-at-login
+steps are documented in
 [`docs/macos-menu-bar.md`](docs/macos-menu-bar.md).
+
+## Provisioning
+
+To prepare a fresh dispatcher host, run `scripts/provision-agents.sh` with the target
+repository and checkout paths supplied explicitly. The script accepts either CLI flags or
+documented environment variables and refuses to fall back to any private deployment
+defaults.
+
+```bash
+scripts/provision-agents.sh \
+  --repo owner/repo \
+  --repo-dir /srv/ai-dispatcher \
+  --worktree-dir /srv/ai-dispatcher-worktrees \
+  --env-source-dir /srv/ai-dispatcher-env
+```
+
+Equivalent environment variables:
+
+- `DISPATCHER_REPO`
+- `DISPATCHER_REPO_DIR`
+- `DISPATCHER_WORKTREE_DIR`
+- `DISPATCHER_ENV_SOURCE_DIR`
 
 ## On-demand policy cleanup for target repositories (#28)
 
@@ -582,4 +605,5 @@ npm test          # node --test over test/**/*.test.ts (zero runtime deps)
 
 ## Cutover from the embedded dispatcher
 
-The cutover is complete. Its runbook remains in `internal-tools` as a historical record.
+The cutover is complete. Its runbook remains in the historical archive as a record of
+the migration.

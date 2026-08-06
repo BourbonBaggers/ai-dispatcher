@@ -1,31 +1,31 @@
 # macOS menu bar dispatcher status app
 
 The menu bar app is a small native macOS status item for the Mac mini. It opens the
-compact dispatcher dashboard at:
+compact dispatcher dashboard at the loopback default unless you override it:
 
 ```text
-http://192.168.0.240:8787/compact
+http://127.0.0.1:8787/compact
 ```
 
-The dashboard has no authentication, so reaching it at a LAN address like
-`192.168.0.240` requires explicitly opting in to a non-loopback bind (see
-[README: Web dashboard](../README.md#web-dashboard)) — that opt-in also prints a warning
-that the dashboard exposes issue metadata, live agent output, and repository state to
-anyone who can reach that address. Prefer an SSH tunnel or authenticated reverse proxy
-onto the loopback default if the dispatcher host is reachable by anyone other than its
-operator.
+The dashboard has no authentication, so reaching it at a LAN address requires explicitly
+opting in to a non-loopback bind (see [README: Web dashboard](../README.md#web-dashboard))
+— that opt-in also prints a warning that the dashboard exposes issue metadata, live
+agent output, and repository state to anyone who can reach that address. Prefer an SSH
+tunnel or authenticated reverse proxy onto the loopback default if the dispatcher host is
+reachable by anyone other than its operator.
 
 The dashboard service must already be running on the dispatcher host:
 
 ```bash
-ai-dispatcher dashboard --host 0.0.0.0 --port 8787 --allow-remote
+ai-dispatcher dashboard --host <dispatcher-host> --port 8787 --allow-remote
 ```
 
-or installed as the user service described in the README, with `DASHBOARD_HOST=0.0.0.0`
-(or the dispatcher host's LAN address) set explicitly:
+or installed as the user service described in the README, with
+`DASHBOARD_HOST=<dispatcher-host>` (or another explicit non-loopback address) set
+intentionally:
 
 ```bash
-DASHBOARD_HOST=0.0.0.0 scripts/install-dashboard-service.sh
+DASHBOARD_HOST=<dispatcher-host> scripts/install-dashboard-service.sh
 ```
 
 ## Build and install
@@ -92,5 +92,5 @@ The default URL is fixed for the Mac mini. To point the app at another dispatche
 dashboard, write a macOS defaults value before launching the app:
 
 ```bash
-defaults write com.bourbonbaggers.DispatcherStatusBar DashboardURL "http://192.168.0.240:8787/compact"
+defaults write com.bourbonbaggers.DispatcherStatusBar DashboardURL "http://<dispatcher-host>:8787/compact"
 ```
