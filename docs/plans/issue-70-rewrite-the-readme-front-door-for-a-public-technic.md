@@ -38,7 +38,7 @@ safe first path to try the dispatcher.
       internal names.
 - [ ] Commit: `milestone(1): rewrite the README front door`
 
-## Milestone 2: Reorder supporting material and verify
+## [DONE] Milestone 2: Reorder supporting material and verify
 
 **Goal:** The remaining README content sits behind the quickstart and the documented
 entry points remain accurate.
