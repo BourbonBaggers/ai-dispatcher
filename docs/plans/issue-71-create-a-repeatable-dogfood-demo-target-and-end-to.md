@@ -35,7 +35,7 @@ without private context.
       details.
 - [ ] Commit: `milestone(1): add a repeatable dogfood demo fixture`
 
-## [PENDING] Milestone 2: End-to-end runbook
+## [DONE] Milestone 2: End-to-end runbook
 
 **Goal:** README documents the safe repeatable demo path end to end.
 

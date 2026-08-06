@@ -316,6 +316,75 @@ draft) PR with no GitHub auto-close keyword and no associated issue — delivery
 is the existing one-shot [`ship`](#one-shot-ship-for-ad-hoc-pull-requests-27) command's
 job, not this command's.
 
+## Repeatable dogfood demo target and runbook (#71)
+
+Use the local fixture repository in [`docs/dogfood-demo-target/`](docs/dogfood-demo-target/)
+when you want a small, repeatable demo target without depending on a private production
+repo. It contains one intentionally simple issue and the exact intake labels documented
+in the fixture itself.
+
+### Demo target setup
+
+The first dogfood pass should stay in the safe path:
+
+- `dispatch:ready`
+- `agent:codex`
+- `priority:p1`
+- `effort:small`
+- autoship disabled
+
+The fixture issue body is at [`docs/dogfood-demo-target/issues/1.md`](docs/dogfood-demo-target/issues/1.md).
+Its label manifest is at [`docs/dogfood-demo-target/labels.md`](docs/dogfood-demo-target/labels.md).
+
+If you want a throwaway GitHub target, create a small repository from those files and
+open a single issue that matches the fixture. The repository itself can stay public or
+local; the important part is that the issue and labels are deterministic and tiny.
+
+### Safe demo path
+
+1. Point `--repo` at the demo repository.
+2. Run a dry run first to confirm intake and routing without launching anything:
+
+```bash
+node bin/ai-dispatcher.mjs --repo owner/repo --dry-run
+```
+
+3. Run a single scan with autoship disabled:
+
+```bash
+node bin/ai-dispatcher.mjs --repo owner/repo --once
+```
+
+4. Inspect the expected handoff artifacts:
+- the issue should be claimed and a run should start
+- the agent should work in an isolated checkout
+- the terminal output should end at a ready-PR handoff, not deploy or issue closure
+- the PR body should reference `Issue: #<number>`
+
+### Representative output
+
+Expect the terminal to show a dry-run summary first, then a one-scan handoff such as:
+
+```text
+[dry-run] would start codex (claude-sonnet-5, effort small) on issue #1 — branch dispatcher/issue-1.
+PR ready — CI green, handing off to autoship
+```
+
+The exact model name and branch name can vary with the routing configuration, but the
+flow should still stop at the PR-ready boundary when autoship is disabled.
+
+### Troubleshooting
+
+- Missing `gh`: install the GitHub CLI and confirm `gh auth status` works before running
+  the dispatcher.
+- Missing agent CLI auth: confirm the `codex` or `claude` login is available on the host
+  that runs the demo.
+- Failed CI: leave autoship disabled for the first pass, fix the target repository, and
+  rerun the single-scan path after the issue is green again.
+
+For remote viewing, keep the target dashboard and the demo repository itself on loopback
+or use SSH port forwarding rather than binding them broadly on the LAN.
+
 ## Requirements
 
 - **Node.js 24+** (the service runs its TypeScript directly via native type-stripping; no
