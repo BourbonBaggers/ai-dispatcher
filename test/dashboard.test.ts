@@ -8,6 +8,7 @@ import {
   computeNextRunAt,
   dashboardRecentRuns,
   dashboardPayload,
+  isLoopbackHost,
   parseDashboardArgs,
   parseEnvironmentFile,
   parseSystemdCat,
@@ -97,6 +98,32 @@ test("parseDashboardArgs defaults to a local dashboard port and accepts repeated
   assert.equal(parsed.host, "127.0.0.1");
   assert.equal(parsed.port, 8787);
   assert.deepEqual(parsed.units, ["ai-dispatcher.service", "ai-dispatcher-self.service"]);
+});
+
+test("isLoopbackHost recognizes 127.0.0.0/8, ::1, and localhost", () => {
+  assert.equal(isLoopbackHost("127.0.0.1"), true);
+  assert.equal(isLoopbackHost("127.5.6.7"), true);
+  assert.equal(isLoopbackHost("localhost"), true);
+  assert.equal(isLoopbackHost("LOCALHOST"), true);
+  assert.equal(isLoopbackHost("::1"), true);
+  assert.equal(isLoopbackHost("[::1]"), true);
+  assert.equal(isLoopbackHost("0.0.0.0"), false);
+  assert.equal(isLoopbackHost("192.168.0.240"), false);
+  assert.equal(isLoopbackHost("::"), false);
+});
+
+test("parseDashboardArgs refuses a non-loopback host without --allow-remote", () => {
+  const parsed = parseDashboardArgs(["--host", "0.0.0.0"]);
+  assert.equal(parsed.ok, false);
+  if (parsed.ok) return;
+  assert.match(parsed.message, /--allow-remote/);
+});
+
+test("parseDashboardArgs accepts a non-loopback host with --allow-remote", () => {
+  const parsed = parseDashboardArgs(["--host", "0.0.0.0", "--allow-remote"]);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok || parsed.help) return;
+  assert.equal(parsed.host, "0.0.0.0");
 });
 
 test("parseEnvironmentFile reads inert dispatcher assignments", () => {

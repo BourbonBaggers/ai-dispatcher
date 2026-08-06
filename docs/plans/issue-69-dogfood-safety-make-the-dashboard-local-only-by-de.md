@@ -28,20 +28,20 @@ safe way to view it remotely.
 4. Add tests for the loopback-detection helper, `parseDashboardArgs` opt-in/refusal
    behavior, and the installer's default host.
 
-## Milestone 1: Loopback opt-in gate in the dashboard command
+## [DONE] Milestone 1: Loopback opt-in gate in the dashboard command
 
 **Goal:** `ai-dispatcher dashboard` refuses to bind a non-loopback host without explicit
 opt-in, and warns prominently when opted in.
 
-- [ ] Add an `isLoopbackHost()` helper (127.0.0.0/8, `::1`, `localhost`)
-- [ ] Add `--allow-remote` boolean flag to `parseDashboardArgs`
-- [ ] Non-loopback host without `--allow-remote` → `ok: false` with an explanatory message
+- [x] Add an `isLoopbackHost()` helper (127.0.0.0/8, `::1`, `localhost`)
+- [x] Add `--allow-remote` boolean flag to `parseDashboardArgs`
+- [x] Non-loopback host without `--allow-remote` → `ok: false` with an explanatory message
       (no server start)
-- [ ] Non-loopback host with `--allow-remote` → succeeds, and `runDashboardCommand` prints
+- [x] Non-loopback host with `--allow-remote` → succeeds, and `runDashboardCommand` prints
       a prominent warning to stderr before listening, explaining there is no
       authentication and the dashboard may expose live run output
-- [ ] Unit tests for `isLoopbackHost` and the new `parseDashboardArgs` branches
-- [ ] Commit: `milestone(1): require explicit opt-in to bind the dashboard off loopback`
+- [x] Unit tests for `isLoopbackHost` and the new `parseDashboardArgs` branches
+- [x] Commit: `milestone(1): require explicit opt-in to bind the dashboard off loopback`
 
 ## Milestone 2: Safe installer default + opt-in warning
 
