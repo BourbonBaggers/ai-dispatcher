@@ -43,17 +43,19 @@ opt-in, and warns prominently when opted in.
 - [x] Unit tests for `isLoopbackHost` and the new `parseDashboardArgs` branches
 - [x] Commit: `milestone(1): require explicit opt-in to bind the dashboard off loopback`
 
-## Milestone 2: Safe installer default + opt-in warning
+## [DONE] Milestone 2: Safe installer default + opt-in warning
 
 **Goal:** The systemd installer defaults to loopback and warns when explicitly overridden.
 
-- [ ] Flip `install-dashboard-service.sh` default `DASHBOARD_HOST` to `127.0.0.1`
-- [ ] When `DASHBOARD_HOST` is explicitly set to a non-loopback address, pass
+- [x] Flip `install-dashboard-service.sh` default `DASHBOARD_HOST` to `127.0.0.1`
+- [x] When `DASHBOARD_HOST` is explicitly set to a non-loopback address, pass
       `--allow-remote` in `ExecStart` and print a warning during install
-- [ ] Add a small bash-level loopback check mirroring the TS helper (kept in sync by
+- [x] Add a small bash-level loopback check mirroring the TS helper (kept in sync by
       naming/comments, since the installer has no access to the TS module)
-- [ ] `shellcheck --severity=error` clean
-- [ ] Commit: `milestone(2): default the dashboard installer to loopback`
+- [x] `bash -n` syntax check clean + regression tests on the script text; `shellcheck`
+      itself was unavailable in this sandbox (no sudo, no network for the Docker image) —
+      flagged in the PR body for CI's `scripts/shellcheck-ci.sh` to confirm
+- [x] Commit: `milestone(2): default the dashboard installer to loopback`
 
 ## Milestone 3: Documentation
 
