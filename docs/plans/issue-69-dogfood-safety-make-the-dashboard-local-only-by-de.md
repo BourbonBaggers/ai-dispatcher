@@ -57,23 +57,26 @@ opt-in, and warns prominently when opted in.
       flagged in the PR body for CI's `scripts/shellcheck-ci.sh` to confirm
 - [x] Commit: `milestone(2): default the dashboard installer to loopback`
 
-## Milestone 3: Documentation
+## [DONE] Milestone 3: Documentation
 
 **Goal:** README reflects the safe default and documents remote viewing.
 
-- [ ] Update the `dashboard` example command to the loopback default
-- [ ] Update installer description to loopback default + opt-in override instructions
-- [ ] Document SSH port forwarding as the safe way to view a loopback-bound dashboard
+- [x] Update the `dashboard` example command to the loopback default
+- [x] Update installer description to loopback default + opt-in override instructions
+- [x] Document SSH port forwarding as the safe way to view a loopback-bound dashboard
       remotely (and note an authenticated reverse proxy as an alternative)
-- [ ] Reconcile the macOS menu bar section, which currently documents hitting the
+- [x] Reconcile the macOS menu bar section, which currently documents hitting the
       dashboard directly over LAN, with the new opt-in requirement
-- [ ] Commit: `milestone(3): document local-only default and safe remote viewing`
+- [x] Commit: `milestone(3): document local-only default and safe remote viewing`
 
-## Milestone 4: Verification
+## [DONE] Milestone 4: Verification
 
 **Goal:** Full test suite and typecheck pass.
 
-- [ ] `npm test`
-- [ ] `npm run typecheck`
-- [ ] `scripts/shellcheck-ci.sh`
-- [ ] Commit if any fixups were needed: `milestone(4): verification fixups`
+- [x] `npm test` (668 passing)
+- [x] `npm run typecheck` (clean)
+- [x] `scripts/shellcheck-ci.sh` — could not run: `shellcheck` isn't installed in this
+      sandbox and there's no sudo/network to fetch it or pull the Docker image; the
+      changed script was syntax-checked with `bash -n` and reviewed by hand for
+      shellcheck-error-level issues (quoting, unset vars). CI must confirm this.
+- [x] No fixups needed beyond the above
