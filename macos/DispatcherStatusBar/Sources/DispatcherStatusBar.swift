@@ -1,7 +1,7 @@
 import AppKit
 import WebKit
 
-private let defaultDashboardURL = "http://192.168.0.240:8787/compact"
+private let defaultDashboardURL = "http://127.0.0.1:8787/compact"
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
   private var statusItem: NSStatusItem!

@@ -13,7 +13,7 @@ concurrency:
 jobs:
   # This service has zero runtime dependencies: Node 24 strips its TypeScript natively
   # and it tests with node:test. Its only devDependency is typescript. Nothing here may
-  # import from the internal-tools monorepo — see AGENTS.md.
+  # import from the old private monorepo — see AGENTS.md.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -27,6 +27,8 @@ jobs:
         run: npm run typecheck
       - name: Tests
         run: npm test
+      - name: Reject private deployment residue
+        run: bash scripts/check-private-residue.sh
       - name: Shellcheck the bundled launch scripts
         run: |
           install_start="$(date +%s)"
@@ -36,19 +38,19 @@ jobs:
           echo "[shellcheck-ci] Installation duration: $((install_end - install_start))s"
           bash scripts/shellcheck-ci.sh
 
-  # Guard the extraction. The dispatcher was split out of BourbonBaggers/internal-tools;
-  # re-introducing a dependency on that monorepo would silently un-do the separation and
-  # break a clean clone. Fail the build if source or manifests reference it.
+  # Guard the extraction. Re-introducing a dependency on the old private monorepo would
+  # silently un-do the separation and break a clean clone. Fail the build if source or
+  # manifests reference it.
   no-monorepo-coupling:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Reject imports or paths reaching into internal-tools
+      - name: Reject imports or paths reaching into the old private monorepo
         run: |
           if grep -rnE "@internal/|\.\./\.\./(packages|apps)/|services/ai-dispatcher" \
                --include='*.ts' --include='*.mjs' --include='*.json' \
                src bin test package.json 2>/dev/null; then
-            echo "::error::This service must not depend on the internal-tools monorepo."
+            echo "::error::This service must not depend on the old private monorepo."
             exit 1
           fi
           echo "No monorepo coupling found."
