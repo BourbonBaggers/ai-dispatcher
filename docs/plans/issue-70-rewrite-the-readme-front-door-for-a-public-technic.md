@@ -28,24 +28,24 @@ the security posture before the deeper extraction history and policy mechanics.
 **Goal:** The top of the README tells a coherent story in plain language and gives a
 safe first path to try the dispatcher.
 
-- [ ] Rework the opening paragraphs and add a compact lifecycle diagram or equivalent
+- [x] Rework the opening paragraphs and add a compact lifecycle diagram or equivalent
       sequence.
-- [ ] Add a five-minute safe quickstart using dry-run or one-scan mode.
-- [ ] Add a concise `What this is / is not` section.
-- [ ] Add a small `Security model` section covering credentials, untrusted issue text,
+- [x] Add a five-minute safe quickstart using dry-run or one-scan mode.
+- [x] Add a concise `What this is / is not` section.
+- [x] Add a small `Security model` section covering credentials, untrusted issue text,
       dashboard exposure, and autoship.
-- [ ] Clarify model names that are aliases, fixtures, disabled entries, or provider
+- [x] Clarify model names that are aliases, fixtures, disabled entries, or provider
       internal names.
-- [ ] Commit: `milestone(1): rewrite the README front door`
+- [x] Commit: `milestone(1): rewrite the README front door`
 
 ## [DONE] Milestone 2: Reorder supporting material and verify
 
 **Goal:** The remaining README content sits behind the quickstart and the documented
 entry points remain accurate.
 
-- [ ] Move extraction history, internal incident numbers, and detailed policy mechanics
+- [x] Move extraction history, internal incident numbers, and detailed policy mechanics
       below the quickstart.
-- [ ] Add links to the architecture, dogfood runbook, tests, and contribution/security
+- [x] Add links to the architecture, dogfood runbook, tests, and contribution/security
       guidance.
-- [ ] Run the repository verification commands relevant to the README change.
-- [ ] Commit: `milestone(2): finish the README front door rewrite`
+- [x] Run the repository verification commands relevant to the README change.
+- [x] Commit: `milestone(2): finish the README front door rewrite`

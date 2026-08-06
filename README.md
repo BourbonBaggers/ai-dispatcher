@@ -26,7 +26,7 @@ agents live in [`AGENTS.md`](AGENTS.md); `CLAUDE.md` remains a symlink to it.
 
 ## Quickstart
 
-Use the safest single-scan path first:
+Use the safest single-scan path first, either as a dry run or as one scan:
 
 ```bash
 node bin/ai-dispatcher.mjs --repo owner/repo --dry-run
