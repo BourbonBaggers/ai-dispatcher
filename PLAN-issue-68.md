@@ -22,7 +22,7 @@ context.
 - Remove the private LAN address and operator-specific path/user references from tracked
   source/docs, replacing them with placeholders or configuration.
 - Update the README and provisioning guidance so a fresh clone can follow the documented
-  path without being pointed at the wrong repository.
+  path that uses the intended repository.
 - Add or adjust tests for the provisioning text/configuration contract if needed.
 
 ## [DONE] Milestone 2: Add a lightweight CI residue guard
