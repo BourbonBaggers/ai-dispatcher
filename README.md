@@ -229,8 +229,24 @@ idle. Expanding **Live stream** opens an on-demand SSE stream for the current ru
 closed accordions do not hold a stream open.
 
 ```bash
-ai-dispatcher dashboard --host 0.0.0.0 --port 8787
+ai-dispatcher dashboard --host 127.0.0.1 --port 8787
 ```
+
+The dashboard has **no authentication**. Even though it's read-only, its responses
+include issue metadata, live agent output, and repository/filesystem state, so it
+defaults to loopback (`127.0.0.1`) and refuses to bind any other host unless you pass
+`--allow-remote`, which prints a prominent warning before it starts listening.
+
+**Safe remote viewing:** keep the dashboard bound to loopback and forward a local port
+over SSH instead of exposing it on the network:
+
+```bash
+ssh -L 8787:127.0.0.1:8787 <dev-server>
+# then open http://127.0.0.1:8787/ on your machine
+```
+
+An authenticated reverse proxy in front of a loopback-bound dashboard is the other
+supported option if you need it reachable without an SSH session open.
 
 On the dev server, install it as an auto-starting user service:
 
@@ -239,14 +255,19 @@ scripts/install-dashboard-service.sh
 ```
 
 The installer creates and enables `ai-dispatcher-dashboard.service`, binding to
-`0.0.0.0:8787` by default so the dashboard is reachable at
-`http://<dev-server>:8787/` after reboot. Override with `DASHBOARD_HOST`,
-`DASHBOARD_PORT`, `DASHBOARD_CHECKOUT`, `DASHBOARD_NODE_BIN`, or `DASHBOARD_UNIT`.
+`127.0.0.1:8787` by default. Override `DASHBOARD_HOST` only if you have decided to accept
+the exposure — the installer then adds `--allow-remote` for you and prints the same
+warning at install time. Also override `DASHBOARD_PORT`, `DASHBOARD_CHECKOUT`,
+`DASHBOARD_NODE_BIN`, or `DASHBOARD_UNIT` as needed.
 
 The same page is available as a compact popover-friendly view at `/compact`. The Mac mini
 menu bar app in [`macos/DispatcherStatusBar`](macos/DispatcherStatusBar) opens
-`http://192.168.0.240:8787/compact` and reports a visible offline state if that URL is
-unreachable. Build, install, and launch-at-login steps are documented in
+`http://192.168.0.240:8787/compact` today, which requires the dev-server instance to be
+explicitly opted in with `DASHBOARD_HOST=192.168.0.240` (or another non-loopback address)
+as described above — an explicit, documented tradeoff for that always-on menu bar view,
+not the default. Prefer switching it to an SSH tunnel or authenticated reverse proxy
+target if the dev server is reachable by anyone other than its operator. Build, install,
+and launch-at-login steps are documented in
 [`docs/macos-menu-bar.md`](docs/macos-menu-bar.md).
 
 ## On-demand policy cleanup for target repositories (#28)

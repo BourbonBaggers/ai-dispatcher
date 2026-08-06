@@ -72,15 +72,34 @@ export interface DashboardPayload {
 export const DASHBOARD_USAGE = `ai-dispatcher dashboard — serve the local dispatcher status dashboard.
 
 Usage:
-  ai-dispatcher dashboard [--host <host>] [--port <port>] [--unit <systemd-unit>...]
+  ai-dispatcher dashboard [--host <host>] [--port <port>] [--unit <systemd-unit>...] [--allow-remote]
 
 Options:
   --host <host>             Bind host (default: ${DEFAULT_HOST}).
   --port <port>             Bind port (default: ${DEFAULT_PORT}).
   --unit <systemd-unit>     User systemd unit to show. Repeat to select several.
                             Default: discover ai-dispatcher*.service user units.
+  --allow-remote            Required to bind a non-loopback --host. The dashboard has no
+                            authentication; only pass this if you understand it exposes
+                            issue metadata, live agent output, and repository state to
+                            the network. Prefer SSH port forwarding instead (see README).
   --help                    Show this message.
 `;
+
+const REMOTE_BIND_WITHOUT_OPT_IN = `Refusing to bind the dashboard to a non-loopback host without --allow-remote.
+
+The dashboard has no authentication and can expose issue metadata, live agent output,
+and repository/filesystem state to anyone who can reach it. Bind ${DEFAULT_HOST} (the
+default) and use SSH port forwarding for remote viewing, or pass --allow-remote if you
+have explicitly decided to accept the exposure.`;
+
+// 127.0.0.0/8 (not just 127.0.0.1), the IPv6 loopback, and "localhost" are all
+// loopback-equivalent; anything else is reachable off-host and needs explicit opt-in.
+export function isLoopbackHost(host: string): boolean {
+  const h = host.trim().toLowerCase();
+  if (h === "localhost" || h === "::1" || h === "[::1]") return true;
+  return /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(h);
+}
 
 function parsePort(raw: string | undefined): number {
   if (raw === undefined || raw.trim() === "") return DEFAULT_PORT;
@@ -97,15 +116,21 @@ export function parseDashboardArgs(argv: string[]): DashboardArgs {
         host: { type: "string" },
         port: { type: "string" },
         unit: { type: "string", multiple: true },
+        "allow-remote": { type: "boolean", default: false },
         help: { type: "boolean", default: false },
       },
     });
     if (parsed.values.help) {
       return { ok: true, host: DEFAULT_HOST, port: DEFAULT_PORT, units: [], help: true, message: DASHBOARD_USAGE };
     }
+    const host = (parsed.values.host as string | undefined) ?? DEFAULT_HOST;
+    const allowRemote = Boolean(parsed.values["allow-remote"]);
+    if (!isLoopbackHost(host) && !allowRemote) {
+      return { ok: false, message: REMOTE_BIND_WITHOUT_OPT_IN };
+    }
     return {
       ok: true,
-      host: (parsed.values.host as string | undefined) ?? DEFAULT_HOST,
+      host,
       port: parsePort(parsed.values.port as string | undefined),
       units: (parsed.values.unit as string[] | undefined) ?? [],
       help: false,
@@ -465,6 +490,13 @@ export async function runDashboardCommand(
     });
   });
 
+  if (!isLoopbackHost(parsed.host)) {
+    err(
+      `WARNING: dashboard is binding to ${parsed.host}, a non-loopback host.\n` +
+        `It has no authentication and can expose issue metadata, live agent output, and\n` +
+        `repository/filesystem state to anyone who can reach ${parsed.host}:${parsed.port}.\n`,
+    );
+  }
   await new Promise<void>((resolve) => server.listen(parsed.port, parsed.host, resolve));
   out(`dispatcher dashboard listening on http://${parsed.host}:${parsed.port}/\n`);
   await new Promise<void>((resolve) => {
