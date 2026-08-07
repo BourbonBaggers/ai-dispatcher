@@ -1,23 +1,56 @@
 # ai-dispatcher
 
-Standalone AI issue dispatcher for a GitHub repository. It claims one issue at a time,
-runs Codex or Claude Code in an isolated checkout, and keeps the whole flow serial and
-file-backed: issue claim, isolated agent run, PR/CI, recovery, and optional deploy
-verification. Without autoship it stops at a ready-for-review pull request. With autoship
-configured, dispatcher automation carries the result through merge, deployment,
-health-check verification, and issue closure.
+Turn an approved GitHub issue into a completed, verified change without making someone
+manually shepherd every step.
+
+## For non-technical readers
+
+### Who is this for?
+
+ai-dispatcher is for teams that already use GitHub to track product work, bugs, and
+operations tasks — especially small teams where the same people are expected to plan,
+code, test, release, and explain what happened.
+
+### What problem does it solve?
+
+Good ideas and important fixes often get stuck between “someone should handle this” and
+“it is working in production.” Work waits in a queue, developers lose time to repetitive
+follow-up, automated checks fail without a clear owner, and a task can appear finished
+before anyone has verified the result.
+
+### How does it help?
+
+ai-dispatcher watches an approved queue, gives one task at a time to an AI coding agent,
+and keeps ownership of the work until there is a trustworthy outcome. It checks the
+agent’s change, retries and repairs failures, and keeps the task from disappearing during
+the handoff. If deployment automation is configured, it can continue through release
+and health verification, closing the task only after the new version is confirmed healthy.
+
+People get a ready-to-review change when human judgment is useful, or a clear,
+evidence-backed escalation when automation has genuinely run out of options. The result
+is less coordination overhead, a smaller unattended backlog, and a more honest answer to
+“what is the status of this fix?”
+
+```mermaid
+flowchart LR
+  A[Approved task] --> B[AI agent makes the change]
+  B --> C[Automated checks]
+  C -->|Pass| D[Ready to review or release]
+  C -->|Fail| E[Retry and repair]
+  E --> B
+  D --> F[Optional release and health check]
+  F --> G[Task closed when healthy]
+```
 
 ## Five-minute read
 
-The safe, public-facing story is:
+The operating loop is simple:
 
-`issue -> claim -> isolated agent run -> PR/CI -> recovery -> optional deploy verification`
-
-1. A dispatcher scan finds one eligible issue.
-2. The issue is claimed in durable state before any label write.
-3. The bundled launcher creates an isolated checkout and runs the agent there.
-4. The agent either hands back a ready PR or triggers the recovery ladder.
-5. If autoship is configured, verified delivery continues through deployment checks.
+1. It finds one approved task and records ownership before work begins.
+2. It gives the task to an AI coding agent in an isolated workspace.
+3. It evaluates the proposed change and its automated checks.
+4. It retries, repairs, or escalates when something fails instead of abandoning the task.
+5. With release automation enabled, it verifies the deployed result before closing the task.
 
 The service is self-contained and targets one explicit repository at a time; there is no
 hard-coded repository fallback. The working rules for dispatcher-launched agents live in
