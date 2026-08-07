@@ -1,15 +1,18 @@
 # ai-dispatcher
 
-Turn an approved GitHub issue into a completed, verified change without making someone
-manually shepherd every step.
+Describe a problem or feature in plain language, walk away, and come back to a working,
+verified update in your production app. ai-dispatcher uses the AI coding tools you already
+have — ChatGPT with Codex, Claude with Claude Code, or both — and keeps the work moving
+through testing, fixes, and release until the result is healthy.
 
 ## For non-technical readers
 
 ### Who is this for?
 
-ai-dispatcher is for teams that already use GitHub to track product work, bugs, and
-operations tasks — especially small teams where the same people are expected to plan,
-code, test, release, and explain what happened.
+ai-dispatcher is for people who are discovering “vibe coding”: you can describe what you
+want to build, but you do not want to babysit an unfinished change or learn the mechanics
+of testing and deployment before your idea becomes real. It is also for small teams that
+want the same dependable path from a request to a working production result.
 
 ### What problem does it solve?
 
