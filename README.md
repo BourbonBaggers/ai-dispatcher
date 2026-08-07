@@ -6,6 +6,7 @@ have — ChatGPT with Codex, Claude with Claude Code, or both — and keeps the 
 through testing, fixes, and release until the result is healthy.
 
 [![CI](https://github.com/BourbonBaggers/ai-dispatcher/actions/workflows/ci.yml/badge.svg)](https://github.com/BourbonBaggers/ai-dispatcher/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/%40bourbonbaggers%2Fai-dispatcher?label=npm)](https://www.npmjs.com/package/@bourbonbaggers/ai-dispatcher)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js 24+](https://img.shields.io/badge/Node.js-24%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 
@@ -87,8 +88,8 @@ in `AGENTS.md`, this README, and the other tracked documentation.
 
 ## Quickstart
 
-For an installed CLI, initialize the dispatcher once, check the prerequisites, and then
-run it:
+For the published CLI, install it once, initialize the dispatcher, check the prerequisites,
+and then run it:
 
 ```bash
 npm install --global @bourbonbaggers/ai-dispatcher
