@@ -27,8 +27,8 @@ jobs:
         run: npm run typecheck
       - name: Tests
         run: npm test
-      - name: Reject private deployment residue
-        run: bash scripts/check-private-residue.sh
+      - name: Reject public release hygiene regressions
+        run: bash scripts/check-public-release-hygiene.sh
       - name: Shellcheck the bundled launch scripts
         run: |
           install_start="$(date +%s)"
