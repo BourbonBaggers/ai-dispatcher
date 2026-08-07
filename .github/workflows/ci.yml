@@ -39,7 +39,7 @@ jobs:
 
   # Guard the standalone boundary. Fail the build if source or manifests reach outside
   # the repository's own runtime and package boundaries.
-    no-private-coupling:
+  no-private-coupling:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
