@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "Turn plain-language ideas into verified production changes with Codex or Claude Code.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BourbonBaggers/ai-dispatcher.git"
+  },
+  "bugs": {
+    "url": "https://github.com/BourbonBaggers/ai-dispatcher/issues"
+  },
+  "homepage": "https://github.com/BourbonBaggers/ai-dispatcher#readme",
   "keywords": [
     "ai-agents",
     "coding-agents",
@@ -17,6 +25,21 @@
   "bin": {
     "ai-dispatcher": "bin/ai-dispatcher.mjs"
   },
+  "files": [
+    "bin",
+    "src",
+    "scripts",
+    "dashboard",
+    "docs/quality-issue-example.md",
+    "docs/macos-menu-bar.md",
+    ".env.example",
+    "AGENTS.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "README.md",
+    "ROUTING.md",
+    "SECURITY.md"
+  ],
   "engines": {
     "node": ">=24"
   },

@@ -87,7 +87,22 @@ in `AGENTS.md`, this README, and the other tracked documentation.
 
 ## Quickstart
 
-Use the safest single-scan path first, either as a dry run or as one scan:
+For an installed CLI, initialize the dispatcher once, check the prerequisites, and then
+run it:
+
+```bash
+npm install --global ai-dispatcher
+ai-dispatcher init --repo owner/repo
+ai-dispatcher doctor
+ai-dispatcher --once
+```
+
+`init` creates the private configuration, clones the target mirror, and creates the
+worktree and state directories. `doctor` checks GitHub access, Git, Node.js, and at least
+one authenticated coding agent. Authentication remains owned by `gh`, Codex, and Claude
+Code; no token is written to the dispatcher configuration.
+
+For development or a one-off local checkout, use the direct Node path instead:
 
 ```bash
 node bin/ai-dispatcher.mjs --repo owner/repo --dry-run

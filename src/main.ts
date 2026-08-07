@@ -26,6 +26,7 @@ import { TelemetryStore } from "./telemetry.ts";
 import { buildRoutingReport } from "./report.ts";
 import { runHistoryCommand, runStatusCommand } from "./status.ts";
 import { runDashboardCommand } from "./dashboard.ts";
+import { parseDoctorCommand, parseInitCommand, runDoctor, runInit, type DoctorOptions, type InitOptions } from "./setup.ts";
 import { shipRun, type ShipDeps, type ShipOutcome } from "./ship.ts";
 import {
   resolvePolicyCleanupConfig,
@@ -235,6 +236,22 @@ export async function runPolicyCleanupCommand(
 }
 
 export async function main(argv: string[]): Promise<number> {
+  if (argv[0] === "init") {
+    const parsed = parseInitCommand(argv.slice(1), process.env);
+    if (!parsed.ok || parsed.help) {
+      (parsed.ok ? process.stdout : process.stderr).write(`${parsed.message}\n`);
+      return parsed.ok ? 0 : 2;
+    }
+    return runInit(parsed.options as InitOptions, (s) => process.stdout.write(`${s}\n`), (s) => process.stderr.write(`${s}\n`));
+  }
+  if (argv[0] === "doctor") {
+    const parsed = parseDoctorCommand(argv.slice(1));
+    if (!parsed.ok || parsed.help) {
+      (parsed.ok ? process.stdout : process.stderr).write(`${parsed.message}\n`);
+      return parsed.ok ? 0 : 2;
+    }
+    return runDoctor(parsed.options as DoctorOptions, process.env, (s) => process.stdout.write(`${s}\n`));
+  }
   if (argv[0] === "ship") {
     return await runShipCommand(
       argv.slice(1),

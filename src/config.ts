@@ -171,6 +171,8 @@ export interface CliParseResult {
 export const USAGE = `ai-dispatcher — poll a GitHub repo and run Codex / Claude Code on labelled issues.
 
 Usage:
+  ai-dispatcher init --repo <owner/repository> [options]
+  ai-dispatcher doctor [--env-file <path>]
   ai-dispatcher --repo <owner/repository> [options]
   ai-dispatcher status [--state-dir <path>] [--repo <owner/repo>] [--json] [--follow] [--no-github]
   ai-dispatcher history [--state-dir <path>] [--json] [--limit <count>]
