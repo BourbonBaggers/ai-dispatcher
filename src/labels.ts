@@ -170,7 +170,23 @@ export const WORKING_LABEL = "agent-working";
  */
 export const NEEDS_INPUT_LABEL = "needs-input";
 
-export const HOLD_LABELS = [NEEDS_INPUT_LABEL, "blocked", "autoship-held"] as const;
+/**
+ * Durable interactive-ownership hold (#82). An interactive session (or operator) applies
+ * this to take ownership of an issue outside the dispatcher — unlike `blocked`, it is
+ * never added or removed by any dispatcher code path in either direction, and the
+ * blocked-queue audit's stale-hold recovery never touches it. It durably keeps
+ * `dispatch:ready` from being re-derived by intake-label migration for as long as it is
+ * present, because `migrateIntakeLabels` (dispatcher.ts) skips any issue carrying a
+ * HOLD_LABELS member before computing the migration.
+ */
+export const INTERACTIVE_LABEL = "interactive";
+
+export const HOLD_LABELS = [
+  NEEDS_INPUT_LABEL,
+  "blocked",
+  "autoship-held",
+  INTERACTIVE_LABEL,
+] as const;
 
 /**
  * Legacy label retained for compatibility with existing repositories. It is deliberately

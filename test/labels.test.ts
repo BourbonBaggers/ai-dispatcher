@@ -9,6 +9,8 @@ import {
   validateDispatchReadyContract,
   migrationForLegacyIntakeLabels,
   branchNameFor,
+  HOLD_LABELS,
+  INTERACTIVE_LABEL,
 } from "../src/labels.ts";
 import { modelByLabel } from "../src/models.ts";
 
@@ -146,6 +148,11 @@ test("legacy intake labels migrate when unambiguous", () => {
     migrationForLegacyIntakeLabels(["task:unknown", "risk:medium"]).needsInputReason ?? "",
     /missing type/,
   );
+});
+
+test("interactive is a durable hold label (#82)", () => {
+  assert.ok((HOLD_LABELS as readonly string[]).includes(INTERACTIVE_LABEL));
+  assert.equal(INTERACTIVE_LABEL, "interactive");
 });
 
 test("branchNameFor produces a safe, stable ref from an untrusted title", () => {

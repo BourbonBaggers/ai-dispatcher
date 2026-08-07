@@ -68,6 +68,7 @@ test("selectBlockedQueueAuditCandidates is deterministic and skips stronger hold
       issue(4, [...queued, "autoship-held"]),
       issue(5, ["blocked"]),
       issue(6, queued),
+      issue(7, [...queued, "interactive"]),
     ],
     { claimedByIssue: new Map(), maxCandidates: 2 },
   );
