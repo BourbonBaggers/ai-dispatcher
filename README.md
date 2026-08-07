@@ -18,27 +18,30 @@ Good ideas and important fixes often get stuck between “someone should handle 
 follow-up, automated checks fail without a clear owner, and a task can appear finished
 before anyone has verified the result.
 
+### Issue creation flow: where the work begins
+
+The quality of the queue is established before ai-dispatcher ever sees it:
+
+1. A person starts a GitHub-connected AI chat session and describes the outcome they want.
+2. The chat inspects the repository and asks focused questions about current behavior,
+   scope, edge cases, and tradeoffs.
+3. Together, they refine the request until “done” is specific enough to verify without
+   guessing.
+4. The chat drafts a GitHub issue with context, acceptance criteria, boundaries, and
+   verification steps.
+5. A person reviews and approves that issue for the dispatcher’s queue.
+
+A vague issue creates vague work; a carefully refined issue creates a queue that autonomous
+agents can actually work to completion. See the
+[quality issue example](docs/quality-issue-example.md) for the pattern.
+
 ### How does it help?
 
-ai-dispatcher watches an approved queue, gives one task at a time to an AI coding agent,
+ai-dispatcher watches that approved queue, gives one task at a time to an AI coding agent,
 and keeps ownership of the work until there is a trustworthy outcome. It checks the
 agent’s change, retries and repairs failures, and keeps the task from disappearing during
 the handoff. If deployment automation is configured, it can continue through release
 and health verification, closing the task only after the new version is confirmed healthy.
-
-### Where does the work begin?
-
-The quality of the queue starts before ai-dispatcher ever sees it. A person begins with a
-GitHub-connected AI chat session and describes the outcome they want. The conversation
-can inspect the repository, ask clarifying questions, identify what “done” should look
-like, and refine the request until it is specific enough for another person — or an
-autonomous coding agent — to execute without guessing.
-
-Once the request is agreed, the chat produces a GitHub issue with a clear outcome,
-observable acceptance criteria, useful context, and explicit boundaries. That issue is
-then approved for the dispatcher’s queue. A vague issue creates vague work; a carefully
-refined issue creates a queue that autonomous agents can actually work to completion.
-See the [quality issue example](docs/quality-issue-example.md) for the pattern.
 
 People get a ready-to-review change when human judgment is useful, or a clear,
 evidence-backed escalation when automation has genuinely run out of options. The result
