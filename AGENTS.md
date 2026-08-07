@@ -126,13 +126,54 @@ conflicting ownership, and leave stale `agent-working` state when the interactiv
 session finishes. Ordinary descriptive labels such as `type:*`, `risk:*`, and
 `priority:*` may be used when useful, but they do not authorize pickup.
 
+Simply avoiding dispatcher-intake labels is not sufficient on its own (#82). Intake-label
+migration re-derives `dispatch:ready` from ordinary `type:*`/`risk:*`/`priority:*`
+characteristic labels, and `blocked` alone is not durable — the blocked-queue audit
+removes a stale `blocked` and a later migration pass can re-admit the issue from
+characteristics that were never meant to authorize pickup on their own.
+
+### Taking interactive ownership of an issue
+
+Apply the `interactive` label to durably keep an issue out of dispatcher intake for as
+long as the label is present:
+
+- `interactive` is a member of `HOLD_LABELS` (`src/labels.ts`), so issue selection
+  excludes it outright and the blocked-queue audit's stale-hold recovery skips it with
+  no second label required.
+- It durably suppresses intake-label migration for that issue: `migrateIntakeLabels`
+  skips any issue carrying a `HOLD_LABELS` member before it computes or writes a
+  migration, so `dispatch:ready` is never re-derived from characteristic labels while
+  `interactive` is present.
+- Unlike `blocked`, the dispatcher never adds or removes `interactive` in either
+  direction — no dispatcher code path references it as an add/remove target. It is
+  operator/interactive-session-owned in both directions.
+
+Apply it before starting interactive work on an issue the dispatcher might otherwise
+pick up, and before taking over an already-labelled issue: remove stale dispatcher
+ownership/admission labels as appropriate, verify the production dispatcher has not
+already claimed it, add `interactive`, and then work the existing issue/branch/PR
+rather than creating a competing run.
+
+### Releasing ownership
+
+Remove the `interactive` label when interactive work is done and the issue may return
+to normal dispatcher intake, or is being handed off explicitly (below). Removing
+`interactive` alone does not grant admission — the issue still needs `dispatch:ready`
+or recognized characteristic labels to be picked up, same as any other issue.
+
+If the production dispatcher already holds a claim on the issue (an active `RunRecord`
+in its state store — visible as `agent-working` or a resumable/parked/held status),
+removing `interactive` does not release that claim by itself; a held dispatcher claim
+survives independently of GitHub labels. Releasing a claim the dispatcher already holds
+is a separate manual procedure, not automated: stop the dispatcher service, use
+`StateStore.pruneRuns` to drop the claim from durable state, relabel the issue as
+needed, then restart the service.
+
 An issue created for interactive work must remain without `dispatch:ready` unless the
-operator explicitly asks to hand it to the production dispatcher. Before taking an
-already-labelled issue over interactively, remove stale dispatcher ownership/admission
-labels as appropriate, verify the production dispatcher has not claimed it, and then
-work the existing issue/branch/PR rather than creating a competing run. Add dispatcher
-labels only as an explicit final handoff after the interactive work is complete and the
-issue is intentionally ready for autonomous pickup.
+operator explicitly asks to hand it to the production dispatcher. Add dispatcher labels
+only as an explicit final handoff after the interactive work is complete and the issue
+is intentionally ready for autonomous pickup — and remove `interactive` at that point,
+since its presence would otherwise keep suppressing admission indefinitely.
 
 ## Hard rules
 
