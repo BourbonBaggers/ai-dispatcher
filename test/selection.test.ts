@@ -114,12 +114,27 @@ test("unlabelled backlog issues stay out, while conflicting legacy labels do not
   assert.equal(candidates[1]!.eligible, true);
 });
 
-test("held (needs-input / blocked) issues are skipped", () => {
-  for (const hold of ["needs-input", "blocked"]) {
+test("held (needs-input / blocked / interactive) issues are skipped", () => {
+  for (const hold of ["needs-input", "blocked", "interactive"]) {
     const { target, candidates } = selectEligibleIssue([issue(1, [...CLAUDE, hold])], ctx());
     assert.equal(target, null);
     assert.match(candidates[0]!.reason, /held for a human/);
   }
+});
+
+test("interactive excludes an issue from selection even with dispatch:ready and full characteristic labels (#82)", () => {
+  const labels = [
+    "dispatch:ready",
+    "type:enhancement",
+    "risk:low-stakes",
+    "priority:normal",
+    "agent:claude",
+    "model:claude-opus-4.8",
+    "interactive",
+  ];
+  const { target, candidates } = selectEligibleIssue([issue(1, labels)], ctx());
+  assert.equal(target, null);
+  assert.match(candidates[0]!.reason, /held for a human \(interactive\)/);
 });
 
 test("a currently unroutable issue does not block the next issue", () => {

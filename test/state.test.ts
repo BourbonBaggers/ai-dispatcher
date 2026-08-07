@@ -34,6 +34,33 @@ function claimData(issueNumber: number) {
   };
 }
 
+test("a service restart never touches GitHub labels, so `interactive` survives it untouched (#82)", () => {
+  // PersistedState (version/settings/runs) has no label field at all — the dispatcher's
+  // durable store never round-trips GitHub label state, so a restart cannot add, drop, or
+  // otherwise touch the `interactive` hold label on an issue; it can only affect the store's
+  // own run claims.
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    store.createRun(claimData(82));
+    store.releaseLock();
+
+    const persisted = JSON.parse(readFileSync(join(dir, "state.json"), "utf8")) as Record<
+      string,
+      unknown
+    >;
+    assert.deepEqual(Object.keys(persisted).sort(), ["runs", "settings", "version"]);
+    assert.equal(JSON.stringify(persisted).includes("interactive"), false);
+
+    const reopened = StateStore.open(dir);
+    assert.equal(reopened.allRuns().length, 1);
+    assert.equal(reopened.claimingRunsByIssue().get(82), "claimed");
+    reopened.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("createRun claims an issue and persists across reopen", () => {
   const dir = tmp();
   try {

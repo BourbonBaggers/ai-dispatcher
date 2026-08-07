@@ -1136,6 +1136,75 @@ test("runScanOnce does not audit blocked issues while normal eligible work exist
   }
 });
 
+test("runScanOnce never claims an interactive-held issue, and migration never re-adds dispatch:ready to it (#82)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const added: Array<{ issue: number; label: string }> = [];
+    const deps: DispatcherDeps = {
+      config: {
+        ...autoshipConfig({ autoshipCmd: null }),
+        dryRun: false,
+        worktreeDir: "/worktrees",
+        authorAuth: { ok: true, mode: "none", trustedAuthors: new Set() },
+      } as DispatcherConfig,
+      store,
+      logger: createLogger("error", () => undefined),
+      notifier: { send: async () => undefined },
+      github: {
+        listOpenIssues: async () => ({
+          ok: true,
+          issues: [
+            {
+              // Full legacy characteristic labels that would otherwise migrate to
+              // dispatch:ready — interactive must suppress that migration entirely.
+              number: 82,
+              title: "owned interactively",
+              url: "https://x/82",
+              labels: ["interactive", "task:feature", "risk:medium"],
+              authorLogin: "BourbonBaggers",
+            },
+            {
+              number: 90,
+              title: "ready",
+              url: "https://x/90",
+              labels: ["dispatch:ready", "type:bug", "priority:normal", "risk:normal"],
+              authorLogin: "BourbonBaggers",
+            },
+          ],
+        }),
+        addLabel: async (issue: number, label: string) => {
+          added.push({ issue, label });
+          return true;
+        },
+        removeLabel: async () => true,
+        issueState: async () => "OPEN",
+        issueBody: async () => "Normal eligible work.",
+        comment: async () => true,
+      } as unknown as DispatcherDeps["github"],
+      launch: async (claimed) =>
+        store.updateRun(claimed.id, {
+          status: "interrupted",
+          exitCode: 130,
+          finishedAt: 6_000,
+          failureSummary: "test interruption",
+        }),
+      now: () => 5_000,
+    };
+
+    const result = await runScanOnce(deps);
+
+    assert.match(result.message, /Ran/);
+    // The dispatcher never claims issue 82, and migration never derives dispatch:ready
+    // (or anything else) for it while interactive is present.
+    assert.equal(store.allRuns()[0]?.issueNumber, 90);
+    assert.ok(!added.some((a) => a.issue === 82));
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runScanOnce removes blocked from the first stale blocked issue without claiming it", async () => {
   const dir = tmp();
   try {
