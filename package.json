@@ -1,8 +1,18 @@
 {
   "name": "ai-dispatcher",
   "version": "0.1.0",
-  "description": "Standalone AI issue dispatcher — polls a GitHub repo and runs Codex / Claude Code on labelled issues.",
+  "description": "Turn plain-language ideas into verified production changes with Codex or Claude Code.",
   "license": "MIT",
+  "keywords": [
+    "ai-agents",
+    "coding-agents",
+    "github-automation",
+    "vibe-coding",
+    "codex",
+    "claude-code",
+    "devops",
+    "autonomous-coding"
+  ],
   "type": "module",
   "bin": {
     "ai-dispatcher": "bin/ai-dispatcher.mjs"

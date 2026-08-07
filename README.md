@@ -5,6 +5,10 @@ verified update in your production app. ai-dispatcher uses the AI coding tools y
 have — ChatGPT with Codex, Claude with Claude Code, or both — and keeps the work moving
 through testing, fixes, and release until the result is healthy.
 
+[![CI](https://github.com/BourbonBaggers/ai-dispatcher/actions/workflows/ci.yml/badge.svg)](https://github.com/BourbonBaggers/ai-dispatcher/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Node.js 24+](https://img.shields.io/badge/Node.js-24%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+
 ## For non-technical readers
 
 ### Who is this for?
