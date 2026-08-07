@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildJudgePrompt, judgeAcceptance, judgeArgs } from "../src/acceptance-judge.ts";
+import { JUDGE_SHELL, buildJudgePrompt, judgeAcceptance, judgeArgs } from "../src/acceptance-judge.ts";
 import type { ExecResult } from "../src/exec.ts";
 
 const request = {
@@ -28,6 +28,15 @@ test("the judge is invoked with no tools", () => {
   const toolsIndex = args.indexOf("--allowed-tools");
   assert.ok(toolsIndex !== -1, "tools must be explicitly restricted");
   assert.equal(args[toolsIndex + 1], "");
+});
+
+// The dispatcher process does not read ~/.dispatcher/env; only the launcher script does.
+// A judge invoked without it runs unauthenticated, `claude` prints "Not logged in", and
+// every criterion degrades to `unclear` — an audit that is inert while looking healthy.
+test("the judge wrapper sources the operator credential file before exec", () => {
+  assert.match(JUDGE_SHELL, /\.dispatcher\/env/);
+  assert.match(JUDGE_SHELL, /allexport/);
+  assert.match(JUDGE_SHELL, /exec "\$@"/);
 });
 
 test("the prompt travels on stdin, never argv", async () => {

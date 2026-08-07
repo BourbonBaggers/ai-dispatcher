@@ -23,7 +23,7 @@ import { GithubClient } from "./github.ts";
 import { reconcile, runScanOnce, type DispatcherDeps } from "./dispatcher.ts";
 import { run } from "./exec.ts";
 import { TelemetryStore } from "./telemetry.ts";
-import { judgeAcceptance } from "./acceptance-judge.ts";
+import { JUDGE_SHELL, judgeAcceptance } from "./acceptance-judge.ts";
 import { buildRoutingReport } from "./report.ts";
 import { runHistoryCommand, runStatusCommand } from "./status.ts";
 import { runDashboardCommand } from "./dashboard.ts";
@@ -90,7 +90,7 @@ export function buildDeps(config: DispatcherConfig, store: StateStore, logger: L
     judgeAcceptance: (request) =>
       judgeAcceptance(
         (command, args, options) =>
-          run("bash", ["-lc", `${command} "$@"`, "--", ...args], {
+          run("bash", ["-lc", JUDGE_SHELL, "--", command, ...args], {
             stdin: options.stdin,
             timeoutMs: options.timeoutMs,
             killProcessGroup: options.killProcessGroup,

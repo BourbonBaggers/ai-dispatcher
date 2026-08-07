@@ -42,6 +42,26 @@ export interface JudgeRequest {
   criteria: readonly string[];
 }
 
+/**
+ * Wrapper that gives the judge the same credentials the launcher gives an agent.
+ *
+ * Claude Code has no `login` subcommand, so on a headless box the operator stores a
+ * long-lived token in `~/.dispatcher/env`. `scripts/dispatch-agent.sh` sources that file
+ * because a non-interactive shell does not read `~/.bashrc` — and the dispatcher process
+ * itself never reads it, so a judge invoked straight from the service environment runs
+ * unauthenticated. That failure is silent in the worst way: `claude` prints "Not logged
+ * in", the adapter degrades every criterion to `unclear`, and the audit is inert while
+ * appearing healthy. Source it here for exactly the same reason the launcher does.
+ */
+export const JUDGE_SHELL = [
+  'if [ -f "$HOME/.dispatcher/env" ]; then',
+  "  set -o allexport",
+  '  . "$HOME/.dispatcher/env"',
+  "  set +o allexport",
+  "fi",
+  'exec "$@"',
+].join("\n");
+
 export function judgeArgs(model: string): string[] {
   return [
     "-p",
