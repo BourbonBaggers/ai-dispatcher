@@ -40,8 +40,8 @@ export interface RecoveryState {
 export type RecoveryLedger = Partial<Record<RecoveryKind, RecoveryState>>;
 
 export type RecoveryDecision =
-  | { action: "retry"; attempt: number; maxAttempts: number; reason: string; nextModel?: ModelEntry | undefined }
-  | { action: "escalate"; reason: string; nextModel?: ModelEntry | undefined }
+  | { action: "retry"; attempt: number; maxAttempts: number; reason: string; nextModel?: ModelEntry | null }
+  | { action: "escalate"; reason: string; nextModel?: ModelEntry | null }
   | { action: "hold"; reason: string }
   | { action: "exhausted"; reason: string }
   | { action: "unknown"; reason: string };
@@ -93,9 +93,9 @@ export function decideRecovery(
           };
         }
         // After exhausting retries, climb ladder if available, then escalate
-        if (shouldClimbLadder(current)) {
+        if (shouldClimbLadder(current) && current.ladder) {
           const nextModel = nextModelInLadder(
-            current.ladder![(current.ladderIndex ?? 0)]!,
+            current.ladder[(current.ladderIndex ?? 0)]!,
             current.ladder,
           );
           return {
@@ -114,9 +114,9 @@ export function decideRecovery(
       case "usage-limit":
       case "context-exhaustion":
         // Hand off to comparable/larger capacity rather than retrying
-        if (shouldClimbLadder(current)) {
+        if (shouldClimbLadder(current) && current.ladder) {
           const nextModel = nextModelInLadder(
-            current.ladder![(current.ladderIndex ?? 0)]!,
+            current.ladder[(current.ladderIndex ?? 0)]!,
             current.ladder,
           );
           return {
@@ -148,9 +148,9 @@ export function decideRecovery(
           };
         }
         // Retries exhausted; climb ladder if available
-        if (shouldClimbLadder(current)) {
+        if (shouldClimbLadder(current) && current.ladder) {
           const nextModel = nextModelInLadder(
-            current.ladder![(current.ladderIndex ?? 0)]!,
+            current.ladder[(current.ladderIndex ?? 0)]!,
             current.ladder,
           );
           return {
@@ -196,9 +196,9 @@ export function decideRecovery(
     };
   }
   // Retries exhausted; climb ladder if available
-  if (shouldClimbLadder(current)) {
+  if (shouldClimbLadder(current) && current.ladder) {
     const nextModel = nextModelInLadder(
-      current.ladder![(current.ladderIndex ?? 0)]!,
+      current.ladder[(current.ladderIndex ?? 0)]!,
       current.ladder,
     );
     return {

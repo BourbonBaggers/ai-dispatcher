@@ -47,6 +47,8 @@ import {
   modelByCliModel,
   tierRank,
   MODEL_TIERS,
+  buildModelLadder,
+  nextModelInLadder,
   type ModelEntry,
 } from "./models.ts";
 import {
@@ -1313,6 +1315,34 @@ function failureCategoryFor(kind: RecoveryKind): FailureCategory {
 }
 
 /**
+ * Prepare recovery state with a model ladder for the current run's model.
+ * The ladder is reconstructed on each use (not serialized), enabling progressive escalation
+ * within a provider before frontier handoff.
+ */
+function prepareRecoveryWithLadder(run: RunRecord, kind: RecoveryKind): RunRecord["recovery"] {
+  const currentModel = modelByCliModel(run.cliModel);
+  if (!currentModel) return run.recovery ?? {};
+
+  const ledger = run.recovery ?? {};
+  const state = ledger[kind];
+  if (!state) {
+    // First recovery for this kind: build the ladder starting from current model
+    const ladder = buildModelLadder(currentModel);
+    return {
+      ...ledger,
+      [kind]: { ...(state ?? {}), ladder, ladderIndex: 0 },
+    };
+  }
+
+  // Recovery already started for this kind: preserve state and add/update ladder
+  const ladder = buildModelLadder(currentModel);
+  return {
+    ...ledger,
+    [kind]: { ...state, ladder },
+  };
+}
+
+/**
  * Chooses the escalation model from evidence rather than a fixed constant (#51 §5).
  *
  * `DISPATCHER_CI_ESCALATION_MODEL` remains the floor: if planning cannot produce a
@@ -1369,16 +1399,36 @@ async function escalateRun(
   fallbackCliModel: string,
   kind: RecoveryKind,
   reason: string,
+  nextLadderModel?: ModelEntry | null,
 ): Promise<void> {
   const { config, store, github, logger, notifier } = deps;
   const now = deps.now ?? (() => Date.now());
 
-  const escalation = await resolveEscalationModel(deps, run, kind, fallbackCliModel, now());
+  // If a next ladder model is provided, use it for climbing within the model ladder.
+  // Otherwise use the standard escalation model resolution.
+  let escalation;
+  let escalationReason = "model ladder climb";
+  if (nextLadderModel) {
+    const effort = effortForRouteTier(nextLadderModel.tier);
+    escalation = {
+      cliModel: nextLadderModel.cliModel,
+      effortLabel: effort.effortLabel,
+      rationale: `climb model ladder to ${nextLadderModel.modelLabel}`,
+    };
+  } else {
+    escalation = await resolveEscalationModel(deps, run, kind, fallbackCliModel, now());
+    escalationReason = "frontier escalation";
+  }
   const cliModel = escalation.cliModel;
   const modelEntry = modelByCliModel(cliModel);
   const agent: DispatcherAgent = modelEntry?.cli === "codex" ? "codex" : "claude";
   const modelLabel = modelEntry?.modelLabel ?? cliModel;
   const cliEffort = EFFORT_LABELS[escalation.effortLabel]?.[agent] ?? (agent === "claude" ? "xhigh" : "high");
+
+  // Update recovery state: if climbing the ladder, increment ladderIndex; if using frontier, set escalated
+  const recoveryUpdate = nextLadderModel
+    ? { ladder: buildModelLadder(nextLadderModel), ladderIndex: (run.recovery?.[kind]?.ladderIndex ?? 0) + 1 }
+    : { escalated: true };
 
   const reentered = store.updateRun(run.id, {
     status: "claimed",
@@ -1389,7 +1439,7 @@ async function escalateRun(
     cliModel,
     effortLabel: escalation.effortLabel,
     cliEffort,
-    recovery: updateRecovery(run.recovery, kind, { escalated: true }),
+    recovery: updateRecovery(run.recovery, kind, recoveryUpdate),
     ...nextRecoveryLaunch(run),
     exitCode: null,
     failureSummary: reason,
@@ -1511,7 +1561,8 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
   // Intermediate failures stay internal—no high-priority push and no "go fix this"
   // issue comment while automation still owns the problem.
   if (run.status === "failed") {
-    const decision = decideRecovery(run.recovery, "agent", deps.config.ciSelfHealMaxAttempts);
+    const recoveryWithLadder = prepareRecoveryWithLadder(run, "agent");
+    const decision = decideRecovery(recoveryWithLadder, "agent", deps.config.ciSelfHealMaxAttempts);
     if (decision.action === "retry") {
       await repairRun(
         deps,
@@ -1529,6 +1580,7 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
         deps.config.ciEscalationModel,
         "agent",
         run.failureSummary ?? `Agent exited ${run.exitCode ?? "without a result"}.`,
+        decision.nextModel,
       );
       return;
     }
@@ -1580,7 +1632,8 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
   const { store, github, notifier, logger } = deps;
 
   if (!deps.ship) {
-    const decision = decideRecovery(run.recovery, "deploy", deps.config.ciSelfHealMaxAttempts);
+    const recoveryWithLadder = prepareRecoveryWithLadder(run, "deploy");
+    const decision = decideRecovery(recoveryWithLadder, "deploy", deps.config.ciSelfHealMaxAttempts);
     if (decision.action === "retry") {
       await repairRun(
         deps,
@@ -1598,6 +1651,7 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
         deps.config.ciEscalationModel,
         "deploy",
         "No autoship command is configured for this repository.",
+        decision.nextModel,
       );
       return { relaunched: true };
     }
@@ -1687,8 +1741,9 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
         // Defensive fallback: autoship normally maps red CI directly to a recovery
         // outcome. Never let a future caller turn a raw `fail` into a premature hold.
         {
+          const recoveryWithLadder = prepareRecoveryWithLadder(run, "ci");
           const decision = decideRecovery(
-            run.recovery,
+            recoveryWithLadder,
             "ci",
             deps.config.ciSelfHealMaxAttempts,
           );
@@ -1704,6 +1759,7 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
               deps.config.ciEscalationModel,
               "ci",
               reason,
+              decision.nextModel,
             );
             return { relaunched: true };
           }
@@ -1716,7 +1772,7 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
         return { relaunched: true };
       case "escalate":
         checkpointLadderRun(store, run);
-        await escalateRun(deps, run, outcome.model, outcome.kind, outcome.reason);
+        await escalateRun(deps, run, outcome.model, outcome.kind, outcome.reason, undefined);
         return { relaunched: true };
       case "exhausted":
         await exhaustRun(deps, run, outcome.kind, outcome.reason);
@@ -1730,13 +1786,14 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
       error: err instanceof Error ? err.message : String(err),
     });
     const reason = `Autoship orchestration threw: ${err instanceof Error ? err.message : String(err)}`;
-    const decision = decideRecovery(run.recovery, "merge", deps.config.ciSelfHealMaxAttempts);
+    const recoveryWithLadder = prepareRecoveryWithLadder(run, "merge");
+    const decision = decideRecovery(recoveryWithLadder, "merge", deps.config.ciSelfHealMaxAttempts);
     if (decision.action === "retry") {
       await repairRun(deps, run, "merge", decision.attempt, reason);
       return { relaunched: true };
     }
     if (decision.action === "escalate") {
-      await escalateRun(deps, run, deps.config.ciEscalationModel, "merge", reason);
+      await escalateRun(deps, run, deps.config.ciEscalationModel, "merge", reason, decision.nextModel);
       return { relaunched: true };
     }
     await exhaustRun(deps, run, "merge", reason);
