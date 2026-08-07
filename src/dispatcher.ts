@@ -31,6 +31,8 @@ import {
   type DispatcherAgent,
   type ResolvedAssignment,
 } from "./labels.ts";
+import { auditShippedIssue, type AuditDeps } from "./acceptance-sweep.ts";
+import { AUDIT_FOLLOWUP_LABEL } from "./acceptance-audit.ts";
 import { assessIssueText, applyAssessment } from "./issue-assessment.ts";
 import { selectEligibleIssue } from "./selection.ts";
 import { untrustedAuthorComment, UNTRUSTED_AUTHOR_LABEL } from "./author-auth.ts";
@@ -140,6 +142,12 @@ export interface DispatcherDeps {
   terminateOrphan?: (pid: number) => void;
   /** Injectable agent launcher for crash-boundary tests. */
   launch?: typeof launchRun;
+  /**
+   * Injectable acceptance judge for the post-ship audit (#85). When omitted the audit is
+   * inert: shipped runs are marked audited and nothing is filed. Delivery never depends
+   * on it, so an absent or failing judge is a no-op, not a hold.
+   */
+  judgeAcceptance?: AuditDeps["judge"];
   /** Injectable stale-blocked-queue semantic auditor for deterministic tests. */
   blockedQueueAuditor?: (
     prompt: string,
@@ -614,6 +622,70 @@ export function planQuotaHandoff(
 }
 
 /** Runs a single scan: resume first, else claim and launch at most one fresh issue. */
+/**
+ * Resolves any shipped run still awaiting its acceptance audit.
+ *
+ * Every outcome is best-effort by construction. An unreadable input, an unavailable judge,
+ * or a failed issue creation leaves the run marked `pending` so the next scan retries;
+ * nothing here can hold, page (except the depth cap), or spend recovery budget.
+ */
+async function sweepPendingAudits(deps: DispatcherDeps): Promise<void> {
+  const { store, github, logger, notifier } = deps;
+  const pending = store.pendingAudits();
+  if (pending.length === 0) return;
+
+  const now = deps.now ?? (() => Date.now());
+  const judge = deps.judgeAcceptance;
+
+  for (const run of pending) {
+    if (run.prNumber === null) continue;
+
+    // Without a judge the audit is inert. Mark it resolved rather than accumulating an
+    // unbounded backlog of runs that will never be audited.
+    if (!judge) {
+      store.updateRun(run.id, { audit: { status: "done", at: now() } });
+      continue;
+    }
+
+    try {
+      const outcome = await auditShippedIssue(
+        {
+          github,
+          judge,
+          logger,
+          notifier,
+          markAudited: (subject, followUpIssue) => {
+            store.updateRun(run.id, {
+              audit: {
+                status: "done",
+                at: now(),
+                ...(followUpIssue === null ? {} : { followUpIssue }),
+              },
+            });
+          },
+        },
+        {
+          issueNumber: run.issueNumber,
+          issueTitle: run.issueTitle,
+          prNumber: run.prNumber,
+        },
+      );
+      if (outcome.action === "unavailable") {
+        logger.info("audit: evidence unavailable; retrying on a later scan", {
+          issue: run.issueNumber,
+          reason: outcome.reason,
+        });
+      }
+    } catch (err) {
+      // The audit is never allowed to break a scan.
+      logger.warn("audit: sweep threw; leaving the run for a later scan", {
+        issue: run.issueNumber,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
 export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   const { config, store, github, logger, notifier } = deps;
   const now = deps.now ?? (() => Date.now());
@@ -644,6 +716,12 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
       message: `Recovered finalization for issue #${pendingFinalization.issueNumber}.`,
     };
   }
+
+  // ── Post-ship audit ──
+  // Deliberately after finalization and before pickup: it is bounded, cheap, and must not
+  // sit behind a long agent run. It cannot block anything — every failure path inside just
+  // leaves the run marked pending for the next scan (#85).
+  if (!config.dryRun) await sweepPendingAudits(deps);
 
   const capacityByPool = await pickupCapacity(deps, nowMs);
   const suppressionFor = (agent: DispatcherAgent) => store.getProviderSuppression(agent);
@@ -1015,6 +1093,10 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
     checkoutPath: join(config.worktreeDir, branch),
     planPath: null,
     trigger: "poll",
+    // Recorded at claim so telemetry can exclude audit-generated work from the learning
+    // dataset: its difficulty and outcome reflect a heuristic verdict on another issue,
+    // not this policy's routing choice (#85).
+    ...(issue.labels.includes(AUDIT_FOLLOWUP_LABEL) ? { auditFollowUp: true } : {}),
   });
 
   logger.info("claimed issue", { runId: run.id, issue: issue.number, agent, cliModel, cliEffort });
@@ -1670,6 +1752,9 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
       case "shipped":
         recordRunPhase(deps, run, "verifying", "Autoship verified production health.", {
           status: "shipped",
+          // Queue the acceptance audit rather than running it here. Ship stays unblocked;
+          // the sweep resolves this on a later scan (#85).
+          audit: { status: "pending", at: (deps.now ?? (() => Date.now()))() },
         });
         try {
           deps.telemetry?.setIssueOutcome(run.issueNumber, {
@@ -1954,6 +2039,7 @@ export function attemptRecordFromRun(run: RunRecord, _nowMs: number): AttemptRec
     humanInterventionRequired: false,
     frontierModelUsed: model?.frontier ?? false,
     manualOverride: run.routing?.source === "human-override",
+    auditGenerated: run.auditFollowUp === true,
     terminalStatus: run.status,
   };
 }

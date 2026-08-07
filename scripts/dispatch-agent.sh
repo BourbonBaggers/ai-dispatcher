@@ -660,7 +660,24 @@ if [[ -n "$PR_URL" ]]; then
   esac
 fi
 
-printf '::result:: exit=%s pr=%s commit=%s plan=%s commits=%s ci=%s disposition=normal\n' \
-  "$EXIT_CODE" "${PR_URL:-}" "${COMMIT:-}" "${PLAN:-}" "${COMMITS_AHEAD:-0}" "${CI_STATE:-none}" >&3
+# An audit follow-up (#85) can be filed against work that was already done, because the
+# acceptance judge is a cheap heuristic and can be wrong. Such an issue instructs the agent
+# to close it and change nothing, which otherwise looks exactly like the top failure mode:
+# a clean exit with zero commits, classified `failed` and sent into the recovery ladder.
+#
+# The sentinel is a deliberate, structured channel, like the plan file — the agent creates
+# it only when it has concluded no change is needed. Agent stdout still cannot forge this:
+# the launcher, not the provider process, decides whether to emit the disposition, and it
+# does so only when the run also exited cleanly with no commits. A run that committed
+# something is making changes and is not "already satisfied", whatever the file says.
+DISPOSITION=normal
+if [[ "$EXIT_CODE" -eq 0 && "${COMMITS_AHEAD:-0}" -eq 0 && -f "$CHECKOUT/.dispatcher-no-work-needed" ]]; then
+  DISPOSITION=already-satisfied
+  event "agent reported the requested work is already satisfied — no changes needed"
+fi
+
+printf '::result:: exit=%s pr=%s commit=%s plan=%s commits=%s ci=%s disposition=%s\n' \
+  "$EXIT_CODE" "${PR_URL:-}" "${COMMIT:-}" "${PLAN:-}" "${COMMITS_AHEAD:-0}" "${CI_STATE:-none}" \
+  "$DISPOSITION" >&3
 
 exit "$EXIT_CODE"

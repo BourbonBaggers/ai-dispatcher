@@ -98,6 +98,46 @@ export function closeIssueArgs(slug: string, issue: number): string[] {
   return ["issue", "close", String(issue), "--repo", slug];
 }
 
+/**
+ * Creates an issue. The title and body are free-form: the body goes over stdin like every
+ * other free-form text, and labels come from the caller's frozen allowlist, never from
+ * anything an agent or model produced.
+ */
+export function createIssueArgs(
+  slug: string,
+  request: { title: string; labels: readonly string[] },
+): string[] {
+  return [
+    "issue",
+    "create",
+    "--repo",
+    slug,
+    "--title",
+    request.title,
+    "--body-file",
+    "-",
+    ...request.labels.flatMap((label) => ["--label", label]),
+  ];
+}
+
+/** Open issues carrying a label — used to find an existing audit follow-up before filing. */
+export function issuesWithLabelArgs(slug: string, label: string): string[] {
+  return [
+    "issue",
+    "list",
+    "--repo",
+    slug,
+    "--state",
+    "open",
+    "--label",
+    label,
+    "--limit",
+    String(ISSUE_FETCH_LIMIT),
+    "--json",
+    "number,body",
+  ];
+}
+
 export function reopenIssueArgs(slug: string, issue: number): string[] {
   return ["issue", "reopen", String(issue), "--repo", slug];
 }
@@ -260,6 +300,48 @@ export class GithubClient {
    */
   async closeIssue(issue: number): Promise<boolean> {
     return (await this.exec("gh", closeIssueArgs(this.repo.slug, issue))).ok;
+  }
+
+  /**
+   * Creates an issue and returns its number, or null on failure. The body is piped over
+   * stdin so untrusted audit text never reaches argv.
+   */
+  async createIssue(request: {
+    title: string;
+    body: string;
+    labels: readonly string[];
+  }): Promise<number | null> {
+    const result = await this.exec(
+      "gh",
+      createIssueArgs(this.repo.slug, { title: request.title, labels: request.labels }),
+      { stdin: request.body },
+    );
+    if (!result.ok) return null;
+    const match = /\/issues\/(\d+)\s*$/.exec(result.stdout.trim());
+    if (!match) return null;
+    const issue = Number.parseInt(match[1]!, 10);
+    return Number.isInteger(issue) && issue > 0 ? issue : null;
+  }
+
+  /**
+   * Open issues carrying a label, with bodies, or null when the read failed. Null is not
+   * "none": the audit must not file a duplicate just because a list call errored.
+   */
+  async issuesWithLabel(label: string): Promise<{ number: number; body: string }[] | null> {
+    const result = await this.exec("gh", issuesWithLabelArgs(this.repo.slug, label));
+    if (!result.ok) return null;
+    try {
+      const raw: unknown = JSON.parse(result.stdout.trim() || "[]");
+      if (!Array.isArray(raw)) return null;
+      return raw.flatMap((entry) => {
+        if (typeof entry !== "object" || entry === null) return [];
+        const record = entry as { number?: unknown; body?: unknown };
+        if (typeof record.number !== "number") return [];
+        return [{ number: record.number, body: typeof record.body === "string" ? record.body : "" }];
+      });
+    } catch {
+      return null;
+    }
   }
 
   /** Restores an issue that closed before merged code was verified healthy in production. */

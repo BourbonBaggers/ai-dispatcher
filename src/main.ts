@@ -23,6 +23,7 @@ import { GithubClient } from "./github.ts";
 import { reconcile, runScanOnce, type DispatcherDeps } from "./dispatcher.ts";
 import { run } from "./exec.ts";
 import { TelemetryStore } from "./telemetry.ts";
+import { judgeAcceptance } from "./acceptance-judge.ts";
 import { buildRoutingReport } from "./report.ts";
 import { runHistoryCommand, runStatusCommand } from "./status.ts";
 import { runDashboardCommand } from "./dashboard.ts";
@@ -83,6 +84,20 @@ export function buildDeps(config: DispatcherConfig, store: StateStore, logger: L
     notifier: createNotifier({ ntfyUrl: config.ntfyUrl, ntfyTopic: config.ntfyTopic }),
     // Evidence store lives alongside dispatcher state; every terminal run records an attempt.
     telemetry: TelemetryStore.open(config.stateDir),
+    // Post-ship acceptance audit (#85). A login shell is needed for the same reason the
+    // launcher uses one: nvm puts the agent CLIs on PATH only for login shells. The prompt
+    // travels on stdin, never argv, because it embeds untrusted issue and diff text.
+    judgeAcceptance: (request) =>
+      judgeAcceptance(
+        (command, args, options) =>
+          run("bash", ["-lc", `${command} "$@"`, "--", ...args], {
+            stdin: options.stdin,
+            timeoutMs: options.timeoutMs,
+            killProcessGroup: options.killProcessGroup,
+            killGraceMs: 10_000,
+          }),
+        request,
+      ),
     // Autoship runner: invokes the configured ship command with a bash login shell so it
     // can source .env and reach nvm/gh, with a generous budget for deploy + health-check.
     // Inert unless config.autoshipCmd is set (autoshipRun self-guards on that).
