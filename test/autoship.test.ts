@@ -56,7 +56,6 @@ function harness(opts: {
   mergeStateStatus?: string;
   isDraft?: boolean;
   reviewDecision?: string | null;
-  diff?: string | null;
   shipResult?: ExecResult;
   repairResult?: GeneratedConflictRepairResult;
   ciSelfHealMaxAttempts?: number;
@@ -71,8 +70,6 @@ function harness(opts: {
   closeIssueOk?: boolean;
   /** PR lifecycle state returned by prState() -- default "open". */
   prState?: "open" | "merged" | "closed" | "unknown";
-  issueBody?: string | null;
-  prText?: { title: string; body: string } | null;
   beforeShip?: AutoshipDeps["beforeShip"];
 }): Harness {
   const shipped: Harness["shipped"] = [];
@@ -112,13 +109,6 @@ function harness(opts: {
         reviewDecision: opts.reviewDecision ?? null,
         mergeCommitOid: "merge789",
       }),
-      prDiff: async () => (opts.diff === undefined ? "" : opts.diff),
-      ...(opts.issueBody !== undefined
-        ? {
-            issueBody: async () => opts.issueBody!,
-            prTitleAndBody: async () => opts.prText ?? { title: "Issue: #1", body: "" },
-          }
-        : {}),
       comment: async (_i, b) => { comments.push(b); return true; },
       addLabel: async (_i, l) => {
         if (opts.addLabelFails) return false;
@@ -172,22 +162,19 @@ function harness(opts: {
 }
 
 describe("autoshipRun — gating", () => {
-  it("repairs instead of shipping when explicit business criteria are omitted", async () => {
-    const h = harness({
-      issueBody: [
-        "## Desired behavior",
-        "- The card-paid workflow must deliver an invoice to the customer",
-        "- Payment-menu labels must describe the new payment flow",
-      ].join("\n"),
-      diff: "The card-paid path does not send an invoice to the customer.",
-      prText: { title: "Implement card payments", body: "Tests pass." },
-    });
+  // #84: a pre-merge acceptance-criteria verdict used to live here and inherited the
+  // merge-phase recovery ladder, so a false positive spent both repair attempts,
+  // escalated to frontier, and exhausted against a correct PR. Ship no longer reads issue
+  // or PR prose at all; residual-outcome checking belongs to the post-ship auditor (#85).
+  it("ships without inspecting issue or PR prose for acceptance criteria", async () => {
+    const h = harness({});
     const r = await autoshipRun(h.deps, succeededRun());
-    assert.equal(r.action, "repair");
-    assert.equal(h.shipped.length, 0);
-    assert.equal(h.closedIssues.length, 0);
-    assert.match(h.comments[0]!, /acceptance criteria need repair/i);
-    assert.match(h.comments[0]!, /Payment-menu labels/i);
+    assert.equal(r.action, "shipped");
+    assert.equal(h.shipped.length, 1);
+    assert.ok(
+      !h.comments.some((c) => /acceptance criteria/i.test(c)),
+      "autoship must not post an acceptance-criteria verdict",
+    );
   });
 
   it("skips when autoship is not configured", async () => {
@@ -345,7 +332,7 @@ describe("autoshipRun — CI self-heal", () => {
   });
 
   it("treats a run that FAILED solely on red CI (exit 0) as a self-heal/ship candidate", async () => {
-    const h = harness({ ci: "pass", diff: "" });
+    const h = harness({ ci: "pass" });
     const r = await autoshipRun(
       h.deps,
       succeededRun({ status: "failed", exitCode: 0, ciSelfHealAttempts: 1 } as Partial<RunRecord>),
@@ -365,7 +352,7 @@ describe("autoshipRun — CI self-heal", () => {
 
 describe("autoshipRun — already merged (#10)", () => {
   it("deploys and verifies an already-merged PR instead of holding", async () => {
-    const h = harness({ prState: "merged", diff: "" });
+    const h = harness({ prState: "merged" });
     const r = await autoshipRun(h.deps, succeededRun());
     assert.deepEqual(r, { action: "shipped" });
     assert.equal(h.shipped.length, 1);
@@ -374,14 +361,14 @@ describe("autoshipRun — already merged (#10)", () => {
   });
 
   it("closes the issue after the already-merged commit is verified in production", async () => {
-    const h = harness({ prState: "merged", diff: "" });
+    const h = harness({ prState: "merged" });
     const r = await autoshipRun(h.deps, succeededRun({ issueNumber: 9 } as Partial<RunRecord>));
     assert.equal(r.action, "shipped");
     assert.deepEqual(h.closedIssues, [9]);
   });
 
   it("evaluates a still-open PR normally (does not short-circuit)", async () => {
-    const h = harness({ prState: "open", diff: "" });
+    const h = harness({ prState: "open" });
     const r = await autoshipRun(h.deps, succeededRun());
     assert.equal(r.action, "shipped");
     assert.equal(h.shipped.length, 1);
@@ -396,7 +383,7 @@ describe("autoshipRun — autoship-everything policy (no data-loss / human-revie
   ].join("\n");
 
   it("ships a destructive PR — there is no data-loss gate; rollback is the net", async () => {
-    const h = harness({ diff: destructiveDiff });
+    const h = harness({});
     const r = await autoshipRun(h.deps, succeededRun());
     assert.equal(r.action, "shipped");
     assert.equal(h.shipped.length, 1);
@@ -409,7 +396,7 @@ describe("autoshipRun — autoship-everything policy (no data-loss / human-revie
       "+++ b/src/x.ts",
       "+export const x = 1;",
     ].join("\n");
-    const h = harness({ diff: cleanDiff });
+    const h = harness({});
     const r = await autoshipRun(h.deps, succeededRun());
     assert.equal(r.action, "shipped");
     assert.equal(h.shipped.length, 1);
@@ -422,7 +409,7 @@ describe("autoshipRun — generated conflict recovery", () => {
     // draft reaching autoship gets promoted rather than parked forever behind a human
     // click. Draft status alone must not block generated-conflict recovery once promoted.
     const cleanDiff = ["diff --git a/src/x.ts b/src/x.ts", "+++ b/src/x.ts", "+export const x = 1;"].join("\n");
-    const h = harness({ mergeStateStatus: "DIRTY", isDraft: true, diff: cleanDiff });
+    const h = harness({ mergeStateStatus: "DIRTY", isDraft: true });
     const r = await autoshipRun(h.deps, succeededRun());
     assert.equal(r.action, "shipped");
     assert.equal(h.promotions, 1);
@@ -438,7 +425,7 @@ describe("autoshipRun — generated conflict recovery", () => {
   });
 
   it("ships even when marking the draft ready reports failure (the ship command re-readies + admin-merges)", async () => {
-    const h = harness({ isDraft: true, markPrReadyOk: false, diff: "" });
+    const h = harness({ isDraft: true, markPrReadyOk: false });
     const r = await autoshipRun(h.deps, succeededRun());
     assert.equal(r.action, "shipped");
     assert.equal(h.shipped.length, 1);
@@ -479,7 +466,7 @@ describe("autoshipRun — generated conflict recovery", () => {
       "+++ b/src/x.ts",
       "+export const x = 1;",
     ].join("\n");
-    const h = harness({ mergeStateStatus: "DIRTY", diff: cleanDiff });
+    const h = harness({ mergeStateStatus: "DIRTY" });
     const r = await autoshipRun(h.deps, succeededRun());
     assert.equal(r.action, "shipped");
     assert.equal(h.repairs, 1);
@@ -516,7 +503,6 @@ describe("autoshipRun — shipping", () => {
   it("durably checkpoints deployment before invoking the ship command", async () => {
     const order: string[] = [];
     const h = harness({
-      diff: "",
       beforeShip: () => {
         order.push("checkpoint");
       },
@@ -532,7 +518,7 @@ describe("autoshipRun — shipping", () => {
   });
 
   it("passes exact SHA and deployment checkout context to the ship command", async () => {
-    const h = harness({ diff: "" });
+    const h = harness({});
     await autoshipRun(h.deps, succeededRun());
     assert.equal(h.shipped[0]!.command, "ship.sh");
     assert.equal(h.shipped[0]!.env.AUTOSHIP_PR_NUMBER, "42");
@@ -546,7 +532,6 @@ describe("autoshipRun — shipping", () => {
 
   it("repairs a deploy failure with the assigned model before escalating", async () => {
     const h = harness({
-      diff: "",
       shipResult: { ok: false, stdout: "", stderr: "deploy blew up", code: 1 },
       ciEscalationModel: "claude-opus-4-8",
     });
@@ -561,7 +546,7 @@ describe("autoshipRun — shipping", () => {
   });
 
   it("escalates deploy only after the assigned-model repair budget is exhausted", async () => {
-    const h = harness({ diff: "", shipResult: { ok: false, stdout: "", stderr: "deploy blew up", code: 1 } });
+    const h = harness({ shipResult: { ok: false, stdout: "", stderr: "deploy blew up", code: 1 } });
     const r = await autoshipRun(
       h.deps,
       succeededRun({ recovery: { deploy: { attempts: 2, escalated: false } } }),
@@ -572,7 +557,7 @@ describe("autoshipRun — shipping", () => {
   });
 
   it("a spent CI escalation does not consume the deploy escalation budget", async () => {
-    const h = harness({ diff: "", shipResult: { ok: false, stdout: "", stderr: "deploy blew up", code: 1 } });
+    const h = harness({ shipResult: { ok: false, stdout: "", stderr: "deploy blew up", code: 1 } });
     const r = await autoshipRun(
       h.deps,
       succeededRun({
@@ -589,7 +574,6 @@ describe("autoshipRun — shipping", () => {
 
   it("reports rollback success only when the ship command explicitly says so", async () => {
     const h = harness({
-      diff: "",
       shipResult: {
         ok: false,
         stdout: "::autoship:: state=deployment_failed_rollback_succeeded health=pass rollback=base123 last_good=base123\n",
@@ -608,7 +592,6 @@ describe("autoshipRun — shipping", () => {
 
   it("parks a detached systemd deployment until production health is verified", async () => {
     const h = harness({
-      diff: "",
       shipResult: {
         ok: true,
         stdout:
@@ -625,7 +608,6 @@ describe("autoshipRun — shipping", () => {
 
   it("does not accept rollback health as successful deployment health on exit zero", async () => {
     const h = harness({
-      diff: "",
       shipResult: {
         ok: true,
         stdout:
@@ -644,14 +626,14 @@ describe("autoshipRun — shipping", () => {
     // Resolves #n) specifically so merging never closes the issue before the deploy that
     // follows is verified. The dispatcher itself must close it explicitly, and only once
     // the ship command confirms success.
-    const h = harness({ diff: "" });
+    const h = harness({});
     const r = await autoshipRun(h.deps, succeededRun({ issueNumber: 366 } as Partial<RunRecord>));
     assert.equal(r.action, "shipped");
     assert.deepEqual(h.closedIssues, [366]);
   });
 
   it("does NOT close the issue when the ship command fails", async () => {
-    const h = harness({ diff: "", shipResult: { ok: false, stdout: "", stderr: "deploy blew up", code: 1 } });
+    const h = harness({ shipResult: { ok: false, stdout: "", stderr: "deploy blew up", code: 1 } });
     const r = await autoshipRun(
       h.deps,
       succeededRun({
@@ -667,7 +649,6 @@ describe("autoshipRun — shipping", () => {
     // A script that reports honestly but, for whatever reason, exits 0 anyway -- the
     // parsed health is what gates closing, not merely reaching the success branch.
     const h = harness({
-      diff: "",
       shipResult: {
         ok: true,
         stdout: "::autoship:: state=shipped health=unknown\n",
@@ -682,7 +663,6 @@ describe("autoshipRun — shipping", () => {
 
   it("repairs instead of closing when a healthy deploy report names a stale merge SHA", async () => {
     const h = harness({
-      diff: "",
       shipResult: {
         ok: true,
         stdout: "::autoship:: state=shipped health=pass merged=stale deployed=stale\n",
@@ -698,7 +678,7 @@ describe("autoshipRun — shipping", () => {
   });
 
   it("repairs instead of claiming success when closing the shipped issue fails", async () => {
-    const h = harness({ diff: "", closeIssueOk: false });
+    const h = harness({ closeIssueOk: false });
     const r = await autoshipRun(h.deps, succeededRun({ issueNumber: 366 } as Partial<RunRecord>));
     assert.equal(r.action, "repair");
     assert.equal(r.action === "repair" ? r.kind : null, "merge");
@@ -707,7 +687,7 @@ describe("autoshipRun — shipping", () => {
   });
 
   it("does not throw if notifier rejects (best-effort)", async () => {
-    const h = harness({ diff: "" });
+    const h = harness({});
     h.deps.notifier.send = async () => { throw new Error("ntfy down"); };
     const r = await autoshipRun(h.deps, succeededRun());
     assert.equal(r.action, "shipped");

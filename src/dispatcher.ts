@@ -90,6 +90,7 @@ import {
 import { appendRunOutputEntry } from "./run-output.ts";
 import { redact } from "./sanitize.ts";
 import {
+  attemptFingerprint,
   decideRecovery,
   updateRecovery,
   phaseReachedFrontier,
@@ -1263,7 +1264,12 @@ async function repairRun(
     phase: "recovering",
     trigger: "resume",
     ...assignedIdentity(run),
-    recovery: updateRecovery(run.recovery, kind, { attempts: attempt }),
+    recovery: updateRecovery(run.recovery, kind, {
+      attempts: attempt,
+      // Record what this attempt was spent on, so the next decision can tell a genuinely
+      // new failure from an identical relaunch that moved nothing.
+      lastFingerprint: attemptFingerprint(run.lastCommit, reason),
+    }),
     ...nextRecoveryLaunch(run),
     exitCode: null,
     failureSummary: reason,
@@ -1706,14 +1712,17 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
         // Defensive fallback: autoship normally maps red CI directly to a recovery
         // outcome. Never let a future caller turn a raw `fail` into a premature hold.
         {
+          const reason = `PR #${run.prNumber ?? "?"} CI is failing.`;
           const decision = decideRecovery(
             run.recovery,
             "ci",
             deps.config.ciSelfHealMaxAttempts,
             undefined,
-            { frontierReached: phaseReachedFrontier(run.recovery, "ci", run.cliModel) },
+            {
+              frontierReached: phaseReachedFrontier(run.recovery, "ci", run.cliModel),
+              fingerprint: attemptFingerprint(run.lastCommit, reason),
+            },
           );
-          const reason = `PR #${run.prNumber ?? "?"} CI is failing.`;
           if (decision.action === "retry") {
             await repairRun(deps, run, "ci", decision.attempt, reason);
             return { relaunched: true };
@@ -1753,6 +1762,7 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
     const reason = `Autoship orchestration threw: ${err instanceof Error ? err.message : String(err)}`;
     const decision = decideRecovery(run.recovery, "merge", deps.config.ciSelfHealMaxAttempts, undefined, {
       frontierReached: phaseReachedFrontier(run.recovery, "merge", run.cliModel),
+      fingerprint: attemptFingerprint(run.lastCommit, reason),
     });
     if (decision.action === "retry") {
       await repairRun(deps, run, "merge", decision.attempt, reason);

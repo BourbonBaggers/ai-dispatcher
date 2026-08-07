@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  attemptFingerprint,
   decideRecovery,
   phaseReachedFrontier,
   phaseRungModel,
@@ -187,4 +188,64 @@ test("unknown: park and recheck without spending budget", () => {
   const decision = decideRecovery(ledger, "agent", 3, "unknown");
   assert.equal(decision.action, "unknown");
   assert(decision.reason.includes("park"));
+});
+
+// #84: on issue #82 the same failure was re-attempted three times against an unchanged
+// head. Identical inputs cannot produce a different result, so a repeat must advance the
+// ladder rather than spend the remaining allowance on provably redundant work.
+test("no-progress guard: an unchanged commit + reason does not spend another attempt", () => {
+  const reason = "PR #83 merge is blocked.";
+  const fingerprint = attemptFingerprint("abc123", reason);
+
+  let ledger = updateRecovery({}, "merge", { attempts: 1, lastFingerprint: fingerprint });
+  const repeated = decideRecovery(ledger, "merge", 2, undefined, {
+    frontierReached: false,
+    fingerprint,
+  });
+  assert.equal(repeated.action, "escalate");
+  assert(repeated.reason.includes("no change"));
+
+  // A genuinely new failure against the same budget still gets its ordinary retry.
+  const moved = decideRecovery(ledger, "merge", 2, undefined, {
+    frontierReached: false,
+    fingerprint: attemptFingerprint("def456", reason),
+  });
+  assert.equal(moved.action, "retry");
+  assert.equal(moved.attempt, 2);
+
+  // A repeat after the frontier rung is exhaustion, not another escalation.
+  ledger = updateRecovery(ledger, "merge", { escalated: true });
+  const afterFrontier = decideRecovery(ledger, "merge", 2, undefined, {
+    frontierReached: true,
+    fingerprint,
+  });
+  assert.equal(afterFrontier.action, "exhausted");
+});
+
+test("no-progress guard: a run that committed nothing twice is still a repeat", () => {
+  const reason = "CI is failing.";
+  const fingerprint = attemptFingerprint(null, reason);
+  const ledger = updateRecovery({}, "ci", { attempts: 1, lastFingerprint: fingerprint });
+  const decision = decideRecovery(ledger, "ci", 3, "test-failure", {
+    frontierReached: false,
+    fingerprint,
+  });
+  assert.equal(decision.action, "escalate");
+});
+
+test("no-progress guard: callers passing no fingerprint keep attempt-count behavior", () => {
+  const ledger = updateRecovery({}, "ci", {
+    attempts: 1,
+    lastFingerprint: attemptFingerprint("abc123", "CI is failing."),
+  });
+  const decision = decideRecovery(ledger, "ci", 3, "transient", { frontierReached: false });
+  assert.equal(decision.action, "retry");
+  assert.equal(decision.attempt, 2);
+});
+
+test("no-progress guard: the previous attempt's identity survives an unrelated patch", () => {
+  const fingerprint = attemptFingerprint("abc123", "CI is failing.");
+  let ledger = updateRecovery({}, "ci", { attempts: 1, lastFingerprint: fingerprint });
+  ledger = updateRecovery(ledger, "ci", { escalated: false });
+  assert.equal(recoveryState(ledger, "ci").lastFingerprint, fingerprint);
 });
