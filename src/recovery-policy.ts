@@ -25,6 +25,12 @@ export interface RecoveryState {
   rung?: RecoveryRung | undefined;
   /** Every model/effort rung attempted by this phase, in launch order. */
   ladder?: readonly RecoveryRung[] | undefined;
+  /**
+   * Fingerprint of the last attempt this phase spent: the delivered commit plus the
+   * failure it produced. Repeating an attempt against identical inputs cannot produce a
+   * different result, so it must not consume budget again — see `decideRecovery`.
+   */
+  lastFingerprint?: string | undefined;
 }
 
 export interface RecoveryRung {
@@ -47,6 +53,24 @@ export type RecoveryDecision =
 export interface RecoveryDecisionOptions {
   /** True when the terminal failure came from the final frontier rung. */
   frontierReached?: boolean;
+  /**
+   * Identity of the work being retried — the delivered commit plus the failure reason.
+   * When it matches the previous attempt for this phase, nothing changed between them
+   * and another identical retry is guaranteed to be wasted; the ladder advances instead.
+   */
+  fingerprint?: string;
+}
+
+/**
+ * The identity of one repair attempt.
+ *
+ * `lastCommit` is the run's delivered head: an agent that ran and committed nothing leaves
+ * it unchanged. Pairing it with the failure reason is what distinguishes "the agent tried
+ * something new and still failed" from "nothing moved" — only the latter is provably
+ * redundant.
+ */
+export function attemptFingerprint(lastCommit: string | null, reason: string): string {
+  return `${lastCommit ?? "no-commit"}::${reason}`;
 }
 
 export function recoveryState(ledger: RecoveryLedger | undefined, kind: RecoveryKind): RecoveryState {
@@ -55,6 +79,9 @@ export function recoveryState(ledger: RecoveryLedger | undefined, kind: Recovery
     attempts: Math.max(0, current?.attempts ?? 0),
     escalated: current?.escalated ?? false,
     lastFailureCategory: current?.lastFailureCategory,
+    // Carried so `updateRecovery` cannot silently drop it when a patch omits it; the
+    // no-progress guard is only durable if the previous attempt's identity survives.
+    lastFingerprint: current?.lastFingerprint,
   };
 }
 
@@ -71,12 +98,22 @@ export function decideRecovery(
   // pass an explicit false until the current model is actually frontier.
   const frontierReached = options.frontierReached ?? true;
 
+  // A retry is only worth budget if something actually changed. When the delivered commit
+  // and the failure are both identical to the previous attempt, the agent relaunched and
+  // moved nothing, so an identical relaunch will fail identically. Advance the ladder
+  // instead of burning the remaining allowance on provably redundant work. Callers that
+  // pass no fingerprint keep the original attempt-count behavior.
+  const repeated = options.fingerprint !== undefined && options.fingerprint === current.lastFingerprint;
+  const retryAvailable = current.attempts < Math.max(0, maxAttempts) && !repeated;
+  const noProgress = (base: string): string =>
+    repeated ? `${base}; the previous attempt produced no change` : base;
+
   // Failure category drives evidence-based recovery decisions
   if (failureCategory) {
     switch (failureCategory) {
       case "transient":
         // Retry transient failures using the same model (doesn't count toward escalation)
-        if (current.attempts < Math.max(0, maxAttempts)) {
+        if (retryAvailable) {
           return {
             action: "retry",
             attempt: current.attempts + 1,
@@ -86,10 +123,10 @@ export function decideRecovery(
         }
         // After exhausting retries on transient failure, escalate capability
         return current.escalated && frontierReached
-          ? { action: "exhausted", reason: "Transient failures persist after escalation" }
+          ? { action: "exhausted", reason: noProgress("Transient failures persist after escalation") }
           : {
               action: "escalate",
-              reason: "Transient failures continue despite retries; escalate for more capability",
+              reason: noProgress("Transient failures continue despite retries; escalate for more capability"),
             };
 
       case "usage-limit":
@@ -108,7 +145,7 @@ export function decideRecovery(
       case "implementation-failure":
       case "test-failure":
         // Deterministic failures need capability escalation, not retries
-        if (current.attempts < Math.max(0, maxAttempts)) {
+        if (retryAvailable) {
           // Try the same model once more before escalating
           return {
             action: "retry",
@@ -120,11 +157,15 @@ export function decideRecovery(
         return current.escalated && frontierReached
           ? {
               action: "exhausted",
-              reason: `${failureCategory === "test-failure" ? "Test" : "Implementation"} failures persist after escalation`,
+              reason: noProgress(
+                `${failureCategory === "test-failure" ? "Test" : "Implementation"} failures persist after escalation`,
+              ),
             }
           : {
               action: "escalate",
-              reason: `${failureCategory === "test-failure" ? "Deterministic test" : "Implementation"} failures; escalate capability`,
+              reason: noProgress(
+                `${failureCategory === "test-failure" ? "Deterministic test" : "Implementation"} failures; escalate capability`,
+              ),
             };
 
       case "requirements-block":
@@ -145,7 +186,7 @@ export function decideRecovery(
   }
 
   // Fallback: legacy behavior when no category is provided
-  if (current.attempts < Math.max(0, maxAttempts)) {
+  if (retryAvailable) {
     return {
       action: "retry",
       attempt: current.attempts + 1,
@@ -154,8 +195,8 @@ export function decideRecovery(
     };
   }
   return current.escalated && frontierReached
-    ? { action: "exhausted", reason: "Recovery exhausted" }
-    : { action: "escalate", reason: "Retries exhausted; escalate" };
+    ? { action: "exhausted", reason: noProgress("Recovery exhausted") }
+    : { action: "escalate", reason: noProgress("Retries exhausted; escalate") };
 }
 
 /**

@@ -47,10 +47,7 @@ import type { GithubPrMergeInfo } from "./github.ts";
 import { modelByCliModel } from "./models.ts";
 import { classifyMissingChecksAfterGrace } from "./ci-readiness.ts";
 import {
-  acceptanceRepairReason,
-  assessAcceptanceEvidence,
-} from "./acceptance-evidence.ts";
-import {
+  attemptFingerprint,
   decideRecovery,
   phaseReachedFrontier,
   type RecoveryDecision,
@@ -74,10 +71,6 @@ export interface AutoshipGithub {
   }>;
   waitForPrChecks(pr: number, timeoutSeconds: number): Promise<"pass" | "pending" | "fail" | "unknown">;
   prMergeInfo(pr: number): Promise<GithubPrMergeInfo | null>;
-  prDiff(pr: number): Promise<string | null>;
-  /** Issue/PR text and diff are optional for older adapters; the real adapter supplies them. */
-  issueBody?(issue: number): Promise<string | null>;
-  prTitleAndBody?(pr: number): Promise<{ title: string; body: string } | null>;
   comment(issue: number, body: string): Promise<boolean>;
   addLabel(issue: number, label: string): Promise<boolean>;
   /** The issue's current labels; retained as part of the GitHub surface for diagnostics. */
@@ -167,25 +160,14 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   }
   const pr = run.prNumber;
 
-  // Green CI and production health cannot prove that the business outcome was attempted.
-  // Check the issue against the actual PR evidence before merge (and again on a merged
-  // rerun) so an explicit omission remains repairable and the issue stays open.
-  const acceptance = await acceptanceEvidence(deps, run, pr);
-  if (acceptance.status === "unknown") {
-    logger.warn("autoship: acceptance evidence could not be read; parking", {
-      issue: run.issueNumber,
-      pr,
-    });
-    return { action: "ci_not_green", state: "unknown" };
-  }
-  if (acceptance.status === "fail") {
-    const reason = [
-      `PR #${pr} does not yet demonstrate every stated business acceptance criterion.`,
-      acceptanceRepairReason(acceptance.evidence),
-    ].join("\n");
-    await github.comment(run.issueNumber, `## Autoship: acceptance criteria need repair\n\n${reason}`).catch(() => false);
-    return recoveryOutcome(deps, run, "merge", reason);
-  }
+  // Acceptance-criteria checking deliberately does NOT live here (#84). A pre-merge
+  // verdict about whether a PR satisfies the issue's stated outcome cannot be reliably
+  // correct, and wiring one into this path gave it the merge-phase recovery ladder: a
+  // false positive spent both repair attempts, escalated to frontier, and exhausted
+  // against a PR that was already correct. A stronger model cannot fix a correct PR, so
+  // that escalation was structurally wasted. Residual-outcome checking belongs to the
+  // post-ship auditor (#85), which files follow-up work instead of blocking delivery.
+  // Do not reintroduce an acceptance gate between here and merge.
 
   // 1b. Already merged? Deploy its exact merge SHA instead of retrying `gh pr merge` or
   // standing down for manual verification. Merge is not shipped; verified production is.
@@ -416,34 +398,6 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   return { action: "shipped" };
 }
 
-async function acceptanceEvidence(
-  deps: AutoshipDeps,
-  run: RunRecord,
-  pr: number,
-): Promise<
-  | { status: "unknown" }
-  | { status: "pass"; evidence: ReturnType<typeof assessAcceptanceEvidence> }
-  | { status: "fail"; evidence: ReturnType<typeof assessAcceptanceEvidence> }
-> {
-  // Compatibility matters for a rolling upgrade: an injected/test adapter without these
-  // reads cannot manufacture a failure, while the production GithubClient always has them.
-  if (!deps.github.issueBody || !deps.github.prDiff) return { status: "pass", evidence: { status: "insufficient", criteria: [], findings: [] } };
-  const [body, diff, prText] = await Promise.all([
-    deps.github.issueBody(run.issueNumber),
-    deps.github.prDiff(pr),
-    deps.github.prTitleAndBody?.(pr) ?? Promise.resolve(null),
-  ]);
-  if (body === null || diff === null || (deps.github.prTitleAndBody && prText === null)) {
-    return { status: "unknown" };
-  }
-  const evidence = assessAcceptanceEvidence(
-    `${run.issueTitle}\n${body}`,
-    `${prText?.title ?? ""}\n${prText?.body ?? ""}\n${diff}`,
-  );
-  if (evidence.status === "fail") return { status: "fail", evidence };
-  return { status: "pass", evidence };
-}
-
 async function recoveryOutcome(
   deps: AutoshipDeps,
   run: RunRecord,
@@ -455,7 +409,10 @@ async function recoveryOutcome(
     kind,
     deps.ciSelfHealMaxAttempts,
     undefined,
-    { frontierReached: phaseReachedFrontier(run.recovery, kind, run.cliModel) },
+    {
+      frontierReached: phaseReachedFrontier(run.recovery, kind, run.cliModel),
+      fingerprint: attemptFingerprint(run.lastCommit, reason),
+    },
   );
   switch (decision.action) {
     case "retry":
