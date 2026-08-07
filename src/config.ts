@@ -3,7 +3,7 @@
  *
  * Repository identity is explicit and validated before anything else runs. There is
  * no hard-coded fallback repository anywhere in the service — a missing or malformed
- * `--repo owner/repository` fails fast with a useful error (issue #320).
+ * `--repo owner/repository` fails fast with a useful error.
  */
 
 import { parseArgs } from "node:util";

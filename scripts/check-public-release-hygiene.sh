@@ -2,9 +2,9 @@
 # Reject public-release hygiene regressions before they reach a ready-for-review PR.
 #
 # The repository already scans secrets separately via gitleaks. This guard covers the
-# lightweight release-quality expectations called out in issue #72: no accidental
-# tracked build artifacts, no committed .env files, no private IP literals, and no old
-# private-repo/path references in shipped source and docs.
+# lightweight release-quality expectations: no accidental tracked build artifacts, no
+# committed .env files, no private IP literals, and no private repository/path references
+# in shipped source and docs.
 set -euo pipefail
 
 ROOT_DIR="${1:-.}"
@@ -69,7 +69,7 @@ shipped_paths=(
 
 for path in "${shipped_paths[@]}"; do
   [[ -e "$path" ]] || continue
-  if scan_for_matches "BourbonBaggers/internal-tools|/internal-tools|services/ai-dispatcher|/packages/|/apps/" "$path"; then
+  if scan_for_matches "private-org/private-service|/private-service|services/ai-dispatcher|/packages/|/apps/" "$path"; then
     die "found private repository/path residue in $path"
   fi
   if ((have_rg)); then

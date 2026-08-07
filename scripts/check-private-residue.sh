@@ -2,8 +2,7 @@
 # Reject private deployment residue from shipped source and docs.
 #
 # The goal is to keep the public checkout free of hard-coded private repository names
-# and private LAN addresses while still allowing tests and historical records to retain
-# context about the old deployment.
+# and private LAN addresses while still allowing tests to exercise the guard.
 set -euo pipefail
 
 ROOT_DIR="${1:-.}"
@@ -46,8 +45,8 @@ scan_for_residue() {
 
 for path in "${INCLUDED_PATHS[@]}"; do
   [[ -e "$path" ]] || continue
-  if scan_for_residue "BourbonBaggers/internal-tools" "$path"; then
-    die "found private residue matching /BourbonBaggers\/internal-tools/ in $path"
+  if scan_for_residue "private-org/private-service" "$path"; then
+    die "found private residue in $path"
   fi
   if ((have_rg)); then
     if rg -n -P --hidden --no-messages \

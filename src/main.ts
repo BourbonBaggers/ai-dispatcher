@@ -3,7 +3,7 @@
  * the dispatcher loop (or a single scan / dry-run).
  *
  * Repository identity is validated and logged before any polling begins, and there is no
- * hard-coded fallback repository anywhere (issue #320) — a missing or malformed `--repo`
+ * hard-coded fallback repository anywhere — a missing or malformed `--repo`
  * exits non-zero with usage text.
  */
 

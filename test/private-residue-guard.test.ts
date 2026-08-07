@@ -25,9 +25,9 @@ async function makeFixture(files: Record<string, string>): Promise<{ cwd: string
 
 test("private residue guard rejects private repository names and private IP literals in shipped files", async () => {
   const fixture = await makeFixture({
-    "README.md": "repo: BourbonBaggers/internal-tools\nhost: 10.1.2.3\n",
-    "test/allowed.txt": "BourbonBaggers/internal-tools\n10.1.2.3\n",
-    "docs/plans/issue-1.md": "BourbonBaggers/internal-tools\n10.1.2.3\n",
+    "README.md": "repo: private-org/private-service\nhost: 10.1.2.3\n",
+    "test/allowed.txt": "private-org/private-service\n10.1.2.3\n",
+    "docs/plans/issue-1.md": "private-org/private-service\n10.1.2.3\n",
   });
 
   try {
@@ -46,8 +46,8 @@ test("private residue guard rejects private repository names and private IP lite
 
 test("private residue guard allows historical and test-only references outside shipped paths", async () => {
   const fixture = await makeFixture({
-    "test/allowed.txt": "BourbonBaggers/internal-tools\n10.1.2.3\n",
-    "docs/plans/issue-1.md": "BourbonBaggers/internal-tools\n10.1.2.3\n",
+    "test/allowed.txt": "private-org/private-service\n10.1.2.3\n",
+    "docs/plans/issue-1.md": "private-org/private-service\n10.1.2.3\n",
   });
 
   try {

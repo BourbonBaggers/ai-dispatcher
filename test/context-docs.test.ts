@@ -19,15 +19,12 @@ test("Claude and Codex load the same canonical agent context", () => {
 test("repository-local Markdown links resolve", () => {
   const markdown = [
     "AGENTS.md",
-    "PLAN-issue-8.md",
     "README.md",
     "ROUTING.md",
-    "docs/plans/issue-10-self-ship-autoship-converge.md",
-    "docs/plans/issue-12-shellcheck-ci-timeout.md",
-    "docs/plans/issue-14-closed-held-runs.md",
-    "docs/plans/issue-4-auto-recover-pr-merge-conflicts.md",
-    "docs/plans/issue-6-prevent-autoship-from-dirty-worktree.md",
-    "docs/shellcheck-ci.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "docs/dogfood-demo-target/README.md",
+    "docs/macos-menu-bar.md",
   ];
 
   for (const file of markdown) {
@@ -45,22 +42,11 @@ test("repository-local Markdown links resolve", () => {
   }
 });
 
-test("historical plans are visibly quarantined from current instructions", () => {
-  const plans = [
-    "PLAN-issue-8.md",
-    "docs/plans/issue-10-self-ship-autoship-converge.md",
-    "docs/plans/issue-12-shellcheck-ci-timeout.md",
-    "docs/plans/issue-14-closed-held-runs.md",
-    "docs/plans/issue-4-auto-recover-pr-merge-conflicts.md",
-    "docs/plans/issue-6-prevent-autoship-from-dirty-worktree.md",
-  ];
-  for (const file of plans) {
-    assert.match(
-      readFileSync(resolve(root, file), "utf8").slice(0, 500),
-      /historical/i,
-      `${file} must identify itself as historical near the top`,
-    );
-  }
+test("private planning artifacts are absent from the public tree", () => {
+  assert.equal(existsSync(resolve(root, "docs/plans")), false);
+  assert.equal(existsSync(resolve(root, "PLAN-issue-8.md")), false);
+  assert.match(readFileSync(resolve(root, ".gitignore"), "utf8"), /PLAN-issue-\*\.md/);
+  assert.match(readFileSync(resolve(root, ".gitignore"), "utf8"), /docs\/plans\//);
 });
 
 test(".env.example covers exactly the environment read by config", () => {

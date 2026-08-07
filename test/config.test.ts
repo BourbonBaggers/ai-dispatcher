@@ -8,12 +8,12 @@ import {
 } from "../src/config.ts";
 
 test("parseRepoSlug accepts a canonical owner/repository", () => {
-  const result = parseRepoSlug("BourbonBaggers/internal-tools");
+  const result = parseRepoSlug("example-org/example-service");
   assert.equal(result.ok, true);
   assert.deepEqual(result.ok && result.value, {
-    owner: "BourbonBaggers",
-    repo: "internal-tools",
-    slug: "BourbonBaggers/internal-tools",
+    owner: "example-org",
+    repo: "example-service",
+    slug: "example-org/example-service",
   });
 });
 
@@ -26,7 +26,7 @@ test("parseRepoSlug rejects a missing repository", () => {
 
 test("parseRepoSlug rejects malformed identifiers", () => {
   const bad = [
-    "internal-tools", // no owner
+    "example-service", // no owner
     "owner/repo/extra", // too many segments
     "owner//repo", // empty middle
     "-owner/repo", // leading hyphen in owner

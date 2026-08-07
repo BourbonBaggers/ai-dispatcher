@@ -46,7 +46,7 @@ test("banner surfaces via an assistant stream-json event", () => {
 });
 
 test("issue text echoed as a tool_result never trips detection", () => {
-  // #245's own body says "usage limit reached" / "out of tokens" — the agent echoes it
+  // The issue body says "usage limit reached" / "out of tokens" — the agent echoes it
   // when it runs `gh issue view`. That lands in a user/tool_result event, never scanned.
   const echoed = JSON.stringify({
     type: "user",

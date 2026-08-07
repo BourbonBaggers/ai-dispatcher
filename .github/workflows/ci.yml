@@ -12,8 +12,7 @@ concurrency:
 
 jobs:
   # This service has zero runtime dependencies: Node 24 strips its TypeScript natively
-  # and it tests with node:test. Its only devDependency is typescript. Nothing here may
-  # import from the old private monorepo — see AGENTS.md.
+  # and it tests with node:test. Its only devDependency is typescript.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -38,22 +37,21 @@ jobs:
           echo "[shellcheck-ci] Installation duration: $((install_end - install_start))s"
           bash scripts/shellcheck-ci.sh
 
-  # Guard the extraction. Re-introducing a dependency on the old private monorepo would
-  # silently un-do the separation and break a clean clone. Fail the build if source or
-  # manifests reference it.
-  no-monorepo-coupling:
+  # Guard the standalone boundary. Fail the build if source or manifests reach outside
+  # the repository's own runtime and package boundaries.
+    no-private-coupling:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Reject imports or paths reaching into the old private monorepo
+      - name: Reject imports or paths reaching outside this repository
         run: |
           if grep -rnE "@internal/|\.\./\.\./(packages|apps)/|services/ai-dispatcher" \
                --include='*.ts' --include='*.mjs' --include='*.json' \
                src bin test package.json 2>/dev/null; then
-            echo "::error::This service must not depend on the old private monorepo."
+            echo "::error::This service must not depend on private repository paths."
             exit 1
           fi
-          echo "No monorepo coupling found."
+          echo "No private coupling found."
 
   gitleaks:
     runs-on: ubuntu-latest

@@ -1,9 +1,8 @@
 /**
  * Durable dispatcher state on disk.
  *
- * The embedded dispatcher used Postgres partial unique indexes to guarantee one agent
- * at a time and restart-safe claims. The standalone service is a single long-running
- * process, so the same guarantees come from two simpler things:
+ * The service is a single long-running process, so restart-safe claims come from two
+ * simple guarantees:
  *   1. a single-instance lock file (a second dispatcher refuses to start), and
  *   2. one JSON state file written atomically (temp file + rename), so a crash mid-write
  *      never corrupts state.

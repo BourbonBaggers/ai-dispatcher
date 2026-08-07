@@ -157,7 +157,7 @@ export function parseAutoshipStatusReport(output: string): AutoshipStatusReport 
 }
 
 /**
- * Compatibility with internal-tools' deployed ship contract, which predates the
+ * Compatibility with the legacy deployed ship contract, which predates the
  * `::autoship::` control line and emits newline-delimited AUTOSHIP_* fields. Parse it
  * explicitly so rollback/unknown states are not flattened into a generic exit failure.
  */

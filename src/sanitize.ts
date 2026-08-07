@@ -1,5 +1,5 @@
 /**
- * Output sanitization + rendering (ported from #188).
+ * Output sanitization + rendering.
  *
  * Everything an agent process prints passes through here before it is logged:
  *   1. redact() — strip anything that looks like a credential, because an agent can

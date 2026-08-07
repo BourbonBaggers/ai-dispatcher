@@ -2,7 +2,7 @@
 # provision-agents.sh — one-time setup of the ai-dispatcher host.
 #
 # Run ON the host that will launch agents. The provisioning host is this service's
-# concern, not a private monorepo's.
+# concern, not a repository-specific deployment's.
 #
 # Installs and verifies everything the dispatcher needs to launch coding agents:
 #   • gh          — GitHub CLI (user-local; the dev server has no passwordless sudo)
@@ -29,7 +29,7 @@ GH_VERSION="2.63.2"
 
 # Configuration may come from documented environment variables or explicit CLI flags.
 # Keep the script reusable for any checkout rather than silently defaulting to the
-# old private deployment's repository and paths.
+# deployment-specific repository and paths.
 REPO_SLUG="${DISPATCHER_REPO:-${DISPATCHER_REPO_SLUG:-}}"
 DISPATCHER_REPO_DIR="${DISPATCHER_REPO_DIR:-}"
 DISPATCHER_WORKTREE_DIR="${DISPATCHER_WORKTREE_DIR:-}"

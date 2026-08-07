@@ -1,5 +1,5 @@
 /**
- * Provider capacity-signal detection and suppression policy (ported from #245/#307,
+ * Provider capacity-signal detection and suppression policy,
  * hardened by the #32 incident: Codex hit a quota-like error with no reset, and the
  * dispatcher applied Claude's documented ~5h rolling-window fallback to it, pausing
  * Codex for 5 hours when the real quota cleared in ~22 minutes).

@@ -1,8 +1,7 @@
 /**
  * Issue selection and queue behaviour.
  *
- * Ported from the embedded dispatcher's selectEligibleIssue (#188/#249/#281). The
- * dispatcher is strictly serial; when no run is active, each scan walks the open
+ * The dispatcher is strictly serial; when no run is active, each scan walks the open
  * issues oldest-first, marks each eligible or ineligible, and chooses the next
  * eligible issue by priority tier (queue-jump, then regular, then technical-debt),
  * preserving oldest-first order within a tier.

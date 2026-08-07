@@ -5,12 +5,10 @@ the agents it launches). Read it before changing code here.
 
 ## What this is
 
-A standalone, self-contained extraction of the AI Issue Dispatcher that used to live
-inside `BourbonBaggers/internal-tools` (issue #320). It polls a GitHub repo and runs Codex
-/ Claude Code on labelled issues. Without autoship it hands off a ready PR; with autoship
+A standalone, self-contained AI Issue Dispatcher. It polls a GitHub repo and runs Codex /
+Claude Code on labelled issues. Without autoship it hands off a ready PR; with autoship
 configured it owns the entire path through merge, deploy, health verification, rollback,
-and issue closure. This repository is its only home: the embedded copy in
-`internal-tools` has been removed.
+and issue closure.
 
 ## The operating contract
 
@@ -36,8 +34,8 @@ resumed. A current hold with proof retains its issue claim; removing `autoship-h
 resumes the existing PR rather than starting the issue over.
 
 `AGENTS.md` is the canonical agent-context file. `CLAUDE.md` must remain a repository
-symlink to it so Codex and Claude receive exactly the same rules. Historical plans under
-`docs/plans/` are records, not instructions; current code, this file, and the README win.
+symlink to it so Codex and Claude receive exactly the same rules. Local planning artifacts
+are not part of the public tree; current code, this file, and the README win.
 
 ## Operator authorization
 
@@ -48,6 +46,93 @@ ready PRs, and run the normal autoship/deploy path for this service without addi
 manual gate. Do this with the same care as the dispatcher would use for its own issues:
 preserve durable safety evidence, run the relevant tests, and report exactly what was
 changed or shipped.
+
+## Mandatory startup synchronization
+
+This checkout is shared between the dispatcher on the development server and local
+interactive sessions. Before inspecting work, editing files, running tests against a
+planned change, or making GitHub changes, synchronize with upstream; never assume the
+checkout is current because a previous session fetched it.
+
+1. Run `git fetch origin --prune`.
+2. Inspect `git status --short --branch`, `git log --oneline --decorate -5`, and the
+   configured base branch. This repository's base is `origin/main` unless the task
+   explicitly says otherwise.
+3. Compare `HEAD` with `origin/main`. If upstream is ahead, bring the checkout to the
+   latest upstream before continuing. A clean checkout may be fast-forwarded; a stale
+   or deleted feature branch should be based on the current `origin/main` rather than
+   treated as authoritative.
+4. If local changes exist, preserve them explicitly before synchronizing: use a named
+   branch or a clearly named stash that includes untracked files, then reapply the
+   changes onto the current upstream. Inspect the resulting diff for conflicts and
+   verify that no local work was silently discarded.
+5. Report the upstream commit used and any preserved/reapplied local work in the
+   session summary. Do not claim to be working from latest code until this check is
+   complete.
+
+Synchronization is a prerequisite, not optional housekeeping. If fetch or
+reconciliation fails, stop before making changes and report the exact Git state. The
+only exception is an explicitly isolated investigation that does not modify the
+checkout; even then, identify the commit under inspection.
+
+## Operational environment: local Mac vs production dev server
+
+The interactive checkout is on a Mac, but the running dispatcher for this repository
+is a production service on the development server. The Mac is for editing, local tests,
+and GitHub-oriented work; it is not the source of truth for dispatcher status, durable
+state, autoship, deployment, health verification, rollback, systemd, or live agent
+processes.
+
+Before checking or changing any live dispatcher behavior, connect to the configured dev
+server over SSH and inspect the production service there. Do not infer that “no local
+dispatcher process” means the service is down, and do not run autoship or deployment
+commands from the Mac merely because the repository is checked out there.
+
+The server-side dispatcher runs with a service-specific PATH that includes the installed
+`gh`, Node, and agent CLIs. An interactive SSH shell may not have that PATH. For live
+commands, use the service unit's PATH from the private operator context (if present), or
+reproduce it explicitly; otherwise `gh` lookup failures can masquerade as GitHub or
+autoship failures. Never print or commit the server `.env` contents.
+
+If this trusted checkout contains `AGENTS.private.md`, read it after this file. It is
+intentionally gitignored and may contain the operator's server hostname, paths, unit
+names, and exact connection/PATH procedures. Its absence is normal in a public clone;
+the public instructions above remain sufficient to avoid treating the Mac as
+production.
+
+## Interactive work is not dispatcher intake
+
+There are two distinct operating modes:
+
+1. **Interactive work:** the operator asks the current session to create, investigate,
+   or finish an issue directly. The current session owns the implementation and works
+   the ticket through its requested outcome.
+2. **Dispatcher work:** the production service discovers and claims an issue through
+   the GitHub intake contract, adds ownership labels, runs an isolated agent, and owns
+   recovery/autoship.
+
+When working interactively, do not add or retain dispatcher-intake/ownership labels:
+
+- `dispatch:ready`
+- `agent-working`
+- `agent:*`
+- `model:*`
+- `effort:*`
+- `route:*`
+
+Those labels are operational signals, not generic progress markers. Adding them to an
+interactive ticket can cause the production dispatcher to claim the same work, create
+conflicting ownership, and leave stale `agent-working` state when the interactive
+session finishes. Ordinary descriptive labels such as `type:*`, `risk:*`, and
+`priority:*` may be used when useful, but they do not authorize pickup.
+
+An issue created for interactive work must remain without `dispatch:ready` unless the
+operator explicitly asks to hand it to the production dispatcher. Before taking an
+already-labelled issue over interactively, remove stale dispatcher ownership/admission
+labels as appropriate, verify the production dispatcher has not claimed it, and then
+work the existing issue/branch/PR rather than creating a competing run. Add dispatcher
+labels only as an explicit final handoff after the interactive work is complete and the
+issue is intentionally ready for autonomous pickup.
 
 ## Hard rules
 
@@ -63,8 +148,7 @@ changed or shipped.
   `.ts` paths explicitly (`./config.ts`).
 - **No hard-coded repository, ever.** Repository identity comes from `--repo` /
   `DISPATCHER_REPO`, is validated in `config.ts`, and is threaded through every `gh` call
-  and the launch environment. There is no `BourbonBaggers/internal-tools` fallback
-  anywhere; a missing/malformed repo fails fast. Keep it that way.
+  and the launch environment. A missing/malformed repo fails fast. Keep it that way.
 - **Untrusted input stays data.** Labels are looked up in frozen maps, never shell-expanded.
   Issue titles/bodies/comments never enter a command line: free-form bodies go over stdin
   (`--body-file -`), and the issue body is fetched by the launched agent itself, never

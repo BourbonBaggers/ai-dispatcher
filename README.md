@@ -19,10 +19,14 @@ The safe, public-facing story is:
 4. The agent either hands back a ready PR or triggers the recovery ladder.
 5. If autoship is configured, verified delivery continues through deployment checks.
 
-The repository is self-contained and no longer embedded in the old private monorepo. The
-only intentional extraction difference is that the target repository is now an explicit,
-required argument with no hard-coded fallback. The working rules for dispatcher-launched
-agents live in [`AGENTS.md`](AGENTS.md); `CLAUDE.md` remains a symlink to it.
+The service is self-contained and targets one explicit repository at a time; there is no
+hard-coded repository fallback. The working rules for dispatcher-launched agents live in
+[`AGENTS.md`](AGENTS.md); `CLAUDE.md` remains a symlink to it.
+
+Trusted operator checkouts may also contain an optional, gitignored
+`AGENTS.private.md` with local deployment and service details. It is not required for a
+public clone and must never be committed. Public behavior and contribution rules belong
+in `AGENTS.md`, this README, and the other tracked documentation.
 
 ## Quickstart
 
@@ -51,7 +55,7 @@ If you want to inspect the running service without mutating anything, use the re
   [`ROUTING.md`](ROUTING.md)
 - Dogfood runbook: [Repeatable dogfood demo target and runbook (#71)](#repeatable-dogfood-demo-target-and-runbook-71)
 - Tests: [Development](#development) and the [`test/`](test) suite
-- Contribution and security guidance: [`AGENTS.md`](AGENTS.md), [`docs/shellcheck-ci.md`](docs/shellcheck-ci.md), and the repository policy notes
+- Contribution and security guidance: [`AGENTS.md`](AGENTS.md) and the repository policy notes
 
 ## Security model
 
@@ -114,21 +118,6 @@ and all other conflicts enter the agent repair ladder.
 The dispatcher is strictly serial: only one agent runs at a time, enforced by a
 single-instance lock plus the fact that each run is driven to completion before the loop
 continues.
-
-## Extraction history
-
-It is extracted from the AI Issue Dispatcher that lived inside the previous private
-monorepo (issues #188/#232/#234/#245/#249/#281/#307). The behaviour is ported before it
-is extended; the one intentional change is that the target repository is now an explicit,
-required argument with **no hard-coded fallback** (issue #320). This package is
-self-contained: nothing here imports from the monorepo.
-
-> **This repository is the dispatcher's only home.** The extraction is complete, and the
-> embedded dispatcher has been removed from the old private monorepo along with its
-> Postgres tables. Do not copy this service back into that monorepo; see AGENTS.md.
-
-> **Agent context is one file.** `AGENTS.md` is canonical and `CLAUDE.md` is a symlink
-> to it. Do not replace the symlink with a divergent Claude-only copy.
 
 ## The label contract
 
@@ -638,8 +627,8 @@ conflicts that the deterministic generated-file repair cannot resolve are handed
 agent rather than held. An already-merged PR is deployed by exact merge SHA and verified
 instead of standing down for manual production verification.
 
-**Self-shipping.** When the dispatcher ships changes to *itself*
-(`BourbonBaggers/ai-dispatcher`), point `DISPATCHER_AUTOSHIP_CMD` at this repo's
+**Self-shipping.** When the dispatcher ships changes to *itself*, point
+`DISPATCHER_AUTOSHIP_CMD` at this repo's
 [`scripts/self-ship.sh`](scripts/self-ship.sh) and set `DISPATCHER_AUTOSHIP_DEPLOYMENT_DIR`
 to the checkout the systemd unit runs *from* (e.g. `~/ai-dispatcher`) so a restart serves
 the merged code. `self-ship.sh` re-gates and merges, then hands the restart to a **detached**
@@ -653,11 +642,8 @@ dispatcher then owns the normal deploy-repair → frontier → exhausted ladder.
 ## Run outcome semantics
 
 A run's terminal `status` is never "succeeded" for merely opening a PR or observing
-green CI at hand-off — those were the actual root cause of the #366 incident: a
-"succeeded" run released its issue claim, so a PR that was open with CI still checking
-(or even already red) got silently re-claimed and rerun by the dispatcher from scratch
-every ~15 minutes, for hours, with no failure ever showing up as a red CI run because
-CI was never the problem — the claim was released too early.
+green CI at hand-off. The issue claim remains durable until the handoff or delivery
+state is itself durable, preventing an unfinished PR from being silently re-claimed.
 
 The terminal statuses:
 
@@ -692,9 +678,8 @@ let alone passed its health check. `autoshipRun` calls `github.closeIssue` itsel
 only after the ship command's own exit code AND its mandatory terminal `::autoship::`
 status line prove the exact merged/deployed SHA is healthy -- not merely on reaching the
 success branch.
-This is what the #366 postmortem calls "merge is not shipped": an issue auto-closed on
-merge read as done while the deploy was still mid-build and prod was still on the
-previous release.
+Merge is not the same as delivery: an issue is closed only after the deployed revision
+passes health verification.
 
 Only the autoship evaluation/finalization path in `dispatcher.ts` writes verified
 `shipped` or exhausted `held`; `exhaustRun` is the single hold/page function. Fresh CI
@@ -724,8 +709,8 @@ re-enter the same finalization path rather than being accepted as production suc
 legacy `shipped` rows written before the recovery ledger are likewise reverified because
 older self-restarts could persist that word before issue closure survived.
 
-No database. The embedded version's Postgres claims are replaced by the lock (one process)
-plus serial execution (one run driven to completion at a time).
+No database is required. The lock plus serial execution provide one durable claim at a
+time, with recovery state stored atomically on disk.
 
 ## Stopping / interrupting
 
@@ -748,8 +733,3 @@ npm install       # only devDependency is typescript (for typecheck)
 npm run typecheck # tsc --noEmit
 npm test          # node --test over test/**/*.test.ts (zero runtime deps)
 ```
-
-## Cutover from the embedded dispatcher
-
-The cutover is complete. Its runbook remains in the historical archive as a record of
-the migration.

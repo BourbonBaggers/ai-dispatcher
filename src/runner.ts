@@ -1,5 +1,5 @@
 /**
- * Agent process supervision (ported from the embedded dispatcher's runner.ts, #188).
+ * Agent process supervision.
  *
  * The standalone service runs DIRECTLY on the dev server, so there is no SSH hop: the
  * runner spawns the bundled `dispatch-agent.sh` with an argv ARRAY — no shell string is
@@ -90,7 +90,7 @@ export function dispatchAgentArgs(scriptPath: string, spec: AgentLaunchSpec): st
 /**
  * The environment the bundled script requires. Repository identity is passed here
  * (never argv) and is mandatory — the script fails fast if `DISPATCHER_REPO` is empty,
- * so there is no hard-coded repository anywhere in the pipeline (issue #320).
+ * so there is no hard-coded repository anywhere in the pipeline.
  */
 export function dispatchAgentEnv(
   config: DispatcherConfig,
@@ -165,7 +165,7 @@ export type RunOutcome =
  *   8. non-zero exit (failed)
  *
  * None of statuses 5-7 are ever "succeeded" outright: that word used to cover all three
- * (see #366) and, because a "succeeded" run released its issue claim, a PR that was
+ * Because a completed run once released its issue claim too early, a PR that was
  * merely open with CI still pending (or even red) got silently re-claimed and rerun by
  * the dispatcher from scratch every ~15 minutes. `ci_pending`/`ci_failed` now keep the
  * claim; only a confirmed ship (or an intentional `held`) ever lets the issue go.

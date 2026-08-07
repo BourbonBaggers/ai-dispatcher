@@ -1,8 +1,8 @@
 {
   "name": "ai-dispatcher",
   "version": "0.1.0",
-  "private": true,
   "description": "Standalone AI issue dispatcher — polls a GitHub repo and runs Codex / Claude Code on labelled issues.",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "ai-dispatcher": "bin/ai-dispatcher.mjs"

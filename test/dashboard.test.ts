@@ -130,12 +130,12 @@ test("parseEnvironmentFile reads inert dispatcher assignments", () => {
   assert.deepEqual(
     parseEnvironmentFile(`
 # comment
-DISPATCHER_REPO=BourbonBaggers/internal-tools
+DISPATCHER_REPO=example-org/example-service
 DISPATCHER_STATE_DIR="/home/jayk1/ai-dispatcher/state"
 ignored line
 `),
     {
-      DISPATCHER_REPO: "BourbonBaggers/internal-tools",
+      DISPATCHER_REPO: "example-org/example-service",
       DISPATCHER_STATE_DIR: "/home/jayk1/ai-dispatcher/state",
     },
   );
@@ -151,10 +151,10 @@ Description=AI Issue Dispatcher (standalone)
 WorkingDirectory=%h/ai-dispatcher
 EnvironmentFile=%h/ai-dispatcher/.env
 Environment=PATH=%h/bin:/usr/bin
-ExecStart=%h/.nvm/versions/node/v24.18.0/bin/node bin/ai-dispatcher.mjs --repo BourbonBaggers/internal-tools --interval 900
+ExecStart=%h/.nvm/versions/node/v24.18.0/bin/node bin/ai-dispatcher.mjs --repo example-org/example-service --interval 900
 `,
   );
-  assert.equal(parsed.repo, "BourbonBaggers/internal-tools");
+  assert.equal(parsed.repo, "example-org/example-service");
   assert.equal(parsed.intervalSeconds, 900);
   assert.match(parsed.workingDirectory ?? "", /ai-dispatcher$/);
   assert.match(parsed.environmentFile ?? "", /ai-dispatcher\/\.env$/);

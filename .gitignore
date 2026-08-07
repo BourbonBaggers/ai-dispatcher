@@ -3,9 +3,18 @@ node_modules/
 
 # Local secrets and runtime state — never commit
 .env
+AGENTS.private.md
 state/
 *.log
 
 # Build output (the service runs TypeScript directly on Node 24)
 dist/
 macos/DispatcherStatusBar/build/
+
+# Local planning and operator scratch files — not part of the public release
+PLAN-issue-*.md
+docs/plans/
+docs/issue-template.md
+docs/plan-template.md
+docs/shellcheck-ci.md
+ccquota/

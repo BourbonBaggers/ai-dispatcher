@@ -7,8 +7,7 @@
  * unknown label therefore cannot smuggle an argument through; it just fails to
  * resolve and the issue is skipped with a visible reason.
  *
- * Ported verbatim from the embedded dispatcher's config.ts (#188/#234/#249/#281) so
- * the label-driven contract #319 extends is preserved exactly. As of #319 the
+ * The label-driven contract is intentionally explicit and stable. The
  * `model:*` allowlist is *derived* from the data-driven registry in `models.ts` rather
  * than hand-maintained here, so model configuration lives in one place.
  */
@@ -188,7 +187,7 @@ export const RESUMABLE_STATUSES = ["interrupted", "timed_out", "token_exhausted"
 /**
  * Statuses parked on a PR whose CI has not resolved yet. Unlike RESUMABLE_STATUSES, the
  * next scan does NOT relaunch the agent — it only re-checks CI (`recheckParkedRun`,
- * dispatcher.ts). This is the fix for the #366 class of bug: a run that produced a PR
+ * dispatcher.ts). This prevents a run that produced a PR
  * with CI still pending used to be marked "succeeded" outright, releasing the claim, so
  * the very next scan re-claimed the issue and reran the FULL agent from scratch even
  * though nothing had changed and CI just hadn't finished yet.
@@ -228,7 +227,7 @@ export const CLAIMING_STATUSES = [
 ] as const;
 
 /**
- * Run outcome semantics (ported from the #366 incident postmortem): a run is `shipped`
+ * Run outcome semantics: a run is `shipped`
  * ONLY when autoship has actually merged the PR and completed the deploy — never merely
  * for opening a PR or observing green CI at agent hand-off, both of which used to be
  * called "succeeded" and release the claim, letting the dispatcher re-run the same issue

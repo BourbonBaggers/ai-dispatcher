@@ -506,7 +506,7 @@ test("reconcile kills a verified orphan launcher before making its run resumable
 });
 
 
-// ── recheckParkedRun / evaluateAutoship (#366: park on CI-pending, don't relaunch) ──
+// ── recheckParkedRun / evaluateAutoship: park on CI-pending, don't relaunch ──
 
 function autoshipConfig(overrides: Partial<DispatcherConfig> = {}): DispatcherConfig {
   return {

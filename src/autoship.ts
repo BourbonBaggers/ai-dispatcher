@@ -4,10 +4,10 @@
  * This is the orchestration layer. It decides WHETHER to ship and enforces the two
  * repo-agnostic rails; the repo-specific act of merging and deploying is delegated to a
  * per-instance shell command (`DISPATCHER_AUTOSHIP_CMD`), because "how do I ship" differs
- * per target (internal-tools runs deploy.sh; the dispatcher restarts its own unit).
+ * per target (one target may run deploy.sh; another may restart its own unit).
  *
  * The order of checks is the whole point, and every one of them was paid for in the
- * internal-tools incident that took production down for 40 hours:
+ * prior production failures:
  *
  *   1. A clean agent exit (exitCode 0) that opened a PR is a candidate. So are
  *      `pr_ready` and `ci_pending` runs descended from a later provider-capacity exit:
@@ -388,7 +388,7 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
 
   // Close the issue HERE, and only here: PR bodies never carry a GitHub auto-close
   // keyword (Closes/Fixes/Resolves #n), specifically so merging never closes an issue
-  // before its deploy is verified (#366 -- an issue auto-closed on merge while its
+  // before its deploy is verified while its
   // deploy was still mid-build, prod still on the previous release). The ship command's
   // exit code alone is not quite enough to trust: classifyShipResult can still report
   // health "fail"/"unknown" on a structured status line even when the process exited 0

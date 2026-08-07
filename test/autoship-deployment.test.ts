@@ -103,7 +103,7 @@ describe("autoship status report parsing", () => {
     assert.equal(report?.state, "deployment_failed_rollback_failed");
   });
 
-  it("parses the internal-tools AUTOSHIP_STATUS contract", () => {
+  it("parses the legacy AUTOSHIP_STATUS contract", () => {
     assert.deepEqual(
       parseLegacyAutoshipStatusReport(
         [

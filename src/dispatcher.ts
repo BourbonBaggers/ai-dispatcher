@@ -1,9 +1,8 @@
 /**
- * The scan/claim/launch/resume/reconcile loop (ported from the embedded dispatcher's
- * service.ts, #188/#232/#245/#249/#281).
+ * The scan/claim/launch/resume/reconcile loop.
  *
- * The standalone service is a single long-running process, so concurrency control is far
- * simpler than the embedded version's Postgres partial-unique-index claims: the state
+ * The standalone service is a single long-running process, so concurrency control is
+ * provided by the state store's single-instance lock:
  * store's single-instance lock guarantees one dispatcher, and `launchRun` runs the agent
  * to completion before the loop continues — the dispatcher is strictly serial by
  * construction, so no in-flight claim race is possible.

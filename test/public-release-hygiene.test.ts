@@ -31,7 +31,7 @@ async function makeFixture(files: Record<string, string>): Promise<{ cwd: string
 
 test("public release hygiene guard rejects tracked build artifacts, .env files, private IPs, and private residue", async () => {
   const fixture = await makeFixture({
-    "README.md": "repo: BourbonBaggers/internal-tools\nhost: 10.1.2.3\n",
+    "README.md": "repo: private-org/private-service\nhost: 10.1.2.3\n",
     "SECURITY.md": "Report privately.\n",
     "CONTRIBUTING.md": "Use Node 24.\n",
     "LICENSE": "MIT\n",

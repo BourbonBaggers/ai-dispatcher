@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dispatch-agent.sh — run one coding agent against one GitHub issue, on the dev server.
 #
-# The standalone dispatcher (issue #320) runs this DIRECTLY on the dev server — there is
+# The standalone dispatcher runs this DIRECTLY on the service host — there is
 # no SSH hop, because the dispatcher process itself already runs where the agents run.
 # It accepts only validated scalars — never issue text. The agent reads the issue itself
 # with `gh` once it is running, so untrusted GitHub content never appears in a command
@@ -12,7 +12,7 @@
 #     --branch issue-42-some-slug --mode start --max-minutes 90
 #
 # Repository identity is supplied by the environment and is REQUIRED — there is no
-# hard-coded fallback repository anywhere (issue #320):
+# hard-coded fallback repository anywhere:
 #   DISPATCHER_REPO         owner/repository (required; fail fast if unset)
 #   DISPATCHER_REPO_DIR     pristine mirror clone kept on origin/main (required)
 #   DISPATCHER_WORKTREE_DIR parent dir for per-run checkouts (required)
@@ -54,7 +54,7 @@ fi
 
 die() { echo "dispatch-agent: $1" >&2; exit 64; }
 
-# ─── Repository identity — required, no fallback (issue #320) ─────────────────
+# ─── Repository identity — required, no fallback ──────────────────────────────
 REPO_SLUG="${DISPATCHER_REPO:-${DISPATCHER_REPO_SLUG:-}}"
 [[ -n "$REPO_SLUG" ]] || die "DISPATCHER_REPO (owner/repository) is required — there is no default repository"
 [[ "$REPO_SLUG" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,38})?/[A-Za-z0-9._-]{1,100}$ ]] \

@@ -418,7 +418,7 @@ describe("autoshipRun — autoship-everything policy (no data-loss / human-revie
 
 describe("autoshipRun — generated conflict recovery", () => {
   it("promotes a draft PR (no human-review-required label) and still evaluates conflict recovery normally", async () => {
-    // Policy change (post-#366): agents open ready-for-review PRs by default now, so a
+    // Agents open ready-for-review PRs by default now, so a
     // draft reaching autoship gets promoted rather than parked forever behind a human
     // click. Draft status alone must not block generated-conflict recovery once promoted.
     const cleanDiff = ["diff --git a/src/x.ts b/src/x.ts", "+++ b/src/x.ts", "+export const x = 1;"].join("\n");
@@ -639,7 +639,7 @@ describe("autoshipRun — shipping", () => {
     assert.deepEqual(h.closedIssues, []);
   });
 
-  it("closes the issue ONLY after a shipped, health-pass deploy -- never on merge alone (#366)", async () => {
+  it("closes the issue ONLY after a shipped, health-pass deploy -- never on merge alone", async () => {
     // Regression test: PR bodies never carry a GitHub auto-close keyword (Closes/Fixes/
     // Resolves #n) specifically so merging never closes the issue before the deploy that
     // follows is verified. The dispatcher itself must close it explicitly, and only once

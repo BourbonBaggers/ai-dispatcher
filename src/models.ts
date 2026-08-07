@@ -2,10 +2,8 @@
  * The curated model/provider registry — the authoritative model catalog owned by the
  * standalone dispatcher.
  *
- * The standalone service must remain installable and typecheckable without the
- * `internal-tools` monorepo, so this catalog is self-contained and has no external
- * imports. The embedded dispatcher that once mirrored it under `packages/types` has
- * been removed; this file is now the single authority for the model catalog.
+ * This catalog is self-contained and has no external imports. It is the single
+ * authority for the model catalog.
  */
 
 export const MODEL_TIERS = [
