@@ -1,5 +1,5 @@
 {
-  "name": "ai-dispatcher",
+  "name": "@bourbonbaggers/ai-dispatcher",
   "version": "0.1.0",
   "description": "Turn plain-language ideas into verified production changes with Codex or Claude Code.",
   "license": "MIT",

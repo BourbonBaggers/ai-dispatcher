@@ -91,7 +91,7 @@ For an installed CLI, initialize the dispatcher once, check the prerequisites, a
 run it:
 
 ```bash
-npm install --global ai-dispatcher
+npm install --global @bourbonbaggers/ai-dispatcher
 ai-dispatcher init --repo owner/repo
 ai-dispatcher doctor
 ai-dispatcher --once
