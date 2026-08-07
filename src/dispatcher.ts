@@ -1319,7 +1319,7 @@ function failureCategoryFor(kind: RecoveryKind): FailureCategory {
  * The ladder is reconstructed on each use (not serialized), enabling progressive escalation
  * within a provider before frontier handoff.
  */
-function prepareRecoveryWithLadder(run: RunRecord, kind: RecoveryKind): RunRecord["recovery"] {
+export function prepareRecoveryWithLadder(run: RunRecord, kind: RecoveryKind): RunRecord["recovery"] {
   const currentModel = modelByCliModel(run.cliModel);
   if (!currentModel) return run.recovery ?? {};
 

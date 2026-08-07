@@ -22,6 +22,7 @@ import {
   checkpointLadderRun,
   planQuotaHandoff,
   MAX_AUTO_RESUMES,
+  prepareRecoveryWithLadder,
   type DispatcherDeps,
 } from "../src/dispatcher.ts";
 import { StateStore } from "../src/state.ts";
@@ -29,6 +30,8 @@ import { createLogger } from "../src/logger.ts";
 import type { RunRecord } from "../src/state.ts";
 import type { DispatcherConfig } from "../src/config.ts";
 import { assessCapacity } from "../src/capacity.ts";
+import { buildModelLadder, modelByLabel, modelByCliModel } from "../src/models.ts";
+import { updateRecovery } from "../src/recovery-policy.ts";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "ai-dispatcher-loop-"));
@@ -1418,5 +1421,69 @@ test("recheckHeldRun on an un-held already-merged PR deploys and verifies it", a
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── model ladder recovery (#75) ────────────────────────────────────────────────────
+
+test("prepareRecoveryWithLadder initializes recovery state with model ladder", () => {
+  const haiku = modelByLabel("model:claude-haiku-4.5")!;
+  const r = run({ cliModel: "claude-haiku-4-5-20251001", modelLabel: haiku.modelLabel });
+  
+  const recovery = prepareRecoveryWithLadder(r, "agent");
+  const agentRecovery = recovery.agent;
+  
+  assert.ok(agentRecovery, "agent recovery should be initialized");
+  assert.ok(agentRecovery.ladder, "ladder should be present");
+  assert.equal(agentRecovery.ladderIndex, 0, "should start at index 0");
+  assert.ok(agentRecovery.ladder.length >= 2, "Claude ladder should have multiple rungs");
+});
+
+test("prepareRecoveryWithLadder preserves existing recovery state", () => {
+  const sonnet = modelByLabel("model:claude-sonnet-5")!;
+  const r = run({
+    cliModel: "claude-sonnet-5",
+    modelLabel: sonnet.modelLabel,
+    recovery: { agent: { attempts: 2, escalated: false, ladderIndex: 1 } },
+  });
+  
+  const recovery = prepareRecoveryWithLadder(r, "agent");
+  const agentRecovery = recovery.agent;
+  
+  assert.equal(agentRecovery?.attempts, 2, "existing attempts preserved");
+  assert.equal(agentRecovery?.ladderIndex, 1, "existing ladder index preserved");
+  assert.ok(agentRecovery?.ladder, "ladder added/updated");
+});
+
+test("model ladder climbing increments ladder index in recovery state", () => {
+  const haiku = modelByLabel("model:claude-haiku-4.5")!;
+  const ladder = buildModelLadder(haiku);
+  
+  let recovery = { agent: { attempts: 1, escalated: false, ladder, ladderIndex: 0 } };
+  assert.equal(recovery.agent.ladderIndex, 0);
+  
+  // Simulate climbing to next rung
+  recovery = updateRecovery(recovery, "agent", { ladderIndex: 1 });
+  assert.equal(recovery.agent?.ladderIndex, 1);
+  assert.equal(ladder[1]?.modelLabel, "model:claude-sonnet-5");
+});
+
+test("model ladder climbing respects provider boundaries", () => {
+  // Claude ladder should only include Claude models
+  const haiku = modelByLabel("model:claude-haiku-4.5")!;
+  const ladder = buildModelLadder(haiku);
+  
+  for (const model of ladder) {
+    assert.equal(model.provider, "anthropic", `all models should be Claude (${model.modelLabel})`);
+    assert.equal(model.frontier, false, `ladder should not include frontier models`);
+  }
+  
+  // OpenAI ladder should only include OpenAI models
+  const mini = modelByLabel("model:gpt-5.4-mini")!;
+  const openaiLadder = buildModelLadder(mini);
+  
+  for (const model of openaiLadder) {
+    assert.equal(model.provider, "openai", `all models should be OpenAI (${model.modelLabel})`);
+    assert.equal(model.frontier, false, `ladder should not include frontier models`);
   }
 });
