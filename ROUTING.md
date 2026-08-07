@@ -349,6 +349,63 @@ Only genuinely invalid/revoked credentials across all providers, absence of any 
 capable configured model, an explicit invalid human override, or the existing fully spent
 repair → frontier → durable exhaustion path can require an operator.
 
+## Recovery routing and model ladder climbing (#75)
+
+When a repair attempt fails, the dispatcher uses progressive model escalation instead of
+retrying the same model exhaustively. Each recovery phase (agent, CI, merge, deploy) has a
+per-provider model ladder defined by ascending tier rank.
+
+### Model ladder construction
+
+A ladder for a phase starts with the assigned model and includes all higher non-frontier
+models from the same provider, ordered by tier:
+
+| Provider | Ladder (example) |
+|---|---|
+| Anthropic (Claude) | `claude-haiku` → `claude-sonnet` → (frontier: `claude-opus`) |
+| OpenAI (Codex) | `gpt-5.4-mini` → `gpt-5.6-luna` → `gpt-5.6-terra` → (frontier: `gpt-5.5` / `gpt-5.6-sol`) |
+| OpenCode (fallback) | `deepseek-v4-flash` → `minimax-m3` → `glm-5.2` → (frontier: `kimi-k3`) |
+
+Frontier and ultra-frontier models do not appear in the ladder itself; they are the final
+escalation after the ladder is exhausted.
+
+### Recovery decision flow
+
+For each failure in a phase:
+
+1. If the assigned model has retries remaining, retry the same model.
+2. If same-model retries are exhausted and a next ladder rung exists, escalate to that model.
+3. Repeat step 2 (ladder climbing) until the ladder is exhausted.
+4. After ladder exhaustion, attempt the configured frontier model exactly once.
+5. Failure after frontier escalation is durable exhaustion; hold and page.
+
+Ladder climbing is evidence-driven by failure category (transient, deterministic,
+context/capacity). Transient failures retry the same model within its allocated budget;
+deterministic (test, implementation) failures climb immediately after retries. Context
+and capacity exhaustion do not retry the same model; they climb directly.
+
+### Effort on ladder rungs
+
+Effort is determined by the ladder rung's tier, not a blanket maximum:
+
+- Haiku (tiny) → effort:low or effort:medium (same route)
+- Sonnet (capable) → effort:medium or effort:high (same route)
+- Opus (frontier) → effort:xhigh (frontier reserve)
+
+This preserves frontier effort for only the final reserve rung, preventing unnecessary
+spend on intermediate capabilities. Effort is independent per phase, so frontier use in
+CI does not promote agent repair to frontier effort.
+
+### Durable state and recovery resumption
+
+Recovery state tracks:
+- Attempts on the current rung
+- Ladder index (which rung we're on)
+- Escalated flag (frontier reached)
+
+On resumption after interruption, the ladder is reconstructed from the current model.
+Each attempt is recorded in telemetry with its model, effort, and rung progression.
+
 ## Priority and future providers
 
 `priority:queue-jump`, `priority:normal`, and `priority:background` control order only.
