@@ -249,3 +249,77 @@ test("no-progress guard: the previous attempt's identity survives an unrelated p
   ledger = updateRecovery(ledger, "ci", { escalated: false });
   assert.equal(recoveryState(ledger, "ci").lastFingerprint, fingerprint);
 });
+
+// #87: `updateRecovery` spreads `recoveryState` before applying its patch, so any field
+// that function drops is erased by every patch that does not restate it. `rung` decides
+// whether a phase already made its frontier attempt, and `ladder` is the launch-order
+// record the progressive climb (#81) depends on.
+test("a rung survives a later patch that does not restate it", () => {
+  let ledger = updateRecovery({}, "ci", {
+    attempts: 1,
+    rung: {
+      modelLabel: "model:claude-sonnet-5",
+      cliModel: "claude-sonnet-5",
+      effortLabel: "effort:high",
+      reason: "escalate one tier",
+      at: 1,
+    },
+  });
+
+  ledger = updateRecovery(ledger, "ci", { attempts: 2 });
+  assert.equal(ledger.ci!.rung!.cliModel, "claude-sonnet-5");
+  assert.equal(phaseRungModel(ledger, "ci", "claude-haiku-4-5-20251001")?.cliModel, "claude-sonnet-5");
+});
+
+test("the ladder accumulates one entry per rung, in launch order", () => {
+  let ledger = updateRecovery({}, "agent", {
+    attempts: 1,
+    rung: {
+      modelLabel: "model:claude-haiku-4.5",
+      cliModel: "claude-haiku-4-5-20251001",
+      effortLabel: "effort:medium",
+      reason: "assigned model",
+      at: 1,
+    },
+  });
+  ledger = updateRecovery(ledger, "agent", {
+    rung: {
+      modelLabel: "model:claude-sonnet-5",
+      cliModel: "claude-sonnet-5",
+      effortLabel: "effort:high",
+      reason: "escalate one tier",
+      at: 2,
+    },
+  });
+  ledger = updateRecovery(ledger, "agent", {
+    rung: {
+      modelLabel: "model:claude-opus-4.8",
+      cliModel: "claude-opus-4-8",
+      effortLabel: "effort:max",
+      reason: "final frontier attempt",
+      at: 3,
+    },
+  });
+
+  assert.deepEqual(
+    ledger.agent!.ladder!.map((rung) => rung.cliModel),
+    ["claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-4-8"],
+  );
+  // The frontier rung is now the current one, so this phase is genuinely exhausted.
+  assert.equal(phaseReachedFrontier(ledger, "agent", "claude-haiku-4-5-20251001"), true);
+});
+
+test("a phase that has not reached frontier is not marked frontier-complete by an unrelated patch", () => {
+  let ledger = updateRecovery({}, "deploy", {
+    attempts: 1,
+    rung: {
+      modelLabel: "model:claude-haiku-4.5",
+      cliModel: "claude-haiku-4-5-20251001",
+      effortLabel: "effort:medium",
+      reason: "assigned model",
+      at: 1,
+    },
+  });
+  ledger = updateRecovery(ledger, "deploy", { lastFailureCategory: "test-failure" });
+  assert.equal(phaseReachedFrontier(ledger, "deploy", "claude-haiku-4-5-20251001"), false);
+});

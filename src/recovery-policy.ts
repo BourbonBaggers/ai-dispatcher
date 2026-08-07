@@ -79,8 +79,15 @@ export function recoveryState(ledger: RecoveryLedger | undefined, kind: Recovery
     attempts: Math.max(0, current?.attempts ?? 0),
     escalated: current?.escalated ?? false,
     lastFailureCategory: current?.lastFailureCategory,
-    // Carried so `updateRecovery` cannot silently drop it when a patch omits it; the
-    // no-progress guard is only durable if the previous attempt's identity survives.
+    // Every field below must be carried, because `updateRecovery` spreads this result
+    // before applying its patch: anything omitted here is silently erased by any patch
+    // that does not restate it. `rung` decides whether a phase has already made its
+    // frontier attempt (`phaseReachedFrontier`), and dropping it re-opened escalation for
+    // a phase that had already climbed. `ladder` is the launch-order record of every rung
+    // this phase tried, and reading it as `undefined` reset it to a single entry on every
+    // update. `lastFingerprint` is what makes the no-progress guard durable (#87).
+    rung: current?.rung,
+    ladder: current?.ladder,
     lastFingerprint: current?.lastFingerprint,
   };
 }
