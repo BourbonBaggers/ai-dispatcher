@@ -43,6 +43,17 @@ test("::result:: carries a trusted closed-issue retirement disposition", () => {
     "::result:: exit=0 pr= commit= plan= commits=0 ci=none disposition=abandoned",
   );
   assert.equal(parsed?.result?.disposition, "abandoned");
+
+  const satisfied = parseControlLine(
+    "::result:: exit=0 pr= commit= plan= commits=0 ci=none disposition=already-satisfied",
+  );
+  assert.equal(satisfied?.result?.disposition, "already-satisfied");
+
+  // An unrecognized disposition must fall back to normal, never to a trusted one.
+  const bogus = parseControlLine(
+    "::result:: exit=0 pr= commit= plan= commits=0 ci=none disposition=whatever",
+  );
+  assert.equal(bogus?.result?.disposition, "normal");
 });
 
 test("ordinary output is not mistaken for a control line", () => {

@@ -245,6 +245,25 @@ test("a pre-launch closed issue retires without spending the repair ladder", () 
   assert.equal(outcome.exitCode, 0);
 });
 
+// The boomerang guard for audit follow-ups (#85). A phantom follow-up is filed on a
+// heuristic verdict, so an agent correctly finding nothing to do is an EXPECTED outcome —
+// and by exit evidence alone it is identical to the "agent gave up" failure directly
+// above. Without this branch a wrong audit verdict still reaches the recovery ladder and
+// eventually pages, just by a longer route.
+test("an already-satisfied disposition retires cleanly instead of entering the ladder", () => {
+  const outcome = classifyRunOutcome(
+    signals({
+      resultDisposition: "already-satisfied",
+      resultExit: 0,
+      resultCommits: 0,
+      resultCi: "none",
+    }),
+  );
+  assert.equal(outcome.status, "abandoned");
+  assert.equal(outcome.exitCode, 0);
+  assert.match(outcome.summary ?? "", /already satisfied/i);
+});
+
 test("a clean exit with commits but red CI is ci_failed, not a plain failure — CI drives the self-heal ladder", () => {
   const outcome = classifyRunOutcome(signals({ resultCi: "fail" }));
   assert.equal(outcome.status, "ci_failed");

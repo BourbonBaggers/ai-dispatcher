@@ -33,6 +33,27 @@ Legacy `held` records without durable exhaustion proof are automatically un-held
 resumed. A current hold with proof retains its issue claim; removing `autoship-held`
 resumes the existing PR rather than starting the issue over.
 
+## Delivered work is audited, not gated
+
+Acceptance criteria are checked **after** an issue ships, never before merge. A verdict
+about whether a PR satisfies an issue's stated outcome cannot be reliably correct, and a
+pre-merge version of this check spent both repair attempts, escalated to frontier, and
+exhausted against a correct PR (#84). Nothing resembling an acceptance gate may be
+reintroduced between PR-ready and merge.
+
+The post-ship audit (#85) instead turns a finding into queued work: it files a follow-up
+issue carrying the unaddressed criteria and lets the parent close normally, linking the
+follow-up. A wrong verdict therefore costs one redundant issue, not an operator page.
+Three bounds keep that true and must not be relaxed:
+
+- Only a **confident, cited** omission files work. `unclear` files nothing, and every
+  judge failure — unavailable, timed out, unparseable — degrades to `unclear`.
+- Generation is **depth-capped**. A follow-up is itself auditable; depth beyond the cap
+  notifies instead of filing. That is the only operator notification this design creates.
+- An agent that finds an audit follow-up's work already done reports
+  `disposition=already-satisfied` on the trusted control channel and retires cleanly. That
+  outcome is expected, not a failure, and must never enter the recovery ladder.
+
 `AGENTS.md` is the canonical agent-context file. `CLAUDE.md` must remain a repository
 symlink to it so Codex and Claude receive exactly the same rules. Local planning artifacts
 are not part of the public tree; current code, this file, and the README win.
@@ -221,6 +242,10 @@ src/
   runner.ts               launch argv/env + terminal-state classification + supervision
   autoship-deployment.ts  structured deploy/health/rollback result classification
   autoship.ts             CI/merge/deploy orchestration; no hold before exhaustion
+  acceptance-criteria.ts  deterministic checklist extraction from an issue (pure, #85)
+  acceptance-audit.ts     verdict parsing + file/dedupe/depth-cap policy (pure, #85)
+  acceptance-judge.ts     one-shot cheap-model omission judge; fails to `unclear` (#85)
+  acceptance-sweep.ts     post-ship audit orchestration; files follow-up work (#85)
   generated-conflict-*.ts generated-only resolution + agent conflict-repair plumbing
   capture.ts              the uncommitted-work capture DECISION (mirrors the shell)
   sanitize.ts             redaction + stream-json rendering + control-line parsing

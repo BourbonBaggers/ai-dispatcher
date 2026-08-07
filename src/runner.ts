@@ -122,7 +122,7 @@ export interface RunSignals {
   /** ci= from the result line: the REAL CI verdict, not the agent's self-report. */
   resultCi: CiState;
   /** A pre-launch closed issue is retired without spending model recovery. */
-  resultDisposition?: "normal" | "abandoned";
+  resultDisposition?: "normal" | "abandoned" | "already-satisfied";
   /** First provider capacity signal seen this run, if any. */
   tokenExhaustion: ProviderCapacitySignal | null;
   /** For the timed-out summary message. */
@@ -186,6 +186,20 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
 
   if (sawResult && resultDisposition === "abandoned") {
     return { status: "abandoned", exitCode: 0, summary: "Issue closed before agent launch." };
+  }
+
+  // An agent that concluded the requested work is already done exits cleanly with zero
+  // commits — indistinguishable, by exit evidence alone, from the top failure mode. This
+  // branch must precede the commit/CI classification below for the same reason the
+  // no-result branch does: otherwise a legitimate "nothing to change" is misjudged as a
+  // hard failure and sent into the recovery ladder. Audit follow-ups (#85) are filed on a
+  // heuristic verdict, so this outcome is expected, not exceptional.
+  if (sawResult && resultDisposition === "already-satisfied") {
+    return {
+      status: "abandoned",
+      exitCode: 0,
+      summary: "Agent verified the requested work was already satisfied; no changes needed.",
+    };
   }
 
   // Classify agent failure based on exit evidence and run status
@@ -399,7 +413,7 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
     let resultExit = 0;
     let resultCommits = 0;
     let resultCi: CiState = "none";
-    let resultDisposition: "normal" | "abandoned" = "normal";
+    let resultDisposition: "normal" | "abandoned" | "already-satisfied" = "normal";
     let tokenExhaustion: ProviderCapacitySignal | null = null;
     let tokenExhaustionOutputSeq: number | undefined;
     let launcherTimedOut = false;

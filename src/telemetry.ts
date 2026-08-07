@@ -109,6 +109,8 @@ export interface AttemptRecord {
   humanInterventionRequired: boolean;
   frontierModelUsed: boolean;
   manualOverride: boolean;
+  /** True when this attempt worked an issue the post-ship audit filed (#85). */
+  auditGenerated?: boolean;
   /** Dispatcher terminal status (pr_ready/shipped/ci_pending/ci_failed/held/failed/timed_out/interrupted/token_exhausted). */
   terminalStatus: string;
 }
@@ -185,6 +187,13 @@ export interface IssueRecord {
   regressionDetected: boolean;
   humanRepairRequired: boolean;
   manualOverrideInvolved: boolean;
+  /**
+   * True for issues the post-ship audit filed (#85). Like manual overrides, these are
+   * recorded but excluded from the learning dataset: their difficulty and outcome are an
+   * artifact of a heuristic verdict on another issue, not of the routing policy's own
+   * choice, and a phantom follow-up closed with no changes would read as a trivial success.
+   */
+  auditGenerated?: boolean;
   success: boolean;
   lastUpdatedAt: number;
 }
@@ -373,8 +382,10 @@ export function aggregateIssue(
   let finalCompletingModel: string | null = null;
   let lastPrModel: string | null = null;
   let manualOverrideInvolved = false;
+  let auditGenerated = false;
 
   for (const a of mine) {
+    if (a.auditGenerated) auditGenerated = true;
     const model = a.modelUsed ?? a.modelRequested;
     if (!attemptedModels.includes(model)) attemptedModels.push(model);
     tokensByModel[model] = foldTokens(tokensByModel[model], a.tokens);
@@ -417,6 +428,7 @@ export function aggregateIssue(
     regressionDetected,
     humanRepairRequired,
     manualOverrideInvolved,
+    ...(auditGenerated ? { auditGenerated: true } : {}),
     success,
     lastUpdatedAt: nowMs,
   };
@@ -428,7 +440,7 @@ export function aggregateIssue(
  * here while remaining available for separate analysis.
  */
 export function learningDataset(issues: IssueRecord[]): IssueRecord[] {
-  return issues.filter((i) => !i.manualOverrideInvolved);
+  return issues.filter((i) => !i.manualOverrideInvolved && i.auditGenerated !== true);
 }
 
 /** Attempt-level equivalent: drops manual-override attempts from a learning corpus. */
