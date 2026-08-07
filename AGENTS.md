@@ -147,6 +147,10 @@ long as the label is present:
 - Unlike `blocked`, the dispatcher never adds or removes `interactive` in either
   direction — no dispatcher code path references it as an add/remove target. It is
   operator/interactive-session-owned in both directions.
+- It survives a dispatcher service restart untouched: the durable state store
+  (`src/state.ts`) persists only `version`/`settings`/`runs` and never reads or writes
+  GitHub labels, so reopening the store on restart cannot add, drop, or otherwise affect
+  `interactive` on an issue.
 
 Apply it before starting interactive work on an issue the dispatcher might otherwise
 pick up, and before taking over an already-labelled issue: remove stale dispatcher
