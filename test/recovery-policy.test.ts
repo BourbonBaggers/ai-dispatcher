@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { decideRecovery, recoveryState, updateRecovery } from "../src/recovery-policy.ts";
+import { modelByLabel, buildModelLadder } from "../src/models.ts";
 
 test("recovery retries the assigned model, then escalates once, then exhausts (legacy)", () => {
   let ledger = {};
@@ -99,6 +100,31 @@ test("human-intervention: hold without retry or escalate", () => {
   const decision = decideRecovery(ledger, "deploy", 3, "human-intervention");
   assert.equal(decision.action, "hold");
   assert(decision.reason.toLowerCase().includes("explicit") || decision.reason.toLowerCase().includes("human"));
+});
+
+test("recovery state preserves ladder and ladder index", () => {
+  const haiku = modelByLabel("model:claude-haiku-4.5")!;
+  const ladder = buildModelLadder(haiku);
+  let ledger = {};
+
+  ledger = updateRecovery(ledger, "agent", { attempts: 1, ladder, ladderIndex: 0 });
+  const state = recoveryState(ledger, "agent");
+  assert.equal(state.attempts, 1);
+  assert.equal(state.ladder, ladder);
+  assert.equal(state.ladderIndex, 0);
+});
+
+test("recovery state updates ladder index on escalation", () => {
+  const haiku = modelByLabel("model:claude-haiku-4.5")!;
+  const sonnet = modelByLabel("model:claude-sonnet-5")!;
+  const ladder = buildModelLadder(haiku);
+  let ledger = updateRecovery({}, "agent", { attempts: 0, ladder, ladderIndex: 0 });
+
+  // Move to next rung
+  ledger = updateRecovery(ledger, "agent", { attempts: 1, ladderIndex: 1 });
+  const state = recoveryState(ledger, "agent");
+  assert.equal(state.ladderIndex, 1);
+  assert.equal(ladder[state.ladderIndex!]!.modelLabel, "model:claude-sonnet-5");
 });
 
 test("unknown: park and recheck without spending budget", () => {

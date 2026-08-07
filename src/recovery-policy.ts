@@ -1,8 +1,9 @@
 /**
  * One recovery policy for every phase the dispatcher owns.
  *
- * A phase may retry with the assigned model a bounded number of times, then gets one
- * frontier-model attempt. Only a failure after that frontier attempt is exhausted.
+ * A phase may retry with the assigned model a bounded number of times, then climb through
+ * a model ladder (same provider, ascending tiers) before getting one frontier-model attempt.
+ * Only a failure after the frontier attempt is exhausted leads to human handoff.
  * Keeping this decision pure prevents CI, merge, deploy, and agent-exit paths from
  * quietly growing different human-handoff rules again.
  *
@@ -12,6 +13,7 @@
  */
 
 import type { FailureCategory } from "./failure-classification.ts";
+import type { ModelLadder, ModelEntry } from "./models.ts";
 
 export const RECOVERY_KINDS = ["agent", "ci", "merge", "deploy"] as const;
 export type RecoveryKind = (typeof RECOVERY_KINDS)[number];
@@ -20,13 +22,25 @@ export interface RecoveryState {
   attempts: number;
   escalated: boolean;
   lastFailureCategory?: FailureCategory | undefined;
+  /**
+   * The model ladder for this recovery phase (non-frontier models in ascending tier order).
+   * Used to climb through models before frontier escalation.
+   * Not serialized in durable state; reconstructed when needed.
+   */
+  ladder?: readonly ModelEntry[] | undefined;
+  /**
+   * Current position in the ladder (0-based index).
+   * 0 = starting/assigned model, increases with each ladder escalation.
+   * Not serialized; reconstructed from current model.
+   */
+  ladderIndex?: number | undefined;
 }
 
 export type RecoveryLedger = Partial<Record<RecoveryKind, RecoveryState>>;
 
 export type RecoveryDecision =
-  | { action: "retry"; attempt: number; maxAttempts: number; reason: string }
-  | { action: "escalate"; reason: string }
+  | { action: "retry"; attempt: number; maxAttempts: number; reason: string; nextModel?: ModelEntry | undefined }
+  | { action: "escalate"; reason: string; nextModel?: ModelEntry | undefined }
   | { action: "hold"; reason: string }
   | { action: "exhausted"; reason: string }
   | { action: "unknown"; reason: string };
@@ -37,6 +51,8 @@ export function recoveryState(ledger: RecoveryLedger | undefined, kind: Recovery
     attempts: Math.max(0, current?.attempts ?? 0),
     escalated: current?.escalated ?? false,
     lastFailureCategory: current?.lastFailureCategory,
+    ladder: current?.ladder,
+    ladderIndex: current?.ladderIndex,
   };
 }
 
@@ -140,8 +156,9 @@ export function updateRecovery(
   kind: RecoveryKind,
   patch: Partial<RecoveryState>,
 ): RecoveryLedger {
+  const current = recoveryState(ledger, kind);
   return {
     ...(ledger ?? {}),
-    [kind]: { ...recoveryState(ledger, kind), ...patch },
+    [kind]: { ...current, ...patch },
   };
 }

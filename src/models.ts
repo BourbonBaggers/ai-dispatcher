@@ -781,3 +781,75 @@ export function modelByLabel(modelLabel: string): ModelEntry | null {
 export function modelByCliModel(cliModel: string): ModelEntry | null {
   return MODELS.find((model) => model.cliModel === cliModel) ?? null;
 }
+
+/**
+ * A model ladder is a sequence of models within the same provider, ordered by ascending
+ * tier rank, representing the recovery escalation path within that provider before moving
+ * to an external frontier fallback.
+ */
+export type ModelLadder = readonly ModelEntry[];
+
+/**
+ * Build a model ladder for recovery escalation: models from the same provider as the
+ * given model, ordered by ascending tier, excluding frontier and ultra-frontier models.
+ * The ladder includes the starting model as the first rung.
+ *
+ * Example: for claude-haiku, the ladder is [haiku, sonnet] (opus is the frontier fallback).
+ */
+export function buildModelLadder(
+  startModel: ModelEntry,
+  allModels: readonly ModelEntry[] = dispatchableModels(),
+): ModelLadder {
+  // Collect non-frontier models from the same provider, ordered by tier rank
+  const sameProvider = allModels
+    .filter(
+      (m) =>
+        m.provider === startModel.provider &&
+        !m.frontier &&
+        m.enabled,
+    )
+    .sort((a, b) => tierRank(a.tier) - tierRank(b.tier));
+
+  // Ensure the starting model is first if it's in the ladder
+  const startModelInLadder = sameProvider.find((m) => m.modelLabel === startModel.modelLabel);
+  if (!startModelInLadder) {
+    // If start model is frontier or for some reason not in same-provider non-frontier models,
+    // just return the ladder of available models
+    return sameProvider;
+  }
+
+  const startIndex = sameProvider.indexOf(startModelInLadder);
+  // Return from the starting model onwards (its rung and all higher rungs)
+  return sameProvider.slice(startIndex);
+}
+
+/**
+ * Get the next model in the ladder after the current model.
+ * Returns null if already at the top of the ladder (frontier or last rung).
+ */
+export function nextModelInLadder(
+  currentModel: ModelEntry,
+  ladder: ModelLadder,
+): ModelEntry | null {
+  const currentIndex = ladder.findIndex((m) => m.modelLabel === currentModel.modelLabel);
+  if (currentIndex < 0 || currentIndex >= ladder.length - 1) {
+    return null;
+  }
+  return ladder[currentIndex + 1] ?? null;
+}
+
+/**
+ * Get the current position and next model in a ladder, for recovery decision logging.
+ */
+export function ladderPosition(
+  currentModel: ModelEntry,
+  ladder: ModelLadder,
+): { current: number; total: number; nextModel: ModelEntry | null } {
+  const currentIndex = ladder.findIndex((m) => m.modelLabel === currentModel.modelLabel);
+  const position = currentIndex >= 0 ? currentIndex : 0;
+  return {
+    current: position,
+    total: ladder.length,
+    nextModel: nextModelInLadder(currentModel, ladder),
+  };
+}

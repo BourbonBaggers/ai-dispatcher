@@ -13,6 +13,9 @@ import {
   effectiveModelPrice,
   modelExpectedCostScore,
   modelsForRoute,
+  buildModelLadder,
+  nextModelInLadder,
+  ladderPosition,
 } from "../src/models.ts";
 import { MODEL_LABELS } from "../src/labels.ts";
 
@@ -160,4 +163,76 @@ test("the effective price schedule flips the cheapest capable model on the docum
     modelExpectedCostScore(sonnet, "effort:medium", after) >
       modelExpectedCostScore(terra, "effort:medium", after),
   );
+});
+
+test("buildModelLadder constructs a recovery ladder for Claude models", () => {
+  const haiku = modelByLabel("model:claude-haiku-4.5")!;
+  const ladder = buildModelLadder(haiku);
+  assert.ok(ladder.length >= 2, "Claude ladder should have multiple rungs");
+  assert.equal(ladder[0]!.modelLabel, "model:claude-haiku-4.5");
+  const modelLabels = ladder.map((m) => m.modelLabel);
+  assert.ok(modelLabels.includes("model:claude-sonnet-5"), "ladder should include sonnet");
+  assert.ok(!modelLabels.includes("model:claude-opus-4.8"), "ladder should exclude frontier opus");
+  assert.ok(!modelLabels.some((l) => modelByLabel(l)!.frontier), "ladder should not include frontier models");
+});
+
+test("buildModelLadder constructs a recovery ladder for OpenAI models", () => {
+  const mini = modelByLabel("model:gpt-5.4-mini")!;
+  const ladder = buildModelLadder(mini);
+  assert.ok(ladder.length >= 2, "OpenAI ladder should have multiple rungs");
+  assert.equal(ladder[0]!.modelLabel, "model:gpt-5.4-mini");
+  const modelLabels = ladder.map((m) => m.modelLabel);
+  assert.ok(modelLabels.includes("model:gpt-5.6-luna"), "ladder should include luna");
+  assert.ok(modelLabels.includes("model:gpt-5.6-terra"), "ladder should include terra");
+  assert.ok(!modelLabels.includes("model:gpt-5.6-sol"), "ladder should exclude frontier sol");
+});
+
+test("buildModelLadder returns rungs from the starting model onwards", () => {
+  const sonnet = modelByLabel("model:claude-sonnet-5")!;
+  const ladder = buildModelLadder(sonnet);
+  // When starting from sonnet, we should only get sonnet and anything higher, not haiku
+  const haiku = modelByLabel("model:claude-haiku-4.5")!;
+  const modelLabels = ladder.map((m) => m.modelLabel);
+  assert.ok(!modelLabels.includes(haiku.modelLabel), "ladder from sonnet should not include haiku");
+  assert.ok(modelLabels.includes("model:claude-sonnet-5"), "ladder should include starting model");
+});
+
+test("nextModelInLadder climbs to the next rung", () => {
+  const haiku = modelByLabel("model:claude-haiku-4.5")!;
+  const sonnet = modelByLabel("model:claude-sonnet-5")!;
+  const ladder = buildModelLadder(haiku);
+
+  const next = nextModelInLadder(haiku, ladder);
+  assert.equal(next?.modelLabel, "model:claude-sonnet-5", "next after haiku should be sonnet");
+
+  const nextAfterSonnet = nextModelInLadder(sonnet, ladder);
+  assert.equal(
+    nextAfterSonnet,
+    null,
+    "sonnet is the top non-frontier rung, so next should be null",
+  );
+});
+
+test("nextModelInLadder returns null at the top of the ladder", () => {
+  const sonnet = modelByLabel("model:claude-sonnet-5")!;
+  const ladder = buildModelLadder(sonnet);
+  // When ladder starts at sonnet, sonnet is the only/top rung
+  const next = nextModelInLadder(sonnet, ladder);
+  assert.equal(next, null, "next at top of ladder should be null");
+});
+
+test("ladderPosition tracks position in the ladder", () => {
+  const haiku = modelByLabel("model:claude-haiku-4.5")!;
+  const sonnet = modelByLabel("model:claude-sonnet-5")!;
+  const ladder = buildModelLadder(haiku);
+
+  const haikuPos = ladderPosition(haiku, ladder);
+  assert.equal(haikuPos.current, 0, "haiku at position 0");
+  assert.equal(haikuPos.total, ladder.length);
+  assert.equal(haikuPos.nextModel?.modelLabel, "model:claude-sonnet-5");
+
+  const sonnetPos = ladderPosition(sonnet, ladder);
+  assert.equal(sonnetPos.current, 1, "sonnet at position 1");
+  assert.equal(sonnetPos.total, ladder.length);
+  assert.equal(sonnetPos.nextModel, null, "no next after sonnet");
 });
