@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decideRecovery, recoveryState, updateRecovery } from "../src/recovery-policy.ts";
+import {
+  decideRecovery,
+  phaseReachedFrontier,
+  phaseRungModel,
+  recoveryState,
+  updateRecovery,
+} from "../src/recovery-policy.ts";
 
 test("recovery retries the assigned model, then escalates once, then exhausts (legacy)", () => {
   let ledger = {};
@@ -33,6 +39,81 @@ test("recovery budgets are independent by delivery phase", () => {
   assert.equal(deployState.escalated, false);
 
   assert.equal(decideRecovery(ledger, "deploy", 2).action, "retry");
+});
+
+test("recovery keeps climbing until the current phase reaches frontier", () => {
+  let ledger = updateRecovery({}, "agent", { attempts: 2, escalated: true });
+
+  const sonnetFailure = decideRecovery(
+    ledger,
+    "agent",
+    2,
+    "implementation-failure",
+    { frontierReached: false },
+  );
+  assert.equal(sonnetFailure.action, "escalate");
+
+  ledger = updateRecovery(ledger, "agent", {
+    rung: {
+      modelLabel: "model:claude-sonnet-5",
+      cliModel: "claude-sonnet-5",
+      effortLabel: "effort:high",
+      reason: "escalate one tier",
+      at: 1,
+    },
+  });
+  assert.equal(ledger.agent!.ladder!.length, 1);
+  assert.equal(ledger.agent!.rung!.modelLabel, "model:claude-sonnet-5");
+
+  const frontierFailure = decideRecovery(
+    ledger,
+    "agent",
+    2,
+    "implementation-failure",
+    { frontierReached: true },
+  );
+  assert.equal(frontierFailure.action, "exhausted");
+});
+
+// This is the invariant that used to live in planNextAttempt's exhaustion check: a
+// frontier model borrowed to repair the CI phase must not make the deploy phase's FIRST
+// ordinary repair a frontier attempt. It is enforced here, by reading each phase's own
+// recorded rung instead of the run's last-used model, which is what lets the ladder
+// terminate at frontier without permanently promoting the whole issue.
+test("a frontier rung in one phase leaves the next phase's repairs on the assigned model", () => {
+  // CI climbed all the way to Opus; the run's cliModel is now Opus for everyone.
+  const ledger = updateRecovery({}, "ci", {
+    attempts: 2,
+    escalated: true,
+    rung: {
+      modelLabel: "model:claude-opus-4.8",
+      cliModel: "claude-opus-4-8",
+      effortLabel: "effort:max",
+      reason: "final frontier attempt",
+      at: 1,
+    },
+  });
+
+  // The CI phase is frontier-complete and exhausts.
+  assert.equal(phaseReachedFrontier(ledger, "ci", "claude-opus-4-8"), true);
+  assert.equal(phaseRungModel(ledger, "ci", "claude-opus-4-8")?.cliModel, "claude-opus-4-8");
+
+  // Deploy has its own untouched budget and must start from the assigned model, even
+  // though the run's cliModel is the borrowed frontier one.
+  assert.equal(phaseReachedFrontier(ledger, "deploy", "claude-haiku-4-5-20251001"), false);
+  assert.equal(
+    phaseRungModel(ledger, "deploy", "claude-haiku-4-5-20251001")?.cliModel,
+    "claude-haiku-4-5-20251001",
+  );
+  assert.equal(decideRecovery(ledger, "deploy", 2, "test-failure", { frontierReached: false }).action, "retry");
+});
+
+// Records written before rungs existed carry only the boolean flag. Granting them a
+// ladder retroactively would restart escalation for runs that already exhausted it.
+test("a legacy escalated record with no rung is still treated as frontier-complete", () => {
+  const legacy = updateRecovery({}, "agent", { attempts: 2, escalated: true });
+  assert.equal(phaseReachedFrontier(legacy, "agent", "claude-haiku-4-5-20251001"), true);
+  assert.equal(decideRecovery(legacy, "agent", 2, "implementation-failure").action, "exhausted");
 });
 
 test("transient failure: retry same model without escalating", () => {
