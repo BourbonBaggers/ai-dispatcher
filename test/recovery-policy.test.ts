@@ -127,6 +127,86 @@ test("recovery state updates ladder index on escalation", () => {
   assert.equal(ladder[state.ladderIndex!]!.modelLabel, "model:claude-sonnet-5");
 });
 
+test("implementation failure: climb ladder after same-model retry exhausted", () => {
+  const haiku = modelByLabel("model:claude-haiku-4.5")!;
+  const ladder = buildModelLadder(haiku);
+  let ledger = updateRecovery({}, "agent", { attempts: 0, ladder, ladderIndex: 0 });
+
+  // First attempt: retry same model
+  const d1 = decideRecovery(ledger, "agent", 1, "implementation-failure");
+  assert.equal(d1.action, "retry");
+  assert.equal(d1.attempt, 1);
+
+  // Update: one attempt done
+  ledger = updateRecovery(ledger, "agent", { attempts: 1 });
+
+  // Second attempt: same-model retries exhausted, but ladder available
+  const d2 = decideRecovery(ledger, "agent", 1, "implementation-failure");
+  assert.equal(d2.action, "escalate");
+  assert.ok(d2.reason.includes("climb"));
+  assert.equal(d2.nextModel?.modelLabel, "model:claude-sonnet-5", "should climb to sonnet");
+});
+
+test("test failure: climb ladder through multiple rungs", () => {
+  const haiku = modelByLabel("model:claude-haiku-4.5")!;
+  const sonnet = modelByLabel("model:claude-sonnet-5")!;
+  const ladder = buildModelLadder(haiku);
+
+  // Start at haiku
+  let ledger = updateRecovery({}, "ci", { attempts: 1, ladder, ladderIndex: 0 });
+  const d1 = decideRecovery(ledger, "ci", 1, "test-failure");
+  assert.equal(d1.action, "escalate");
+  assert.equal(d1.nextModel?.modelLabel, "model:claude-sonnet-5");
+
+  // Move to sonnet
+  ledger = updateRecovery(ledger, "ci", { attempts: 1, ladder, ladderIndex: 1 });
+  const d2 = decideRecovery(ledger, "ci", 1, "test-failure");
+  // Sonnet is at the top of the non-frontier ladder, so escalate to frontier
+  assert.equal(d2.action, "escalate");
+  assert(!d2.nextModel, "at top of ladder, no nextModel provided");
+});
+
+test("transient failure: climb ladder after retries exhausted", () => {
+  const haiku = modelByLabel("model:claude-haiku-4.5")!;
+  const ladder = buildModelLadder(haiku);
+  let ledger = updateRecovery({}, "agent", { attempts: 3, ladder, ladderIndex: 0 });
+
+  // Retries exhausted on haiku, should climb to sonnet
+  const decision = decideRecovery(ledger, "agent", 3, "transient");
+  assert.equal(decision.action, "escalate");
+  assert.equal(decision.nextModel?.modelLabel, "model:claude-sonnet-5");
+  assert.ok(decision.reason.includes("climb"));
+});
+
+test("context exhaustion: climb ladder even without retries", () => {
+  const haiku = modelByLabel("model:claude-haiku-4.5")!;
+  const ladder = buildModelLadder(haiku);
+  const ledger = updateRecovery({}, "agent", { attempts: 0, ladder, ladderIndex: 0 });
+
+  // Context exhaustion escalates immediately but should still climb ladder
+  const decision = decideRecovery(ledger, "agent", 3, "context-exhaustion");
+  assert.equal(decision.action, "escalate");
+  assert.equal(decision.nextModel?.modelLabel, "model:claude-sonnet-5");
+  assert.ok(decision.reason.includes("climb"));
+});
+
+test("frontier escalation after ladder exhausted", () => {
+  const haiku = modelByLabel("model:claude-haiku-4.5")!;
+  const ladder = buildModelLadder(haiku);
+  // Start at the top of the ladder (last rung)
+  let ledger = updateRecovery({}, "agent", { attempts: 1, ladder, ladderIndex: ladder.length - 1 });
+
+  // At top of ladder, next escalation should be frontier (escalated flag)
+  const decision = decideRecovery(ledger, "agent", 1, "implementation-failure");
+  assert.equal(decision.action, "escalate");
+  assert(!decision.nextModel, "no next model when at ladder top");
+
+  // After frontier attempt marked as escalated
+  ledger = updateRecovery(ledger, "agent", { escalated: true });
+  const finalDecision = decideRecovery(ledger, "agent", 1, "implementation-failure");
+  assert.equal(finalDecision.action, "exhausted");
+});
+
 test("unknown: park and recheck without spending budget", () => {
   const ledger = {};
   const decision = decideRecovery(ledger, "agent", 3, "unknown");

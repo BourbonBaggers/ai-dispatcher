@@ -14,6 +14,7 @@
 
 import type { FailureCategory } from "./failure-classification.ts";
 import type { ModelLadder, ModelEntry } from "./models.ts";
+import { nextModelInLadder } from "./models.ts";
 
 export const RECOVERY_KINDS = ["agent", "ci", "merge", "deploy"] as const;
 export type RecoveryKind = (typeof RECOVERY_KINDS)[number];
@@ -56,6 +57,20 @@ export function recoveryState(ledger: RecoveryLedger | undefined, kind: Recovery
   };
 }
 
+/**
+ * Determine if we should stay with the same model or climb the ladder.
+ * Returns true if we should proceed with a ladder rung (next model), false to escalate to frontier.
+ * When a ladder is provided, we climb before frontier escalation.
+ */
+function shouldClimbLadder(current: RecoveryState): boolean {
+  if (!current.ladder || current.ladder.length === 0) {
+    return false;
+  }
+  const currentIndex = current.ladderIndex ?? 0;
+  // Can climb if there's a next rung above current position
+  return currentIndex + 1 < current.ladder.length;
+}
+
 export function decideRecovery(
   ledger: RecoveryLedger | undefined,
   kind: RecoveryKind,
@@ -77,7 +92,18 @@ export function decideRecovery(
             reason: "Transient infrastructure failure; retry same model",
           };
         }
-        // After exhausting retries on transient failure, escalate capability
+        // After exhausting retries, climb ladder if available, then escalate
+        if (shouldClimbLadder(current)) {
+          const nextModel = nextModelInLadder(
+            current.ladder![(current.ladderIndex ?? 0)]!,
+            current.ladder,
+          );
+          return {
+            action: "escalate",
+            reason: `Transient failures continue despite retries; climb to ${nextModel?.modelLabel ?? "next rung"}`,
+            nextModel,
+          };
+        }
         return current.escalated
           ? { action: "exhausted", reason: "Transient failures persist after escalation" }
           : {
@@ -88,6 +114,17 @@ export function decideRecovery(
       case "usage-limit":
       case "context-exhaustion":
         // Hand off to comparable/larger capacity rather than retrying
+        if (shouldClimbLadder(current)) {
+          const nextModel = nextModelInLadder(
+            current.ladder![(current.ladderIndex ?? 0)]!,
+            current.ladder,
+          );
+          return {
+            action: "escalate",
+            reason: `${failureCategory === "context-exhaustion" ? "Context window" : "Provider capacity"} exhausted; climb to ${nextModel?.modelLabel ?? "next rung"}`,
+            nextModel,
+          };
+        }
         return current.escalated
           ? {
               action: "exhausted",
@@ -108,6 +145,18 @@ export function decideRecovery(
             attempt: current.attempts + 1,
             maxAttempts: Math.max(0, maxAttempts),
             reason: `${failureCategory === "test-failure" ? "Deterministic test" : "Implementation"} failure; retry same model`,
+          };
+        }
+        // Retries exhausted; climb ladder if available
+        if (shouldClimbLadder(current)) {
+          const nextModel = nextModelInLadder(
+            current.ladder![(current.ladderIndex ?? 0)]!,
+            current.ladder,
+          );
+          return {
+            action: "escalate",
+            reason: `${failureCategory === "test-failure" ? "Deterministic test" : "Implementation"} failures; climb to ${nextModel?.modelLabel ?? "next rung"}`,
+            nextModel,
           };
         }
         return current.escalated
@@ -144,6 +193,18 @@ export function decideRecovery(
       attempt: current.attempts + 1,
       maxAttempts: Math.max(0, maxAttempts),
       reason: "Retry available",
+    };
+  }
+  // Retries exhausted; climb ladder if available
+  if (shouldClimbLadder(current)) {
+    const nextModel = nextModelInLadder(
+      current.ladder![(current.ladderIndex ?? 0)]!,
+      current.ladder,
+    );
+    return {
+      action: "escalate",
+      reason: `Retries exhausted; climb to ${nextModel?.modelLabel ?? "next rung"}`,
+      nextModel,
     };
   }
   return current.escalated
