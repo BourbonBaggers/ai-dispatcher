@@ -12,6 +12,7 @@
  */
 
 import type { FailureCategory } from "./failure-classification.ts";
+import { modelByCliModel, type ModelEntry } from "./models.ts";
 
 export const RECOVERY_KINDS = ["agent", "ci", "merge", "deploy"] as const;
 export type RecoveryKind = (typeof RECOVERY_KINDS)[number];
@@ -20,6 +21,18 @@ export interface RecoveryState {
   attempts: number;
   escalated: boolean;
   lastFailureCategory?: FailureCategory | undefined;
+  /** The current automatic recovery rung for this phase, not the immutable pickup. */
+  rung?: RecoveryRung | undefined;
+  /** Every model/effort rung attempted by this phase, in launch order. */
+  ladder?: readonly RecoveryRung[] | undefined;
+}
+
+export interface RecoveryRung {
+  modelLabel: string;
+  cliModel: string;
+  effortLabel: string;
+  reason: string;
+  at: number;
 }
 
 export type RecoveryLedger = Partial<Record<RecoveryKind, RecoveryState>>;
@@ -30,6 +43,11 @@ export type RecoveryDecision =
   | { action: "hold"; reason: string }
   | { action: "exhausted"; reason: string }
   | { action: "unknown"; reason: string };
+
+export interface RecoveryDecisionOptions {
+  /** True when the terminal failure came from the final frontier rung. */
+  frontierReached?: boolean;
+}
 
 export function recoveryState(ledger: RecoveryLedger | undefined, kind: RecoveryKind): RecoveryState {
   const current = ledger?.[kind];
@@ -45,8 +63,13 @@ export function decideRecovery(
   kind: RecoveryKind,
   maxAttempts: number,
   failureCategory?: FailureCategory,
+  options: RecoveryDecisionOptions = {},
 ): RecoveryDecision {
   const current = recoveryState(ledger, kind);
+  // Legacy callers had only a boolean escalation flag; treating those records as
+  // frontier-complete preserves their old terminal behavior. New dispatcher paths
+  // pass an explicit false until the current model is actually frontier.
+  const frontierReached = options.frontierReached ?? true;
 
   // Failure category drives evidence-based recovery decisions
   if (failureCategory) {
@@ -62,7 +85,7 @@ export function decideRecovery(
           };
         }
         // After exhausting retries on transient failure, escalate capability
-        return current.escalated
+        return current.escalated && frontierReached
           ? { action: "exhausted", reason: "Transient failures persist after escalation" }
           : {
               action: "escalate",
@@ -72,7 +95,7 @@ export function decideRecovery(
       case "usage-limit":
       case "context-exhaustion":
         // Hand off to comparable/larger capacity rather than retrying
-        return current.escalated
+        return current.escalated && frontierReached
           ? {
               action: "exhausted",
               reason: `${failureCategory === "context-exhaustion" ? "Context" : "Capacity"} exhaustion persists after escalation`,
@@ -94,7 +117,7 @@ export function decideRecovery(
             reason: `${failureCategory === "test-failure" ? "Deterministic test" : "Implementation"} failure; retry same model`,
           };
         }
-        return current.escalated
+        return current.escalated && frontierReached
           ? {
               action: "exhausted",
               reason: `${failureCategory === "test-failure" ? "Test" : "Implementation"} failures persist after escalation`,
@@ -130,9 +153,46 @@ export function decideRecovery(
       reason: "Retry available",
     };
   }
-  return current.escalated
+  return current.escalated && frontierReached
     ? { action: "exhausted", reason: "Recovery exhausted" }
     : { action: "escalate", reason: "Retries exhausted; escalate" };
+}
+
+/**
+ * The model a phase is currently running on.
+ *
+ * The run's own `cliModel` is the last model *any* phase used, which bleeds across phase
+ * boundaries: a frontier model borrowed to repair CI is still the run's `cliModel` when
+ * the deploy phase makes its first ordinary repair. The per-phase `rung` records what
+ * *this* phase has climbed to, so callers read it first and fall back to the run only for
+ * legacy records written before rungs were tracked.
+ */
+export function phaseRungModel(
+  ledger: RecoveryLedger | undefined,
+  kind: RecoveryKind,
+  runCliModel: string,
+): ModelEntry | null {
+  return modelByCliModel(ledger?.[kind]?.rung?.cliModel ?? runCliModel) ?? null;
+}
+
+/**
+ * Whether this phase has already made its frontier attempt — the one thing that turns a
+ * failure into genuine exhaustion rather than another rung to climb.
+ *
+ * A phase is frontier-complete when its own current rung is a frontier model. Legacy
+ * records carry no rung, only the boolean `escalated` flag from when escalation was a
+ * single jump; for those, `escalated` alone still means frontier-complete, preserving
+ * their original terminal behaviour rather than granting them a ladder they never had.
+ */
+export function phaseReachedFrontier(
+  ledger: RecoveryLedger | undefined,
+  kind: RecoveryKind,
+  runCliModel: string,
+): boolean {
+  const phase = ledger?.[kind];
+  if (phase?.rung) return modelByCliModel(phase.rung.cliModel)?.frontier ?? false;
+  if (modelByCliModel(runCliModel)?.frontier) return true;
+  return phase?.escalated ?? false;
 }
 
 export function updateRecovery(
@@ -140,8 +200,13 @@ export function updateRecovery(
   kind: RecoveryKind,
   patch: Partial<RecoveryState>,
 ): RecoveryLedger {
+  const previous = recoveryState(ledger, kind);
+  const nextRung = patch.rung;
+  const ladder = nextRung
+    ? [...(previous.ladder ?? []), nextRung]
+    : previous.ladder;
   return {
     ...(ledger ?? {}),
-    [kind]: { ...recoveryState(ledger, kind), ...patch },
+    [kind]: { ...previous, ...patch, ...(ladder ? { ladder } : {}) },
   };
 }

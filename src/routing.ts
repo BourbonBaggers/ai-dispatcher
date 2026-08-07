@@ -810,14 +810,23 @@ export function planNextAttempt(
     return { action: "hold", model: null, escalationReason: reason, requiresHumanApproval: false, rationale: "no large-context capacity available — hold" };
   }
 
-  // Implementation / test failure: escalate exactly one *route* tier. Frontier is the
-  // final automated rung; failure there is the handoff point.
-  const nextRank = tierRank(routeTier) + 1;
-  // Automation is exhausted when the *route* has reached the frontier and failed there —
-  // not merely because the last attempt happened to run on a frontier model. A frontier
-  // model borrowed to repair one phase must leave the next phase's ordinary repairs on the
-  // assigned route, or one escalation permanently promotes the whole issue.
-  if (currentModel.frontier && tierRank(routeTier) >= tierRank("frontier")) {
+  // Implementation / test failure: climb one tier per attempt. Frontier is the final
+  // automated rung; failure there is the handoff point.
+  //
+  // The climb is driven by the tier that actually just failed, floored at the assigned
+  // route so a phase never starts below its pickup. Deriving `nextRank` from `routeTier`
+  // alone would re-select the same model forever, because the route is immutable by
+  // design — it is the record of what the issue was admitted as, not of what has been
+  // tried. `currentModel` is the phase's own current rung (see `resolveEscalationModel`),
+  // which is what makes each step strictly stronger than the last.
+  const nextRank = Math.max(tierRank(routeTier), tierRank(currentModel.tier)) + 1;
+  // Automation is exhausted when *this phase's* rung is a frontier model and it failed
+  // there. The invariant that one phase's borrowed frontier model must not promote the
+  // next phase's ordinary repairs is preserved by the caller, which passes each phase's
+  // own recorded rung rather than the run's last-used model — not by refusing to exhaust
+  // here. Testing `routeTier` as well would make the ladder unterminating: it would climb
+  // to frontier, decline to hold, and then cycle between frontier models indefinitely.
+  if (currentModel.frontier) {
     return {
       action: "hold",
       model: null,
@@ -849,7 +858,12 @@ export function planNextAttempt(
   const nextTier = MODEL_TIERS[nextRank]!;
   const stronger = models
     .filter(
-      (m) => servesRoute(m, nextTier) && m.tier !== "ultra-frontier" && available(m, capacityByPool),
+      (m) =>
+        servesRoute(m, nextTier) &&
+        // Never hand the phase a model at or below the rung that just failed.
+        tierRank(m.tier) > tierRank(currentModel.tier) &&
+        m.tier !== "ultra-frontier" &&
+        available(m, capacityByPool),
     )
     .sort(cheapestFirst(nextTier));
   const target = stronger[0] ?? firstAvailable(currentModel.fallbacks, capacityByPool, models);

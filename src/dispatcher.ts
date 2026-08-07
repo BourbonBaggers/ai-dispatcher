@@ -92,6 +92,8 @@ import { redact } from "./sanitize.ts";
 import {
   decideRecovery,
   updateRecovery,
+  phaseReachedFrontier,
+  phaseRungModel,
   type RecoveryKind,
 } from "./recovery-policy.ts";
 import { run as execRun, terminateProcessTree } from "./exec.ts";
@@ -1312,6 +1314,7 @@ function failureCategoryFor(kind: RecoveryKind): FailureCategory {
   return kind === "agent" ? "implementation-failure" : "test-failure";
 }
 
+
 /**
  * Chooses the escalation model from evidence rather than a fixed constant (#51 §5).
  *
@@ -1336,7 +1339,10 @@ async function resolveEscalationModel(
     effortLabel: "effort:max",
     rationale: "configured escalation model",
   };
-  const currentModel = modelByCliModel(run.cliModel);
+  // The phase's own current rung, not the run's last-used model. Without this, a frontier
+  // model borrowed to repair CI would become the starting point for the deploy phase's
+  // first ordinary repair — one escalation would permanently promote the whole issue.
+  const currentModel = phaseRungModel(run.recovery, kind, run.cliModel);
   if (!currentModel) return fallback;
 
   const routeTier = run.routing?.minimumTier ?? currentModel.tier;
@@ -1389,7 +1395,16 @@ async function escalateRun(
     cliModel,
     effortLabel: escalation.effortLabel,
     cliEffort,
-    recovery: updateRecovery(run.recovery, kind, { escalated: true }),
+    recovery: updateRecovery(run.recovery, kind, {
+      escalated: true,
+      rung: {
+        modelLabel,
+        cliModel,
+        effortLabel: escalation.effortLabel,
+        reason: escalation.rationale,
+        at: now(),
+      },
+    }),
     ...nextRecoveryLaunch(run),
     exitCode: null,
     failureSummary: reason,
@@ -1511,7 +1526,9 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
   // Intermediate failures stay internal—no high-priority push and no "go fix this"
   // issue comment while automation still owns the problem.
   if (run.status === "failed") {
-    const decision = decideRecovery(run.recovery, "agent", deps.config.ciSelfHealMaxAttempts);
+    const decision = decideRecovery(run.recovery, "agent", deps.config.ciSelfHealMaxAttempts, undefined, {
+      frontierReached: phaseReachedFrontier(run.recovery, "agent", run.cliModel),
+    });
     if (decision.action === "retry") {
       await repairRun(
         deps,
@@ -1580,7 +1597,9 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
   const { store, github, notifier, logger } = deps;
 
   if (!deps.ship) {
-    const decision = decideRecovery(run.recovery, "deploy", deps.config.ciSelfHealMaxAttempts);
+    const decision = decideRecovery(run.recovery, "deploy", deps.config.ciSelfHealMaxAttempts, undefined, {
+      frontierReached: phaseReachedFrontier(run.recovery, "deploy", run.cliModel),
+    });
     if (decision.action === "retry") {
       await repairRun(
         deps,
@@ -1691,6 +1710,8 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
             run.recovery,
             "ci",
             deps.config.ciSelfHealMaxAttempts,
+            undefined,
+            { frontierReached: phaseReachedFrontier(run.recovery, "ci", run.cliModel) },
           );
           const reason = `PR #${run.prNumber ?? "?"} CI is failing.`;
           if (decision.action === "retry") {
@@ -1730,7 +1751,9 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
       error: err instanceof Error ? err.message : String(err),
     });
     const reason = `Autoship orchestration threw: ${err instanceof Error ? err.message : String(err)}`;
-    const decision = decideRecovery(run.recovery, "merge", deps.config.ciSelfHealMaxAttempts);
+    const decision = decideRecovery(run.recovery, "merge", deps.config.ciSelfHealMaxAttempts, undefined, {
+      frontierReached: phaseReachedFrontier(run.recovery, "merge", run.cliModel),
+    });
     if (decision.action === "retry") {
       await repairRun(deps, run, "merge", decision.attempt, reason);
       return { relaunched: true };
@@ -1953,7 +1976,7 @@ export function buildIssueComment(
   } else if (run.status === "ci_failed") {
     lines.push(
       "CI is red. The dispatcher is relaunching the agent to diagnose and fix it (self-heal), " +
-        "then escalating to one frontier-model attempt if the assigned model cannot resolve it.",
+        "then escalating through compatible model tiers until the final frontier attempt if needed.",
     );
   } else if (resumable) {
     lines.push(
@@ -1963,7 +1986,7 @@ export function buildIssueComment(
   } else if (run.status === "failed") {
     lines.push(
       "The dispatcher is relaunching the agent on the same branch to diagnose and repair the failure, " +
-        "then will make one frontier-model attempt if the assigned model cannot resolve it.",
+        "then will climb compatible model tiers until the final frontier attempt if needed.",
     );
   }
 

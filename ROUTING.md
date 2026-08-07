@@ -319,9 +319,26 @@ phase does not rewrite it. GitHub assignment-label failures are cosmetic.
   explained later even though no label records those axes any more.
 
 Restart and later delivery phases restore this original assignment. Frontier use in one
-phase does not rewrite it — escalation walks the *assigned route* ladder, not the current
-model's home tier, so a frontier model borrowed to repair one phase leaves the next phase's
-ordinary repairs on the original route.
+phase does not rewrite it: each phase records its own **recovery rung**, and escalation
+reads that rung rather than the run's last-used model, so a frontier model borrowed to
+repair one phase leaves the next phase's ordinary repairs on the original assignment.
+
+Within a phase, recovery climbs progressively (#75). Each failed attempt escalates one
+tier from whichever is higher — the assigned route or the rung that just failed — so the
+route acts as a **floor**, never a ceiling:
+
+| Assigned | Rung 1 | Rung 2 | Rung 3 | Then |
+| --- | --- | --- | --- | --- |
+| `model:claude-haiku-4.5` | Haiku (budgeted retries) | `model:claude-sonnet-5` | `model:claude-opus-4.8` | exhausted |
+| `model:gpt-5.4-mini` | mini (budgeted retries) | `model:gpt-5.6-luna` | `model:gpt-5.6-terra` → `model:gpt-5.6-sol` | exhausted |
+
+A phase is exhausted when **its own rung is a frontier model and that attempt failed** —
+not when the assigned route happens to be frontier. Deriving exhaustion from the immutable
+route instead would never terminate: the route does not advance, so the ladder would climb
+to frontier, decline to stop, and cycle between frontier models indefinitely, spending the
+most expensive capacity available and never reaching the durable exhaustion that hands off
+to an operator. Legacy records that predate rungs carry only an `escalated` flag and are
+still treated as frontier-complete, so they exhaust exactly as they did before.
 
 Attempt telemetry records the same sanitized routing evidence, plus the **price snapshot
 active when the attempt ran**, so a later price change cannot rewrite historical cost.

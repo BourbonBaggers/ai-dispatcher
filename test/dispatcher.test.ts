@@ -1041,10 +1041,14 @@ test("runScanOnce routes away from a nearly-spent pool after reading live capaci
     const result = await runScanOnce(deps);
     const claimed = store.allRuns()[0]!;
     assert.match(result.message, /Ran codex/);
-    // Two reads: once at pickup, then again when the interrupted run escalates. The scan's
-    // reading can be hours stale by the time a long run finishes, and escalation is rare
-    // and expensive, so it re-reads rather than escalating on a stale window.
-    assert.equal(capacityReads, 2);
+    // One read at pickup, then one per escalation rung as the interrupted run climbs the
+    // ladder. The scan's reading can be hours stale by the time a long run finishes, and
+    // escalation is rare and expensive, so each rung re-reads rather than choosing its
+    // model from a stale window. This stub interrupts every relaunch instantly, so the
+    // whole ladder collapses into one scan; a real run would spread these across attempts.
+    // The exact count is incidental — what matters is that it is bounded, which is only
+    // true because the climb terminates at frontier.
+    assert.ok(capacityReads > 1 && capacityReads <= 6, `bounded capacity reads, got ${capacityReads}`);
     assert.equal(claimed.assignedModelLabel, "model:gpt-5.6-luna");
     assert.equal(claimed.assignedEffortLabel, "effort:medium");
     assert.equal(claimed.routing?.source, "automatic");

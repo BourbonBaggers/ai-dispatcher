@@ -44,6 +44,7 @@ import type { ExecResult } from "./exec.ts";
 import { NOTIFY_PRIORITY_DEFAULT, type Notifier } from "./notify.ts";
 import type { Logger } from "./logger.ts";
 import type { GithubPrMergeInfo } from "./github.ts";
+import { modelByCliModel } from "./models.ts";
 import { classifyMissingChecksAfterGrace } from "./ci-readiness.ts";
 import {
   acceptanceRepairReason,
@@ -51,6 +52,7 @@ import {
 } from "./acceptance-evidence.ts";
 import {
   decideRecovery,
+  phaseReachedFrontier,
   type RecoveryDecision,
   type RecoveryKind,
 } from "./recovery-policy.ts";
@@ -452,6 +454,8 @@ async function recoveryOutcome(
     run.recovery,
     kind,
     deps.ciSelfHealMaxAttempts,
+    undefined,
+    { frontierReached: phaseReachedFrontier(run.recovery, kind, run.cliModel) },
   );
   switch (decision.action) {
     case "retry":
@@ -471,7 +475,7 @@ async function recoveryOutcome(
             "",
             reason,
             "",
-            `Escalating to \`${deps.ciEscalationModel}\` for the final automated attempt.`,
+            `Escalating to the next compatible model tier (configured frontier fallback: \`${deps.ciEscalationModel}\`); frontier remains the final automated attempt.`,
           ].join("\n"),
         )
         .catch(() => false);

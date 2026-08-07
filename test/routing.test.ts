@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { assessCapacity, type CapacityAssessment } from "../src/capacity.ts";
-import { modelByLabel, type ModelEntry } from "../src/models.ts";
+import { modelByLabel, tierRank, type ModelEntry } from "../src/models.ts";
 import {
   BASE_ROUTE_MATRIX,
   DEFAULT_CHARACTERISTICS,
@@ -183,6 +183,39 @@ test("implementation failure escalates one route and frontier failure holds", ()
   assert.equal(exhausted.action, "hold");
 });
 
+test("implementation recovery climbs Haiku to Sonnet to Opus", () => {
+  const first = planNextAttempt("implementation-failure", M("model:claude-haiku-4.5"), capacity(), undefined, {
+    routeTier: "standard",
+  });
+  assert.equal(first.model?.modelLabel, "model:claude-sonnet-5");
+  assert.equal(first.action, "escalate-tier");
+
+  const second = planNextAttempt("implementation-failure", M("model:claude-sonnet-5"), capacity(), undefined, {
+    routeTier: "standard",
+  });
+  assert.equal(second.model?.modelLabel, "model:claude-opus-4.8");
+  assert.equal(second.action, "escalate-frontier");
+});
+
+test("implementation recovery climbs the Codex ladder when Claude capacity is unavailable", () => {
+  const codexOnly = capacity({ exhausted: ["claude-subscription"] });
+  const first = planNextAttempt("implementation-failure", M("model:gpt-5.4-mini"), codexOnly, undefined, {
+    routeTier: "cheap",
+  });
+  assert.equal(first.model?.modelLabel, "model:gpt-5.6-luna");
+
+  const second = planNextAttempt("implementation-failure", M("model:gpt-5.6-luna"), codexOnly, undefined, {
+    routeTier: "cheap",
+  });
+  assert.equal(second.model?.modelLabel, "model:gpt-5.6-terra");
+
+  const frontier = planNextAttempt("implementation-failure", M("model:gpt-5.6-terra"), codexOnly, undefined, {
+    routeTier: "cheap",
+  });
+  assert.equal(frontier.model?.modelLabel, "model:gpt-5.6-sol");
+  assert.equal(frontier.action, "escalate-frontier");
+});
+
 // ── Truthful rationale labels (#51 follow-up) ────────────────────────────────────
 //
 // These labels are the learning dataset's ground truth. Claiming that capacity or
@@ -254,16 +287,56 @@ test("every base-matrix cell routes to a model that serves that exact tier", () 
   }
 });
 
-// The assigned route is immutable for the life of the issue. If escalation walked the
-// *model's* home tier instead, a frontier model borrowed to repair one phase would make
-// the next phase's ordinary repairs frontier attempts too.
-test("escalation walks the assigned route, not the current model's home tier", () => {
-  const plan = planNextAttempt("test-failure", M("model:claude-opus-4.8"), capacity(), undefined, {
-    routeTier: "standard",
+// The assigned route floors the climb: a phase never repairs *below* the tier the issue
+// was admitted at, even when its current rung happens to sit lower. The route is the
+// record of what the issue was admitted as, not of what has already been tried, so it
+// cannot also be the ceiling — see `phaseReachedFrontier` for where exhaustion is decided.
+//
+// The companion invariant — that a frontier model borrowed to repair one phase must not
+// make the NEXT phase's ordinary repairs frontier attempts — is enforced by the caller
+// passing each phase's own recorded rung. It is covered in test/dispatcher.test.ts by
+// "a frontier rung in one phase leaves the next phase's repairs on the assigned model".
+test("the assigned route floors the climb when the current rung sits below it", () => {
+  const plan = planNextAttempt("test-failure", M("model:claude-haiku-4.5"), capacity(), undefined, {
+    routeTier: "capable",
   });
   assert.ok(plan.model, "expected a next attempt");
-  assert.equal(plan.model!.frontier, false);
-  assert.ok(plan.model!.routeTiers.includes("capable"));
+  // Floored at the capable route, not one tier up from the rung's own tiny home tier —
+  // an unfloored climb would have landed on standard.
+  assert.ok(
+    tierRank(plan.model!.tier) >= tierRank("capable"),
+    `expected at least capable, got ${plan.model!.tier}`,
+  );
+  assert.ok(tierRank(plan.model!.tier) > tierRank("tiny"));
+});
+
+// A ladder that never terminates is worse than one that never climbs: the dispatcher
+// would cycle between frontier models forever, spending the most expensive capacity it
+// has and never reaching the exhaustion that pages a human. Deriving the climb from
+// routeTier alone caused exactly that, because the route never advances.
+test("the climb terminates at frontier instead of cycling between frontier models", () => {
+  const seen: string[] = [];
+  let current = M("model:claude-haiku-4.5");
+  for (let i = 0; i < 12; i += 1) {
+    const plan = planNextAttempt("implementation-failure", current, capacity(), undefined, {
+      routeTier: "standard",
+    });
+    if (plan.action === "hold") break;
+    assert.ok(plan.model, "a non-hold plan must name a model");
+    assert.ok(
+      tierRank(plan.model!.tier) > tierRank(current.tier),
+      `rung ${i} went from ${current.tier} to ${plan.model!.tier} — the climb must be strictly upward`,
+    );
+    assert.ok(!seen.includes(plan.model!.cliModel), `revisited ${plan.model!.cliModel}`);
+    seen.push(plan.model!.cliModel);
+    current = plan.model!;
+  }
+  assert.equal(current.frontier, true, "the ladder must end on a frontier model");
+  assert.equal(
+    planNextAttempt("implementation-failure", current, capacity(), undefined, { routeTier: "standard" }).action,
+    "hold",
+    "a failed frontier rung exhausts automation",
+  );
 });
 
 test("a frontier model that was assigned a frontier route still exhausts automation", () => {
