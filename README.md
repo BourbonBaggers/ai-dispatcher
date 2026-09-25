@@ -213,11 +213,13 @@ model, and effort atomically at pickup:
 
 The `model:*` allowlist is **data-driven**: it is derived from the curated registry in
 `src/models.ts`, not hand-maintained. The dispatchable lanes cover the configured Codex
-and Claude CLIs from tiny through frontier, including `model:gpt-5.4-mini`,
-`model:gpt-5.6-luna`, `model:gpt-5.6-terra`, `model:gpt-5.4`, `model:gpt-5.6-sol`,
-`model:gpt-5.5`, `model:claude-haiku-4.5`, `model:claude-sonnet-5`, and
-`model:claude-opus-4.8`. Some registry entries are documentation-only, provider-specific
-internal names, or explicit reserve lanes such as `model:claude-fable-5`; those are
+and Claude CLIs from tiny through frontier, including `model:gpt-6-luna`,
+`model:gpt-6-sol`, `model:gpt-6-astra`, `model:gpt-5.4-mini`, `model:gpt-5.6-luna`,
+`model:gpt-5.6-terra`, `model:gpt-5.4`, `model:gpt-5.6-sol`, `model:gpt-5.5`,
+`model:claude-haiku-4.5`, `model:claude-sonnet-5`, `model:claude-opus-5.5`,
+`model:claude-opus-5`, and `model:claude-opus-4.8`. Some registry entries are
+documentation-only, provider-specific internal names, or explicit reserve lanes such
+as `model:claude-fable-5.1` and `model:claude-fable-5`; those are
 explained in `src/models.ts` and are not treated as ordinary dispatchable choices.
 
 **OpenCode Zen fallback** (#56): When both Codex and Claude are confirmed exhausted for
@@ -573,7 +575,7 @@ Autoship and recovery also use environment-only configuration:
 | `DISPATCHER_GENERATED_CONFLICT_MAX_ATTEMPTS` | `1` | deterministic generated-conflict attempts per pass |
 | `DISPATCHER_GENERATED_CONFLICT_CI_WAIT_SECONDS` | `900` | CI wait after generated-conflict repair |
 | `DISPATCHER_CI_SELF_HEAL_MAX_ATTEMPTS` | `2` | assigned-model repairs for each of agent/CI/merge/deploy |
-| `DISPATCHER_CI_ESCALATION_MODEL` | `claude-opus-4-8` | one final automatic model attempt after repairs |
+| `DISPATCHER_CI_ESCALATION_MODEL` | `claude-opus-5-5` | one final automatic model attempt after repairs |
 
 `author-allowlist` fails closed when trusted authors are missing or malformed. Untrusted
 issues are left open, marked `needs-input`, and commented once. The check uses only the

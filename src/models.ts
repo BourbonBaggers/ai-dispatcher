@@ -129,7 +129,7 @@ export const MODELS: readonly ModelEntry[] = [
     contextWindow: STANDARD_CONTEXT_TOKENS,
     largeContext: true,
     capacityPool: "claude-subscription",
-    fallbacks: ["model:claude-opus-4.8"],
+    fallbacks: ["model:claude-opus-5.5"],
     listPrice: {
       standardContext: [
         {
@@ -150,6 +150,58 @@ export const MODELS: readonly ModelEntry[] = [
     enabled: true,
   },
   {
+    modelLabel: "model:claude-opus-5.5",
+    provider: "anthropic",
+    cli: "claude",
+    cliModel: "claude-opus-5-5",
+    role: "frontier-reserve",
+    tier: "frontier",
+    routeTiers: ["frontier"],
+    frontier: true,
+    taskClasses: ["complex", "high-risk", "planning", "deep-reasoning", "large-blast-radius"],
+    contextWindow: 1_000_000,
+    largeContext: true,
+    capacityPool: "claude-subscription",
+    fallbacks: ["model:claude-fable-5.1", "model:gpt-6-astra"],
+    listPrice: {
+      standardContext: [
+        {
+          inputUsdPerMillion: 4,
+          outputUsdPerMillion: 20,
+          source: "anthropic-opus-5-5",
+          effectiveFrom: "2026-09-25",
+        },
+      ],
+    },
+    enabled: true,
+  },
+  {
+    modelLabel: "model:claude-opus-5",
+    provider: "anthropic",
+    cli: "claude",
+    cliModel: "claude-opus-5",
+    role: "frontier-reserve",
+    tier: "frontier",
+    routeTiers: ["frontier"],
+    frontier: true,
+    taskClasses: ["complex", "high-risk", "planning", "deep-reasoning", "large-blast-radius"],
+    contextWindow: 1_000_000,
+    largeContext: true,
+    capacityPool: "claude-subscription",
+    fallbacks: ["model:claude-opus-5.5", "model:claude-opus-4.8"],
+    listPrice: {
+      standardContext: [
+        {
+          inputUsdPerMillion: 5,
+          outputUsdPerMillion: 25,
+          source: "anthropic-opus-5",
+          effectiveFrom: "2026-07-24",
+        },
+      ],
+    },
+    enabled: true,
+  },
+  {
     modelLabel: "model:claude-opus-4.8",
     provider: "anthropic",
     cli: "claude",
@@ -162,7 +214,7 @@ export const MODELS: readonly ModelEntry[] = [
     contextWindow: STANDARD_CONTEXT_TOKENS,
     largeContext: false,
     capacityPool: "claude-subscription",
-    fallbacks: ["model:gpt-5.5"],
+    fallbacks: ["model:claude-opus-5.5", "model:gpt-6-astra"],
     listPrice: {
       standardContext: [
         {
@@ -170,6 +222,32 @@ export const MODELS: readonly ModelEntry[] = [
           outputUsdPerMillion: 25,
           source: "anthropic-opus-4-8",
           effectiveFrom: "2026-01-01",
+        },
+      ],
+    },
+    enabled: true,
+  },
+  {
+    modelLabel: "model:claude-fable-5.1",
+    provider: "anthropic",
+    cli: "claude",
+    cliModel: "claude-fable-5-1",
+    role: "ultra-frontier-reserve",
+    tier: "ultra-frontier",
+    routeTiers: ["ultra-frontier"],
+    frontier: true,
+    taskClasses: ["ultra-frontier", "explicit-reserve", "long-horizon"],
+    contextWindow: 1_000_000,
+    largeContext: true,
+    capacityPool: "claude-subscription",
+    fallbacks: ["model:claude-opus-5.5"],
+    listPrice: {
+      standardContext: [
+        {
+          inputUsdPerMillion: 10,
+          outputUsdPerMillion: 50,
+          source: "anthropic-fable-5-1",
+          effectiveFrom: "2026-09-25",
         },
       ],
     },
@@ -185,10 +263,10 @@ export const MODELS: readonly ModelEntry[] = [
     routeTiers: ["ultra-frontier"],
     frontier: true,
     taskClasses: ["ultra-frontier", "explicit-reserve"],
-    contextWindow: STANDARD_CONTEXT_TOKENS,
-    largeContext: false,
+    contextWindow: 1_000_000,
+    largeContext: true,
     capacityPool: "claude-subscription",
-    fallbacks: ["model:claude-opus-4.8"],
+    fallbacks: ["model:claude-fable-5.1", "model:claude-opus-5.5"],
     listPrice: {
       standardContext: [
         {
@@ -196,6 +274,32 @@ export const MODELS: readonly ModelEntry[] = [
           outputUsdPerMillion: 50,
           source: "anthropic-fable-5",
           effectiveFrom: "2026-01-01",
+        },
+      ],
+    },
+    enabled: true,
+  },
+  {
+    modelLabel: "model:gpt-6-luna",
+    provider: "openai",
+    cli: "codex",
+    cliModel: "gpt-6-luna",
+    role: "tiny",
+    tier: "standard",
+    routeTiers: ["tiny", "cheap", "standard"],
+    frontier: false,
+    taskClasses: ["tiny", "cheap", "standard", "general", "implementation", "high-volume"],
+    contextWindow: 1_050_000,
+    largeContext: true,
+    capacityPool: "codex-subscription",
+    fallbacks: ["model:gpt-6-sol", "model:claude-haiku-4.5"],
+    listPrice: {
+      standardContext: [
+        {
+          inputUsdPerMillion: 0.1,
+          outputUsdPerMillion: 0.5,
+          source: "openai-gpt-6-luna",
+          effectiveFrom: "2026-09-25",
         },
       ],
     },
@@ -214,7 +318,7 @@ export const MODELS: readonly ModelEntry[] = [
     contextWindow: STANDARD_CONTEXT_TOKENS,
     largeContext: false,
     capacityPool: "codex-subscription",
-    fallbacks: ["model:gpt-5.6-luna", "model:claude-haiku-4.5"],
+    fallbacks: ["model:gpt-6-luna", "model:claude-haiku-4.5"],
     listPrice: {
       standardContext: [
         {
@@ -222,6 +326,32 @@ export const MODELS: readonly ModelEntry[] = [
           outputUsdPerMillion: 4.5,
           source: "openai-standard",
           effectiveFrom: "2026-01-01",
+        },
+      ],
+    },
+    enabled: true,
+  },
+  {
+    modelLabel: "model:gpt-6-sol",
+    provider: "openai",
+    cli: "codex",
+    cliModel: "gpt-6-sol",
+    role: "capable",
+    tier: "capable",
+    routeTiers: ["capable", "hard"],
+    frontier: false,
+    taskClasses: ["capable", "hard", "implementation", "refactor", "planning"],
+    contextWindow: 1_050_000,
+    largeContext: true,
+    capacityPool: "codex-subscription",
+    fallbacks: ["model:gpt-6-astra", "model:claude-sonnet-5"],
+    listPrice: {
+      standardContext: [
+        {
+          inputUsdPerMillion: 2,
+          outputUsdPerMillion: 10,
+          source: "openai-gpt-6-sol",
+          effectiveFrom: "2026-09-25",
         },
       ],
     },
@@ -240,7 +370,7 @@ export const MODELS: readonly ModelEntry[] = [
     contextWindow: STANDARD_CONTEXT_TOKENS,
     largeContext: false,
     capacityPool: "codex-subscription",
-    fallbacks: ["model:gpt-5.6-terra", "model:claude-haiku-4.5"],
+    fallbacks: ["model:gpt-6-sol", "model:claude-haiku-4.5"],
     listPrice: {
       standardContext: [
         {
@@ -266,7 +396,7 @@ export const MODELS: readonly ModelEntry[] = [
     contextWindow: STANDARD_CONTEXT_TOKENS,
     largeContext: false,
     capacityPool: "codex-subscription",
-    fallbacks: ["model:claude-sonnet-5", "model:gpt-5.6-sol"],
+    fallbacks: ["model:gpt-6-sol", "model:gpt-6-astra", "model:claude-sonnet-5"],
     listPrice: {
       standardContext: [
         {
@@ -308,6 +438,32 @@ export const MODELS: readonly ModelEntry[] = [
     enabled: true,
   },
   {
+    modelLabel: "model:gpt-6-astra",
+    provider: "openai",
+    cli: "codex",
+    cliModel: "gpt-6-astra",
+    role: "frontier-reserve",
+    tier: "frontier",
+    routeTiers: ["frontier", "ultra-frontier"],
+    frontier: true,
+    taskClasses: ["frontier", "ultra-frontier", "complex", "deep-reasoning", "long-horizon"],
+    contextWindow: 1_050_000,
+    largeContext: true,
+    capacityPool: "codex-subscription",
+    fallbacks: ["model:claude-fable-5.1", "model:claude-opus-5.5"],
+    listPrice: {
+      standardContext: [
+        {
+          inputUsdPerMillion: 10,
+          outputUsdPerMillion: 50,
+          source: "openai-gpt-6-astra",
+          effectiveFrom: "2026-09-25",
+        },
+      ],
+    },
+    enabled: true,
+  },
+  {
     modelLabel: "model:gpt-5.6-sol",
     provider: "openai",
     cli: "codex",
@@ -322,7 +478,7 @@ export const MODELS: readonly ModelEntry[] = [
     contextWindow: STANDARD_CONTEXT_TOKENS,
     largeContext: false,
     capacityPool: "codex-subscription",
-    fallbacks: ["model:claude-opus-4.8"],
+    fallbacks: ["model:gpt-6-astra", "model:claude-opus-5.5"],
     listPrice: {
       standardContext: [
         {
@@ -348,7 +504,7 @@ export const MODELS: readonly ModelEntry[] = [
     contextWindow: STANDARD_CONTEXT_TOKENS,
     largeContext: false,
     capacityPool: "codex-subscription",
-    fallbacks: ["model:gpt-5.6-sol", "model:claude-opus-4.8"],
+    fallbacks: ["model:gpt-6-astra", "model:claude-opus-5.5"],
     listPrice: {
       standardContext: [
         {

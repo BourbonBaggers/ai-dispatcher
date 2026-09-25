@@ -131,13 +131,13 @@ test("effort follows route economics", () => {
 
 test("routeIssue uses lowest expected cost among adequate candidates", () => {
   const cheap = routeIssue(chars({ issueType: "docs", businessRisk: "normal" }), capacity());
-  assert.equal(cheap.selected!.modelLabel, "model:gpt-5.4-mini");
+  assert.equal(cheap.selected!.modelLabel, "model:gpt-6-luna");
 
   const standard = routeIssue(chars({ issueType: "bug", businessRisk: "normal" }), capacity());
-  assert.equal(standard.selected!.modelLabel, "model:claude-haiku-4.5");
+  assert.equal(standard.selected!.modelLabel, "model:gpt-6-luna");
 
   const hard = routeIssue(chars({ issueType: "ops", businessRisk: "destructive" }), capacity());
-  assert.equal(hard.selected!.modelLabel, "model:claude-sonnet-5");
+  assert.equal(hard.selected!.modelLabel, "model:gpt-6-sol");
 });
 
 test("capacity is an availability constraint and close-cost tie-breaker", () => {
@@ -145,7 +145,7 @@ test("capacity is an availability constraint and close-cost tie-breaker", () => 
     chars({ issueType: "docs", businessRisk: "normal" }),
     capacity({ exhausted: ["claude-subscription"] }),
   );
-  assert.equal(codexOnly.selected!.modelLabel, "model:gpt-5.4-mini");
+  assert.equal(codexOnly.selected!.modelLabel, "model:gpt-6-luna");
   assert.ok(codexOnly.rationaleLabels.includes(ROUTING_RATIONALE.minViable));
 });
 
@@ -183,17 +183,17 @@ test("implementation failure escalates one route and frontier failure holds", ()
   assert.equal(exhausted.action, "hold");
 });
 
-test("implementation recovery climbs Haiku to Sonnet to Opus", () => {
+test("implementation recovery climbs through the cheapest capable and frontier lanes", () => {
   const first = planNextAttempt("implementation-failure", M("model:claude-haiku-4.5"), capacity(), undefined, {
     routeTier: "standard",
   });
-  assert.equal(first.model?.modelLabel, "model:claude-sonnet-5");
+  assert.equal(first.model?.modelLabel, "model:gpt-6-sol");
   assert.equal(first.action, "escalate-tier");
 
-  const second = planNextAttempt("implementation-failure", M("model:claude-sonnet-5"), capacity(), undefined, {
+  const second = planNextAttempt("implementation-failure", M("model:gpt-6-sol"), capacity(), undefined, {
     routeTier: "standard",
   });
-  assert.equal(second.model?.modelLabel, "model:claude-opus-4.8");
+  assert.equal(second.model?.modelLabel, "model:gpt-6-astra");
   assert.equal(second.action, "escalate-frontier");
 });
 
@@ -202,17 +202,17 @@ test("implementation recovery climbs the Codex ladder when Claude capacity is un
   const first = planNextAttempt("implementation-failure", M("model:gpt-5.4-mini"), codexOnly, undefined, {
     routeTier: "cheap",
   });
-  assert.equal(first.model?.modelLabel, "model:gpt-5.6-luna");
+  assert.equal(first.model?.modelLabel, "model:gpt-6-luna");
 
-  const second = planNextAttempt("implementation-failure", M("model:gpt-5.6-luna"), codexOnly, undefined, {
+  const second = planNextAttempt("implementation-failure", M("model:gpt-6-luna"), codexOnly, undefined, {
     routeTier: "cheap",
   });
-  assert.equal(second.model?.modelLabel, "model:gpt-5.6-terra");
+  assert.equal(second.model?.modelLabel, "model:gpt-6-sol");
 
-  const frontier = planNextAttempt("implementation-failure", M("model:gpt-5.6-terra"), codexOnly, undefined, {
+  const frontier = planNextAttempt("implementation-failure", M("model:gpt-6-sol"), codexOnly, undefined, {
     routeTier: "cheap",
   });
-  assert.equal(frontier.model?.modelLabel, "model:gpt-5.6-sol");
+  assert.equal(frontier.model?.modelLabel, "model:gpt-6-astra");
   assert.equal(frontier.action, "escalate-frontier");
 });
 
@@ -255,9 +255,9 @@ test("a healthy fleet routes cheapest-first and claims no capacity rationale", (
 test("a nearly-spent pool moves the pick and is labelled as portfolio balance", () => {
   const c = parseCharacteristics(["type:bug", "risk:normal"]);
   const healthy = routeIssue(c, pools(20, 20)).selected!;
-  const strained = routeIssue(c, pools(92, 10));
+  const strained = routeIssue(c, pools(20, 99));
   assert.notEqual(strained.selected!.modelLabel, healthy.modelLabel);
-  assert.equal(strained.selected!.capacityPool, "codex-subscription");
+  assert.equal(strained.selected!.capacityPool, "claude-subscription");
   assert.equal(strained.capacitySelection, "scarcity-weighted");
   assert.ok(strained.rationaleLabels.includes(ROUTING_RATIONALE.portfolioBalance));
 });

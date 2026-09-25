@@ -17,7 +17,7 @@ operator is involved only after all of the following have happened for the faili
 
 1. the assigned model made the configured number of repair attempts;
 2. the dispatcher automatically escalated to the configured frontier model (currently
-   Opus 4.8);
+   Claude Opus 5.5);
 3. that frontier attempt failed too; and
 4. the run carries durable `exhaustion` evidence and `autoship-held`.
 

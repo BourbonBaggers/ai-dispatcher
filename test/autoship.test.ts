@@ -89,7 +89,7 @@ function harness(opts: {
     generatedConflictMaxAttempts: 1,
     generatedConflictCiWaitSeconds: 900,
     ciSelfHealMaxAttempts: opts.ciSelfHealMaxAttempts ?? 2,
-    ciEscalationModel: opts.ciEscalationModel ?? "claude-opus-4-8",
+    ciEscalationModel: opts.ciEscalationModel ?? "claude-opus-5-5",
     ...(opts.beforeShip ? { beforeShip: opts.beforeShip } : {}),
     github: {
       prState: async () => opts.prState ?? "open",
@@ -552,7 +552,7 @@ describe("autoshipRun — shipping", () => {
       succeededRun({ recovery: { deploy: { attempts: 2, escalated: false } } }),
     );
     assert.equal(r.action, "escalate");
-    assert.equal(r.action === "escalate" ? r.model : null, "claude-opus-4-8");
+    assert.equal(r.action === "escalate" ? r.model : null, "claude-opus-5-5");
     assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL));
   });
 

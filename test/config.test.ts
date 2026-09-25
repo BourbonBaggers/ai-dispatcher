@@ -192,14 +192,14 @@ test("parseCliConfig resolves ciSelfHealMaxAttempts from env", () => {
   assert.equal(result.config!.ciSelfHealMaxAttempts, 3);
 });
 
-test("parseCliConfig defaults ciEscalationModel to claude-opus-4-8", () => {
+test("parseCliConfig defaults ciEscalationModel to claude-opus-5-5", () => {
   const result = parseCliConfig(["--repo", "acme/widgets"], {
     DISPATCHER_REPO_DIR: "/mirror",
     DISPATCHER_WORKTREE_DIR: "/worktrees",
   });
 
   assert.equal(result.ok, true);
-  assert.equal(result.config!.ciEscalationModel, "claude-opus-4-8");
+  assert.equal(result.config!.ciEscalationModel, "claude-opus-5-5");
 });
 
 test("parseCliConfig resolves ciEscalationModel from env", () => {
@@ -428,7 +428,7 @@ test("parsePolicyCleanupCliConfig defaults dryRun to false and uses the default 
   const result = parsePolicyCleanupCliConfig(["--repo", "acme/widgets"], {});
   assert.equal(result.ok, true);
   assert.equal(result.config?.dryRun, false);
-  assert.equal(result.config?.ciEscalationModel, "claude-opus-4-8");
+  assert.equal(result.config?.ciEscalationModel, "claude-opus-5-5");
 });
 
 test("parsePolicyCleanupCliConfig --dry-run flag is honored", () => {

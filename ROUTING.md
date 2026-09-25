@@ -239,12 +239,18 @@ Current live lanes:
 | --- | --- | --- | --- | --- | --- | --- |
 | tiny, cheap, standard | tiny | `agent:claude` | `model:claude-haiku-4.5` | `claude-haiku-4-5-20251001` | `claude-subscription` | no |
 | capable, hard | capable | `agent:claude` | `model:claude-sonnet-5` | `claude-sonnet-5` | `claude-subscription` | no |
+| frontier | frontier-reserve | `agent:claude` | `model:claude-opus-5.5` | `claude-opus-5-5` | `claude-subscription` | **yes** |
+| frontier | frontier-reserve | `agent:claude` | `model:claude-opus-5` | `claude-opus-5` | `claude-subscription` | **yes** |
 | frontier | frontier-reserve | `agent:claude` | `model:claude-opus-4.8` | `claude-opus-4-8` | `claude-subscription` | **yes** |
+| ultra-frontier | ultra-frontier-reserve | `agent:claude` | `model:claude-fable-5.1` | `claude-fable-5-1` | `claude-subscription` | **yes** |
 | ultra-frontier | ultra-frontier-reserve | `agent:claude` | `model:claude-fable-5` | `claude-fable-5` | `claude-subscription` | **yes** |
+| tiny, cheap, standard | tiny | `agent:codex` | `model:gpt-6-luna` | `gpt-6-luna` | `codex-subscription` | no |
 | tiny, cheap | tiny | `agent:codex` | `model:gpt-5.4-mini` | `gpt-5.4-mini` | `codex-subscription` | no |
+| capable, hard | capable | `agent:codex` | `model:gpt-6-sol` | `gpt-6-sol` | `codex-subscription` | no |
 | standard | standard | `agent:codex` | `model:gpt-5.6-luna` | `gpt-5.6-luna` | `codex-subscription` | no |
 | capable, hard | capable | `agent:codex` | `model:gpt-5.6-terra` | `gpt-5.6-terra` | `codex-subscription` | no |
 | capable | capable | `agent:codex` | `model:gpt-5.4` | `gpt-5.4` | `codex-subscription` | no |
+| frontier, ultra-frontier | frontier-reserve | `agent:codex` | `model:gpt-6-astra` | `gpt-6-astra` | `codex-subscription` | **yes** |
 | frontier, ultra-frontier | frontier-reserve | `agent:codex` | `model:gpt-5.6-sol` | `gpt-5.6-sol` | `codex-subscription` | **yes** |
 | frontier | frontier-reserve | `agent:codex` | `model:gpt-5.5` | `gpt-5.5` | `codex-subscription` | **yes** |
 <!-- END GENERATED LIVE MODEL LANES -->
@@ -329,8 +335,8 @@ route acts as a **floor**, never a ceiling:
 
 | Assigned | Rung 1 | Rung 2 | Rung 3 | Then |
 | --- | --- | --- | --- | --- |
-| `model:claude-haiku-4.5` | Haiku (budgeted retries) | `model:claude-sonnet-5` | `model:claude-opus-4.8` | exhausted |
-| `model:gpt-5.4-mini` | mini (budgeted retries) | `model:gpt-5.6-luna` | `model:gpt-5.6-terra` → `model:gpt-5.6-sol` | exhausted |
+| `model:claude-haiku-4.5` | Haiku (budgeted retries) | `model:claude-sonnet-5` | `model:claude-opus-5.5` | exhausted |
+| `model:gpt-5.4-mini` | mini (budgeted retries) | `model:gpt-6-luna` | `model:gpt-6-sol` → `model:gpt-6-astra` | exhausted |
 
 A phase is exhausted when **its own rung is a frontier model and that attempt failed** —
 not when the assigned route happens to be frontier. Deriving exhaustion from the immutable
