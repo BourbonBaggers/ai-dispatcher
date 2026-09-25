@@ -19,7 +19,11 @@ test("parseClaudeUsage normalizes generic and model-specific windows", () => {
   );
   assert.equal(parsed?.confidence, "provider-reported");
   assert.equal(parsed?.windows.length, 3);
-  assert.deepEqual(parsed?.windows[2]?.modelLabels, ["model:claude-opus-4.8"]);
+  assert.deepEqual(parsed?.windows[2]?.modelLabels, [
+    "model:claude-opus-5-5",
+    "model:claude-opus-5",
+    "model:claude-opus-4.8",
+  ]);
   assert.equal(parsed?.windows[0]?.usedPercent, 25);
 });
 

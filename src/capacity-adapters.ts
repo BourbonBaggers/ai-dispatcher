@@ -75,7 +75,7 @@ export function parseClaudeUsage(raw: unknown, observedAt: number): LiveCapacity
       value.seven_day_opus,
       "utilization",
       "resets_at",
-      ["model:claude-opus-4.8"],
+      ["model:claude-opus-5-5", "model:claude-opus-5", "model:claude-opus-4.8"],
     ),
   ].filter((window): window is CapacityWindow => window !== null);
   if (windows.length === 0) return null;

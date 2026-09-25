@@ -184,7 +184,7 @@ test("quota handoff changes provider without consuming frontier or changing assi
   const handoff = planQuotaHandoff(blocked, capacities);
   assert.equal(handoff.ok, true);
   if (handoff.ok) {
-    assert.equal(handoff.value.modelLabel, "model:gpt-5.6-terra");
+    assert.equal(handoff.value.modelLabel, "model:gpt-6-sol");
     assert.equal(handoff.value.effortLabel, "effort:high");
     assert.notEqual(handoff.value.modelLabel, "model:claude-opus-4.8");
   }
@@ -957,10 +957,10 @@ test("runScanOnce resumes autoship for a stranded pr_ready capacity exit", async
   }
 });
 
-// Claude is 90% through its window and Codex is 10% through its own. Cheapest-first alone
-// would keep feeding Claude (haiku is the cheaper standard lane), which is exactly how a
-// pool gets driven into a multi-day lockout. Scarcity weighting must move this pickup to
-// Codex even though the per-attempt list price is higher.
+// Codex is nearly through its window and Claude has ample headroom. Cheapest-first alone
+// would keep feeding Codex (GPT-6 Luna is the cheaper standard lane), which is exactly how
+// a pool gets driven into a multi-day lockout. Scarcity weighting must move this pickup to
+// Claude even though the per-attempt list price is higher.
 test("runScanOnce routes away from a nearly-spent pool after reading live capacity", async () => {
   const dir = tmp();
   try {
@@ -1015,14 +1015,14 @@ test("runScanOnce routes away from a nearly-spent pool after reading live capaci
               pool: "claude-subscription",
               confidence: "provider-reported",
               observedAt: nowMs,
-              windows: [{ name: "five-hour", usedPercent: 90, resetAt: nowMs + 60_000 }],
+              windows: [{ name: "five-hour", usedPercent: 20, resetAt: nowMs + 60_000 }],
               reason: "test Claude capacity",
             }],
             ["codex-subscription", {
               pool: "codex-subscription",
               confidence: "cli-reported",
               observedAt: nowMs,
-              windows: [{ name: "five-hour", usedPercent: 10, resetAt: nowMs + 60_000 }],
+              windows: [{ name: "five-hour", usedPercent: 99, resetAt: nowMs + 60_000 }],
               reason: "test Codex capacity",
             }],
           ]),
@@ -1040,7 +1040,7 @@ test("runScanOnce routes away from a nearly-spent pool after reading live capaci
 
     const result = await runScanOnce(deps);
     const claimed = store.allRuns()[0]!;
-    assert.match(result.message, /Ran codex/);
+    assert.match(result.message, /Ran claude/);
     // One read at pickup, then one per escalation rung as the interrupted run climbs the
     // ladder. The scan's reading can be hours stale by the time a long run finishes, and
     // escalation is rare and expensive, so each rung re-reads rather than choosing its
@@ -1049,17 +1049,17 @@ test("runScanOnce routes away from a nearly-spent pool after reading live capaci
     // The exact count is incidental — what matters is that it is bounded, which is only
     // true because the climb terminates at frontier.
     assert.ok(capacityReads > 1 && capacityReads <= 6, `bounded capacity reads, got ${capacityReads}`);
-    assert.equal(claimed.assignedModelLabel, "model:gpt-5.6-luna");
+    assert.equal(claimed.assignedModelLabel, "model:claude-haiku-4.5");
     assert.equal(claimed.assignedEffortLabel, "effort:medium");
     assert.equal(claimed.routing?.source, "automatic");
-    // The label must say scarcity moved this pick, not that Codex was the only option.
+    // The label must say scarcity moved this pick, not that Claude was the only option.
     assert.equal(claimed.routing?.capacitySelection, "scarcity-weighted");
     assert.ok(claimed.routing?.rationaleLabels.includes("route:portfolio-balance"));
-    assert.equal(claimed.routing?.selectedPool, "codex-subscription");
-    assert.equal(store.getSettings().lastInitialCapacityPool, "codex-subscription");
+    assert.equal(claimed.routing?.selectedPool, "claude-subscription");
+    assert.equal(store.getSettings().lastInitialCapacityPool, "claude-subscription");
     assert.equal(store.getProviderSuppression("codex"), null);
-    assert.ok(added.includes("agent:codex"));
-    assert.ok(added.includes("model:gpt-5.6-luna"));
+    assert.ok(added.includes("agent:claude"));
+    assert.ok(added.includes("model:claude-haiku-4.5"));
     assert.ok(added.includes("effort:medium"));
     store.releaseLock();
   } finally {

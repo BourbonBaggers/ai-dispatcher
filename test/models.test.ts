@@ -55,6 +55,21 @@ test("only enabled models on a live dispatch agent are dispatchable", () => {
   const opus = modelByLabel("model:claude-opus-4.8")!;
   assert.equal(isDispatchable(opus), true);
 
+  const currentOpus = modelByLabel("model:claude-opus-5")!;
+  assert.equal(currentOpus.cliModel, "claude-opus-5");
+  assert.equal(currentOpus.contextWindow, 1_000_000);
+  assert.equal(isDispatchable(currentOpus), true);
+
+  const latestOpus = modelByLabel("model:claude-opus-5.5")!;
+  assert.equal(latestOpus.cliModel, "claude-opus-5-5");
+  assert.equal(latestOpus.contextWindow, 1_000_000);
+  assert.equal(isDispatchable(latestOpus), true);
+
+  const latestCodex = modelByLabel("model:gpt-6-astra")!;
+  assert.equal(latestCodex.cliModel, "gpt-6-astra");
+  assert.equal(latestCodex.contextWindow, 1_050_000);
+  assert.equal(isDispatchable(latestCodex), true);
+
   // Enabled but future provider (non-live cli): excluded.
   const gemini = modelByLabel("model:gemini-2.5-pro")!;
   assert.equal(gemini.enabled, false);
@@ -81,6 +96,26 @@ test("MODEL_LABELS is derived from the dispatchable registry", () => {
     agent: "claude",
     cliModel: "claude-opus-4-8",
   });
+  assert.deepEqual(MODEL_LABELS["model:claude-opus-5"], {
+    agent: "claude",
+    cliModel: "claude-opus-5",
+  });
+  assert.deepEqual(MODEL_LABELS["model:claude-opus-5.5"], {
+    agent: "claude",
+    cliModel: "claude-opus-5-5",
+  });
+  assert.deepEqual(MODEL_LABELS["model:gpt-6-luna"], {
+    agent: "codex",
+    cliModel: "gpt-6-luna",
+  });
+  assert.deepEqual(MODEL_LABELS["model:gpt-6-sol"], {
+    agent: "codex",
+    cliModel: "gpt-6-sol",
+  });
+  assert.deepEqual(MODEL_LABELS["model:gpt-6-astra"], {
+    agent: "codex",
+    cliModel: "gpt-6-astra",
+  });
   assert.deepEqual(MODEL_LABELS["model:gpt-5.5"], { agent: "codex", cliModel: "gpt-5.5" });
   assert.deepEqual(MODEL_LABELS["model:gpt-5.4-mini"], {
     agent: "codex",
@@ -96,6 +131,9 @@ test("MODEL_LABELS is derived from the dispatchable registry", () => {
 
 test("modelByCliModel round-trips explicit identifiers", () => {
   assert.equal(modelByCliModel("claude-opus-4-8")!.modelLabel, "model:claude-opus-4.8");
+  assert.equal(modelByCliModel("claude-opus-5")!.modelLabel, "model:claude-opus-5");
+  assert.equal(modelByCliModel("claude-opus-5-5")!.modelLabel, "model:claude-opus-5.5");
+  assert.equal(modelByCliModel("gpt-6-astra")!.modelLabel, "model:gpt-6-astra");
   assert.equal(modelByCliModel("gpt-5.5")!.modelLabel, "model:gpt-5.5");
   assert.equal(modelByCliModel("nope"), null);
 });
@@ -136,9 +174,12 @@ test("route spans are contiguous on the tier ladder", () => {
   }
 });
 
-test("only the explicit reserve serves ultra-frontier on the Claude side", () => {
+test("only explicit reserve models serve ultra-frontier on the Claude side", () => {
   const claude = modelsForRoute("ultra-frontier").filter((m) => m.provider === "anthropic");
-  assert.deepEqual(claude.map((m) => m.modelLabel), ["model:claude-fable-5"]);
+  assert.deepEqual(claude.map((m) => m.modelLabel), [
+    "model:claude-fable-5.1",
+    "model:claude-fable-5",
+  ]);
 });
 
 // Sonnet's promotional price expires 2026-08-31. The capable lane must follow the price

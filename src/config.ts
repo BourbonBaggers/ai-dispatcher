@@ -79,7 +79,7 @@ export function expandHome(p: string): string {
 const LOG_LEVELS: readonly LogLevel[] = ["debug", "info", "warn", "error"];
 
 /** Last-resort model for the one escalation attempt after self-heal is exhausted. */
-export const DEFAULT_CI_ESCALATION_MODEL = "claude-opus-4-8";
+export const DEFAULT_CI_ESCALATION_MODEL = "claude-opus-5-5";
 
 type EnvLike = Record<string, string | undefined>;
 
