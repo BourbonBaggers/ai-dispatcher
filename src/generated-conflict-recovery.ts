@@ -7,11 +7,8 @@
  * positive here would discard human-authored work during an automatic merge path.
  */
 
-/** The initial generated-file allowlist requested by issue #4. */
-export const DEFAULT_GENERATED_CONFLICT_ALLOWLIST = Object.freeze([
-  "docs/memory.md",
-  "docs/researcher.md",
-] as const);
+/** No generated-file paths are safe to assume in arbitrary target repositories. */
+export const DEFAULT_GENERATED_CONFLICT_ALLOWLIST = Object.freeze([] as const);
 
 /** One automatic repair is enough to break a stale generated-file conflict cycle. */
 export const DEFAULT_MAX_GENERATED_CONFLICT_RECOVERIES = 1;
