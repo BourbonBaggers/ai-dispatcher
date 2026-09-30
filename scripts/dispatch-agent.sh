@@ -68,7 +68,7 @@ DISPATCHER_WORKTREE_DIR="${DISPATCHER_WORKTREE_DIR:-}"
 # Optional: a repo that needs no seeded secrets can leave this unset.
 DISPATCHER_ENV_SOURCE_DIR="${DISPATCHER_ENV_SOURCE_DIR:-}"
 
-# How often the agent-neutral checkpointer commits plan/memory changes. Codex has no
+# How often the agent-neutral checkpointer commits plan changes. Codex has no
 # equivalent of Claude's plan-checkpoint hook, so the runner provides it.
 CHECKPOINT_INTERVAL_SECONDS=60
 # Grace period between SIGTERM and SIGKILL when a run exceeds its budget.
@@ -405,19 +405,20 @@ fi
 # ─── Agent-neutral plan checkpointer ─────────────────────────────────────────
 # Claude may have a plan-checkpoint hook; Codex has nothing equivalent, and we will not
 # rely on either agent remembering to commit its plan. This loop commits ONLY the
-# recovery artifacts (plan + memory + researcher) — never source files, so it cannot
+# recovery artifacts (plans) — never source files, so it cannot
 # race the agent's own commits into a broken state.
 checkpoint_once() {
   git rev-parse --verify --quiet HEAD >/dev/null || return 0
   # Refuse to touch the index mid-rebase/merge.
   [[ -e .git/MERGE_HEAD || -d .git/rebase-merge || -d .git/rebase-apply ]] && return 0
-  git diff --quiet -- docs/plans docs/memory.md docs/researcher.md 2>/dev/null && return 0
+  [[ -d docs/plans ]] || return 0
+  git diff --quiet -- docs/plans 2>/dev/null && return 0
 
-  git add -- docs/plans docs/memory.md docs/researcher.md 2>/dev/null || return 0
+  git add -- docs/plans 2>/dev/null || return 0
   git diff --cached --quiet && return 0
   # --no-verify: this is housekeeping, and the repo's own hooks skip tests for it.
   git commit --no-verify -q -m "plan: checkpoint" 2>/dev/null \
-    && event "checkpointed plan/memory to git"
+    && event "checkpointed plan to git"
   return 0
 }
 

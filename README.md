@@ -570,7 +570,7 @@ Autoship and recovery also use environment-only configuration:
 | Env | Default | Meaning |
 | --- | --- | --- |
 | `DISPATCHER_AUTOSHIP_CMD` | disabled | repository-specific merge/deploy/health/rollback command |
-| `DISPATCHER_GENERATED_CONFLICT_ALLOWLIST` | `docs/memory.md,docs/researcher.md` | exact generated paths eligible for deterministic conflict recovery |
+| `DISPATCHER_GENERATED_CONFLICT_ALLOWLIST` | _(empty)_ | exact generated paths eligible for deterministic conflict recovery; configure explicitly per target repository |
 | `DISPATCHER_GENERATED_CONFLICT_REGEN_CMD` | disabled | target-repository command to regenerate allowlisted files |
 | `DISPATCHER_GENERATED_CONFLICT_MAX_ATTEMPTS` | `1` | deterministic generated-conflict attempts per pass |
 | `DISPATCHER_GENERATED_CONFLICT_CI_WAIT_SECONDS` | `900` | CI wait after generated-conflict repair |
@@ -662,8 +662,9 @@ group—not just its wrapper shell—so no orphaned build, SSH process, or deplo
 poison the recovery attempt.
 
 Autoship can repair a green PR that is blocked only by generated-file merge conflicts.
-The recoverable paths are exact and explicit: `DISPATCHER_GENERATED_CONFLICT_ALLOWLIST`
-defaults to `docs/memory.md,docs/researcher.md`. Set
+The recoverable paths are exact and explicit: configure
+`DISPATCHER_GENERATED_CONFLICT_ALLOWLIST` for the target repository's generated files. It
+defaults to an empty list because generated files vary by repository. Set
 `DISPATCHER_GENERATED_CONFLICT_REGEN_CMD` to the target repository's generation command
 when those files must be recreated by a hook or script. Recovery is bounded by
 `DISPATCHER_GENERATED_CONFLICT_MAX_ATTEMPTS` (default `1`) and waits up to

@@ -8,11 +8,9 @@ import {
 } from "../src/generated-conflict-recovery.ts";
 
 describe("parseGeneratedConflictAllowlist", () => {
-  it("uses the default generated bookkeeping files when unset", () => {
-    assert.deepEqual(parseGeneratedConflictAllowlist(undefined), [
-      "docs/memory.md",
-      "docs/researcher.md",
-    ]);
+  it("has no assumed generated files when unset", () => {
+    assert.deepEqual(parseGeneratedConflictAllowlist(undefined), []);
+    assert.deepEqual(DEFAULT_GENERATED_CONFLICT_ALLOWLIST, []);
   });
 
   it("normalizes, deduplicates, and rejects unsafe repo paths", () => {
@@ -29,10 +27,10 @@ describe("decideGeneratedConflictRecovery", () => {
     maxAttempts: DEFAULT_MAX_GENERATED_CONFLICT_RECOVERIES,
   };
 
-  it("allows conflicts that are entirely generated files", () => {
+  it("allows conflicts only when explicitly configured", () => {
     const decision = decideGeneratedConflictRecovery(
       ["docs/researcher.md", "docs/memory.md"],
-      policy,
+      { ...policy, allowlistedPaths: ["docs/researcher.md", "docs/memory.md"] },
       0,
     );
     assert.equal(decision.recoverable, true);
@@ -43,7 +41,7 @@ describe("decideGeneratedConflictRecovery", () => {
   it("refuses mixed generated and source-code conflicts", () => {
     const decision = decideGeneratedConflictRecovery(
       ["docs/memory.md", "src/dispatcher.ts"],
-      policy,
+      { ...policy, allowlistedPaths: ["docs/memory.md"] },
       0,
     );
     assert.equal(decision.recoverable, false);
@@ -64,4 +62,3 @@ describe("decideGeneratedConflictRecovery", () => {
     assert.match(decision.reason, /attempt limit/);
   });
 });
-
