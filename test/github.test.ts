@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import {
   listIssuesArgs,
@@ -258,6 +258,17 @@ test("issueBody parses the issue body and fails closed on unreadable data", asyn
   assert.equal(await malformedClient.issueBody(6), null);
 });
 
+// gh 2.63.2 on a PR whose head commit has no checks yet: no JSON even under --json, and
+// exit 1 -- the same exit code as a red check.
+const NO_CHECKS: ExecResult = {
+  ok: false,
+  stdout: "",
+  stderr: "no checks reported on the 'issue-7-widgets' branch\n",
+  code: 1,
+};
+const checksJson = (...buckets: string[]): ExecResult =>
+  ok(JSON.stringify(buckets.map((bucket, i) => ({ name: `check-${i}`, bucket }))));
+
 test("prChecksState separates red, pending, green, and unreadable GitHub state", async () => {
   const repo = parseRepoSlug(SLUG);
   assert.equal(repo.ok, true);
@@ -266,7 +277,9 @@ test("prChecksState separates red, pending, green, and unreadable GitHub state",
     [{ ok: false, stdout: JSON.stringify([{ bucket: "pending" }]), stderr: "", code: 8 }, "pending"],
     [{ ok: false, stdout: JSON.stringify([{ bucket: "fail" }]), stderr: "", code: 1 }, "fail"],
     [{ ok: false, stdout: "", stderr: "network unavailable", code: 1 }, "unknown"],
-    [ok("[]"), "unknown"],
+    // No checks registered yet is pending, never red and never unreadable (#96).
+    [NO_CHECKS, "pending"],
+    [ok("[]"), "pending"],
   ];
   for (const [result, expected] of cases) {
     const { fn } = fakeExec(() => result);
@@ -276,6 +289,78 @@ test("prChecksState separates red, pending, green, and unreadable GitHub state",
     );
     assert.equal(await client.prChecksState(7), expected);
   }
+});
+
+test("prChecksEvidence reports no registered checks as pending with a zero count (#96)", async () => {
+  const repo = parseRepoSlug(SLUG);
+  const evidence = async (result: ExecResult) =>
+    new GithubClient(repo.ok ? repo.value : (undefined as never), fakeExec(() => result).fn)
+      .prChecksEvidence(7);
+
+  // The zero count is what lets autoship give a missing suite its own grace (#60).
+  assert.deepEqual(await evidence(NO_CHECKS), { state: "pending", checkCount: 0 });
+  assert.deepEqual(await evidence(ok("[]")), { state: "pending", checkCount: 0 });
+  // A transport failure stays unreadable; only the exact no-checks report is absence.
+  assert.deepEqual(
+    await evidence({ ok: false, stdout: "", stderr: "HTTP 502: Bad Gateway", code: 1 }),
+    { state: "unknown", checkCount: null },
+  );
+  assert.deepEqual(await evidence(checksJson("pass", "fail", "pending")), { state: "fail", checkCount: 3 });
+  assert.deepEqual(await evidence(checksJson("cancel")), { state: "fail", checkCount: 1 });
+  assert.deepEqual(await evidence(checksJson("pending", "pass")), { state: "pending", checkCount: 2 });
+  assert.deepEqual(await evidence(ok("[null]")), { state: "unknown", checkCount: 1 });
+});
+
+/**
+ * Drives waitForPrChecks on a virtual clock: every answer is one read, and each poll
+ * interval passes instantly. Returns the verdict, the reads made, and the virtual time.
+ */
+async function waitOnVirtualClock(
+  answers: ExecResult[],
+  timeoutSeconds = 900,
+): Promise<{ state: string; reads: number; elapsedMs: number }> {
+  const repo = parseRepoSlug(SLUG);
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    let reads = 0;
+    const exec: ExecFn = async () => answers[Math.min(reads++, answers.length - 1)]!;
+    const client = new GithubClient(repo.ok ? repo.value : (undefined as never), exec);
+    let state: string | undefined;
+    const waiting = client.waitForPrChecks(7, timeoutSeconds).then((result) => {
+      state = result;
+    });
+    for (let polls = 0; state === undefined; polls++) {
+      assert.ok(polls < 1000, "waitForPrChecks never settled");
+      await new Promise((resolve) => setImmediate(resolve));
+      if (state === undefined) mock.timers.tick(20_000);
+    }
+    await waiting;
+    return { state: state!, reads, elapsedMs: Date.now() };
+  } finally {
+    mock.timers.reset();
+  }
+}
+
+test("waitForPrChecks: no checks then green keeps polling and passes", async () => {
+  const run = await waitOnVirtualClock([NO_CHECKS, NO_CHECKS, checksJson("pending"), checksJson("pass")]);
+  assert.deepEqual(run, { state: "pass", reads: 4, elapsedMs: 60_000 });
+});
+
+test("waitForPrChecks: no checks then red fails once a check fails", async () => {
+  const run = await waitOnVirtualClock([NO_CHECKS, checksJson("pending"), checksJson("pass", "fail")]);
+  assert.deepEqual(run, { state: "fail", reads: 3, elapsedMs: 40_000 });
+});
+
+test("waitForPrChecks: pending then green passes", async () => {
+  const run = await waitOnVirtualClock([checksJson("pending"), checksJson("pass", "skipping")]);
+  assert.deepEqual(run, { state: "pass", reads: 2, elapsedMs: 20_000 });
+});
+
+test("waitForPrChecks: no checks past the deadline is pending, never fail", async () => {
+  const run = await waitOnVirtualClock([NO_CHECKS], 120);
+  assert.equal(run.state, "pending");
+  assert.equal(run.elapsedMs, 120_000);
+  assert.equal(run.reads, 7);
 });
 
 test("markPrReady runs gh pr ready and reports success/failure", async () => {

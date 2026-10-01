@@ -240,6 +240,41 @@ describe("autoshipRun — gating", () => {
     assert.match(h.comments[0] ?? "", /missing CI checks/i);
   });
 
+  it("parks a PR whose checks have not registered yet and starts the grace clock (#96)", async () => {
+    const h = harness({ ci: "pending", checkCount: 0 });
+    const recorded: Array<number | undefined> = [];
+    h.deps.recordMissingChecksAt = (at) => { recorded.push(at); };
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.deepEqual(r, { action: "ci_not_green", state: "pending" });
+    assert.equal(recorded.length, 1);
+    assert.equal(typeof recorded[0], "number");
+    assert.equal(h.shipped.length, 0);
+    assert.equal(h.comments.length, 0);
+  });
+
+  it("clears the missing-checks start once a check suite exists, so the next absence gets its own grace (#96)", async () => {
+    const h = harness({ ci: "pending", checkCount: 2 });
+    const recorded: Array<number | undefined> = [];
+    h.deps.recordMissingChecksAt = (at) => { recorded.push(at); };
+    const r = await autoshipRun(
+      h.deps,
+      succeededRun({ ciChecksFirstObservedAt: Date.now() - 10 * 60 * 1000 } as Partial<RunRecord>),
+    );
+    assert.deepEqual(r, { action: "ci_not_green", state: "pending" });
+    assert.deepEqual(recorded, [undefined]);
+  });
+
+  it("keeps the missing-checks start when the checks cannot be read", async () => {
+    const h = harness({ ci: "unknown", checkCount: null });
+    const recorded: Array<number | undefined> = [];
+    h.deps.recordMissingChecksAt = (at) => { recorded.push(at); };
+    await autoshipRun(
+      h.deps,
+      succeededRun({ ciChecksFirstObservedAt: Date.now() - 60 * 1000 } as Partial<RunRecord>),
+    );
+    assert.deepEqual(recorded, []);
+  });
+
   it("repairs a stale-base PR before reading it as pending CI", async () => {
     const h = harness({ ci: "pending", checkCount: 1, mergeStateStatus: "BEHIND" });
     const r = await autoshipRun(h.deps, succeededRun());

@@ -526,6 +526,8 @@ function autoshipConfig(overrides: Partial<DispatcherConfig> = {}): DispatcherCo
 
 function parkedDeps(store: StateStore, opts: {
   ci?: "pass" | "pending" | "fail" | "unknown";
+  /** When set, GitHub also answers prChecksEvidence; read at call time, so tests can mutate it. */
+  checkCount?: number | null;
   isDraft?: boolean;
   issueState?: "OPEN" | "CLOSED" | "UNKNOWN";
   issueLabels?: string[] | null;
@@ -557,6 +559,14 @@ function parkedDeps(store: StateStore, opts: {
     github: {
       prState: async () => opts.prState ?? "open",
       prChecksState: async () => opts.ci ?? "pending",
+      ...(opts.checkCount === undefined
+        ? {}
+        : {
+          prChecksEvidence: async () => ({
+            state: opts.ci ?? "pending",
+            checkCount: opts.checkCount ?? null,
+          }),
+        }),
       waitForPrChecks: async () => opts.ci ?? "pending",
       prMergeInfo: async () => ({
         baseRefName: "main",
@@ -671,6 +681,74 @@ test("recheckParkedRun parks unknown GitHub state without burning a repair budge
     assert.equal(ships.count, 0);
     assert.equal(notifications.count, 0);
     store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a parked run whose CI did not start stays parked without relaunching or spending recovery (#96)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run1 = parkedRun(store);
+    // gh's "no checks reported on the '<branch>' branch", as GithubClient now reads it.
+    const { deps, ships, comments } = parkedDeps(store, { ci: "pending", checkCount: 0 });
+    let launches = 0;
+    deps.launch = async (relaunched) => {
+      launches += 1;
+      return relaunched;
+    };
+
+    await recheckParkedRun(deps, run1);
+
+    const after = store.getRun(run1.id)!;
+    assert.equal(after.status, "ci_pending");
+    assert.deepEqual(after.recovery, {});
+    assert.equal(typeof after.ciChecksFirstObservedAt, "number", "the grace clock started");
+    assert.equal(launches, 0);
+    assert.equal(ships.count, 0);
+    assert.equal(comments.length, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the missing-checks grace restarts once checks appear, so a later empty read spends no recovery (#96)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const stale = Date.now() - 10 * 60 * 1000;
+    const run1 = store.updateRun(parkedRun(store).id, { ciChecksFirstObservedAt: stale });
+    const github = { ci: "pending" as const, checkCount: 2 as number | null };
+    let launches = 0;
+    const first = parkedDeps(store, github);
+    first.deps.launch = async (relaunched) => {
+      launches += 1;
+      return relaunched;
+    };
+
+    await recheckParkedRun(first.deps, run1);
+    assert.equal(store.getRun(run1.id)?.ciChecksFirstObservedAt, undefined, "a suite exists: that absence is over");
+
+    // Restart: the cleared start must not come back from disk.
+    store.releaseLock();
+    const restarted = StateStore.open(dir);
+    assert.equal(restarted.getRun(run1.id)?.ciChecksFirstObservedAt, undefined);
+
+    // A new head commit (say, a repair push) has no checks registered yet.
+    github.checkCount = 0;
+    const second = parkedDeps(restarted, github);
+    second.deps.launch = first.deps.launch;
+    await recheckParkedRun(second.deps, restarted.getRun(run1.id)!);
+
+    const after = restarted.getRun(run1.id)!;
+    assert.equal(after.status, "ci_pending");
+    assert.deepEqual(after.recovery, {}, "a fresh absence must not spend a CI repair attempt");
+    assert.ok((after.ciChecksFirstObservedAt ?? 0) > stale, "a fresh grace began");
+    assert.equal(launches, 0);
+    assert.equal(first.ships.count + second.ships.count, 0);
+    restarted.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -38,6 +38,12 @@ export interface GithubPrChecksEvidence {
   checkCount: number | null;
 }
 
+/**
+ * gh's report for a PR whose head commit has no checks registered yet. It prints no JSON
+ * for that state, even under `--json`, and exits 1 — the same code as a red check.
+ */
+const NO_CHECKS_REPORTED = /no checks reported/i;
+
 /** Issues are pulled newest-last so the scan can prefer the oldest actionable one. */
 const ISSUE_FETCH_LIMIT = 100;
 
@@ -350,45 +356,58 @@ export class GithubClient {
   }
 
   /**
-   * The REAL CI verdict for a PR, read from  exit status — never the
-   * agent's self-report.  exits 0 when all required checks pass, 8 while
-   * any are still pending, and non-zero-non-8 when one has failed. Autoship gates on this
-   * fresh reading at ship time; a verdict observed minutes earlier is not trusted.
+   * The REAL CI verdict for a PR, read from `gh pr checks` structured buckets — never the
+   * agent's self-report, and never the bare exit code (see prChecksEvidence). Autoship
+   * gates on this fresh reading at ship time; a verdict observed minutes earlier is not
+   * trusted.
    */
   async prChecksState(pr: number): Promise<"pass" | "pending" | "fail" | "unknown"> {
     return (await this.prChecksEvidence(pr)).state;
   }
 
   /**
-   * Reads both the verdict and whether GitHub returned any check suite entries.
-   * The empty-list distinction is essential: `gh pr checks` can exit successfully
-   * before Actions has created a suite, and that condition must not park forever.
+   * Reads both the verdict and how many checks GitHub reported. Only a check in the `fail`
+   * or `cancel` bucket is a failure. The exit code cannot say that: gh exits 1 for a red
+   * check, for a transport error, and for a PR with no checks registered yet (#96). That
+   * last state is `pending` with `checkCount: 0` — never red, and never `unknown` either:
+   * a just-opened PR is in it for seconds, while autoship gives a durable absence its own
+   * grace period and then repairs it rather than parking forever (#60).
    */
   async prChecksEvidence(pr: number): Promise<GithubPrChecksEvidence> {
     const result = await this.exec("gh", prChecksArgs(this.repo.slug, pr));
+    let checks: unknown;
     try {
-      const checks = JSON.parse(result.stdout.trim()) as Array<{ bucket?: unknown }>;
-      if (!Array.isArray(checks)) return { state: "unknown", checkCount: null };
-      if (checks.length === 0) return { state: "unknown", checkCount: 0 };
-      const buckets = checks.map((check) => check.bucket);
-      if (buckets.some((bucket) => bucket === "fail" || bucket === "cancel")) {
-        return { state: "fail", checkCount: checks.length };
-      }
-      if (buckets.some((bucket) => bucket === "pending")) {
-        return { state: "pending", checkCount: checks.length };
-      }
-      if (buckets.every((bucket) => bucket === "pass" || bucket === "skipping")) {
-        return { state: "pass", checkCount: checks.length };
-      }
-      return { state: "unknown", checkCount: checks.length };
+      checks = JSON.parse(result.stdout.trim());
     } catch {
+      if (NO_CHECKS_REPORTED.test(result.stderr)) return { state: "pending", checkCount: 0 };
       // Exit 8 is a documented pending result even if an older gh omitted JSON.
       return result.code === 8
         ? { state: "pending", checkCount: null }
         : { state: "unknown", checkCount: null };
     }
+    if (!Array.isArray(checks)) return { state: "unknown", checkCount: null };
+    if (checks.length === 0) return { state: "pending", checkCount: 0 };
+    const buckets = checks.map((check: unknown) =>
+      typeof check === "object" && check !== null ? (check as { bucket?: unknown }).bucket : undefined,
+    );
+    if (buckets.some((bucket) => bucket === "fail" || bucket === "cancel")) {
+      return { state: "fail", checkCount: checks.length };
+    }
+    if (buckets.some((bucket) => bucket === "pending")) {
+      return { state: "pending", checkCount: checks.length };
+    }
+    if (buckets.every((bucket) => bucket === "pass" || bucket === "skipping")) {
+      return { state: "pass", checkCount: checks.length };
+    }
+    return { state: "unknown", checkCount: checks.length };
   }
 
+  /**
+   * Polls until CI resolves or `timeoutSeconds` pass. No checks yet, pending checks, and an
+   * unreadable read all keep it polling: a freshly pushed head commit has no checks for a
+   * while, and that is not a failure. Only a real failed or cancelled check returns
+   * `fail`; anything still unresolved at the deadline returns `pending`.
+   */
   async waitForPrChecks(
     pr: number,
     timeoutSeconds: number,
