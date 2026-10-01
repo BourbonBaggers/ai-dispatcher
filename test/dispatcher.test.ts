@@ -28,7 +28,7 @@ import { StateStore } from "../src/state.ts";
 import { createLogger } from "../src/logger.ts";
 import type { RunRecord } from "../src/state.ts";
 import type { DispatcherConfig } from "../src/config.ts";
-import type { GithubPrDiff, GithubPrFile } from "../src/github.ts";
+import type { GithubCreatedIssue, GithubLabelSpec, GithubPrDiff, GithubPrFile } from "../src/github.ts";
 import { assessCapacity } from "../src/capacity.ts";
 
 function tmp(): string {
@@ -1671,6 +1671,8 @@ function auditSweepHarness(
     issueBody?: () => Promise<string | null>;
     prDiff?: () => Promise<GithubPrDiff>;
     prFiles?: () => Promise<GithubPrFile[] | null>;
+    createIssue?: () => Promise<GithubCreatedIssue>;
+    createLabel?: (spec: GithubLabelSpec) => Promise<boolean>;
     judge?: DispatcherDeps["judgeAcceptance"];
   } = {},
 ): AuditSweepHarness {
@@ -1704,7 +1706,8 @@ function auditSweepHarness(
       prDiff: opts.prDiff ?? (async () => ({ state: "ok", diff: "+export const backoff = true;" })),
       prFiles: opts.prFiles ?? (async () => null),
       issuesWithLabel: async () => [],
-      createIssue: async () => null,
+      createIssue: opts.createIssue ?? (async () => ({ ok: false, error: "no follow-up expected" })),
+      createLabel: opts.createLabel ?? (async () => false),
       comment: async () => true,
     } as unknown as DispatcherDeps["github"],
     judgeAcceptance: async (request) => {
@@ -1877,6 +1880,106 @@ test("a legacy pending audit whose diff is too large resolves from the changed-f
     assert.deepEqual(judged, ["changed-files"]);
     assert.deepEqual(store.getRun(shipped.id)?.audit, { status: "done", at: AUDIT_START });
     assert.ok(h.logs.some((line) => line.msg === "audit: PR diff too large; auditing its changed-file list"));
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** A judge that is sure one criterion was never attempted, so the audit files work. */
+const confidentOmission: NonNullable<DispatcherDeps["judgeAcceptance"]> = async (request) =>
+  request.criteria.map((criterion) => ({
+    criterion,
+    result: "not_addressed" as const,
+    citation: "nothing in the diff targets this",
+  }));
+
+// #728 in production: the judge reached a verdict, filing the follow-up failed the same way
+// every time, and each retry bought another ~48-second judge call — once a minute at a
+// 60-second scan interval.
+test("a follow-up creation that fails the same way twice goes terminal after two judge calls (#98)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const shipped = shippedRunAwaitingAudit(store);
+    let creations = 0;
+    const h = auditSweepHarness(store, {
+      judge: confidentOmission,
+      createIssue: async () => {
+        creations += 1;
+        return { ok: false, error: "GraphQL: Title is too long (maximum is 256 characters) (createIssue)" };
+      },
+    });
+    const judgeCalls = (): number => h.judgeCalls.count;
+
+    await runScanOnce(h.deps);
+    assert.equal(judgeCalls(), 1);
+    assert.equal(store.getRun(shipped.id)?.audit?.status, "pending");
+
+    // Scans every 20 seconds inside the five-minute backoff buy nothing.
+    for (h.clock.now += 20_000; h.clock.now < AUDIT_START + 5 * MINUTE_MS; h.clock.now += 20_000) {
+      await runScanOnce(h.deps);
+    }
+    assert.equal(judgeCalls(), 1);
+
+    h.clock.now = AUDIT_START + 5 * MINUTE_MS;
+    await runScanOnce(h.deps);
+    assert.equal(judgeCalls(), 2);
+    const audit = store.getRun(shipped.id)?.audit;
+    assert.equal(audit?.status, "unavailable");
+    assert.equal(
+      audit?.reason,
+      "failed the same way twice: follow-up issue could not be created: " +
+        "GraphQL: Title is too long (maximum is 256 characters) (createIssue)",
+    );
+
+    for (let day = 1; day <= 7; day += 1) {
+      h.clock.now = AUDIT_START + day * 24 * HOUR_MS;
+      await runScanOnce(h.deps);
+    }
+    assert.equal(judgeCalls(), 2, "terminal: no further judge calls, ever");
+    assert.equal(creations, 2);
+    assert.equal(h.logs.filter((line) => line.msg === "audit: giving up; marked unavailable").length, 1);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The actual #728 cause: the target repository lacked `audit-followup` and `audit:depth-1`.
+test("a repository missing the audit's labels gets them and files the follow-up on the first attempt (#98)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const shipped = shippedRunAwaitingAudit(store);
+    const repoLabels = new Set(["dispatch:ready"]);
+    const created: string[] = [];
+    const h = auditSweepHarness(store, {
+      judge: confidentOmission,
+      createIssue: async () => {
+        for (const label of ["audit-followup", "audit:depth-1", "dispatch:ready"]) {
+          if (!repoLabels.has(label)) {
+            return { ok: false, error: `could not add label: '${label}' not found`, missingLabel: label };
+          }
+        }
+        return { ok: true, issue: 801 };
+      },
+      createLabel: async (spec) => {
+        if (!repoLabels.has(spec.name)) created.push(spec.name);
+        repoLabels.add(spec.name);
+        return true;
+      },
+    });
+
+    await runScanOnce(h.deps);
+
+    assert.deepEqual(created, ["audit-followup", "audit:depth-1"]);
+    assert.equal(h.judgeCalls.count, 1);
+    assert.deepEqual(store.getRun(shipped.id)?.audit, {
+      status: "done",
+      at: AUDIT_START,
+      followUpIssue: 801,
+    });
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });

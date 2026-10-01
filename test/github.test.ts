@@ -17,6 +17,8 @@ import {
   prTitleBodyArgs,
   prDiffArgs,
   prFilesArgs,
+  createIssueArgs,
+  createLabelArgs,
   createPullRequestArgs,
   GithubClient,
 } from "../src/github.ts";
@@ -42,6 +44,8 @@ test("every gh argv builder threads --repo <slug> through", () => {
     prStateArgs(SLUG, 7),
     prTitleBodyArgs(SLUG, 7),
     prDiffArgs(SLUG, 7),
+    createIssueArgs(SLUG, { title: "t", labels: ["audit-followup"] }),
+    createLabelArgs(SLUG, { name: "audit-followup", color: "0E8A16", description: "d" }),
     createPullRequestArgs(SLUG, { base: "main", head: "feature", title: "t" }),
   ];
   for (const args of builders) {
@@ -515,4 +519,79 @@ test("prFiles fails closed rather than returning a partial list (#98)", async ()
   }
   const { fn: empty } = fakeExec(() => ok(""));
   assert.deepEqual(await client(empty).prFiles(760), []);
+});
+
+// ── issue and label creation for audit follow-ups (#98) ────────────────────────
+
+const followUp = { title: "Audit follow-up for #82: x", body: "untrusted judge text", labels: ["audit-followup", "audit:depth-1"] };
+
+test("createIssue returns the new issue's number and pipes the body via stdin", async () => {
+  const { fn, calls } = fakeExec(() => ok("https://github.com/acme/widgets/issues/91\n"));
+  assert.deepEqual(await client(fn).createIssue(followUp), { ok: true, issue: 91 });
+  assert.equal(calls[0]!.stdin, "untrusted judge text");
+  assert.ok(!calls[0]!.args.includes("untrusted judge text"));
+  assert.deepEqual(calls[0]!.args.slice(-4), ["--label", "audit-followup", "--label", "audit:depth-1"]);
+});
+
+// gh resolves labels before creating anything, so this failure creates nothing and
+// repeats identically until the label exists (#728 in production).
+test("createIssue keeps gh's error and names a label the repository lacks (#98)", async () => {
+  const { fn: missing } = fakeExec(() => ({
+    ok: false,
+    stdout: "",
+    stderr: "could not add label: 'audit-followup' not found\n",
+    code: 1,
+  }));
+  assert.deepEqual(await client(missing).createIssue(followUp), {
+    ok: false,
+    error: "could not add label: 'audit-followup' not found",
+    missingLabel: "audit-followup",
+  });
+
+  const { fn: rejected } = fakeExec(() => ({
+    ok: false,
+    stdout: "",
+    stderr: "GraphQL: Title is too long (maximum is 256 characters) (createIssue)\n",
+    code: 1,
+  }));
+  assert.deepEqual(await client(rejected).createIssue(followUp), {
+    ok: false,
+    error: "GraphQL: Title is too long (maximum is 256 characters) (createIssue)",
+  });
+
+  const { fn: noUrl } = fakeExec(() => ok("Creating issue in acme/widgets\n"));
+  assert.deepEqual(await client(noUrl).createIssue(followUp), {
+    ok: false,
+    error: "gh issue create printed no issue URL",
+  });
+});
+
+test("createLabelArgs passes constants only and never forces an existing label", () => {
+  const args = createLabelArgs(SLUG, { name: "audit:depth-1", color: "C2E0C6", description: "depth" });
+  assert.deepEqual(args, [
+    "label", "create", "audit:depth-1", "--repo", SLUG, "--color", "C2E0C6", "--description", "depth",
+  ]);
+  assert.ok(!args.includes("--force"));
+});
+
+test("createLabel treats a label that already exists as present (#98)", async () => {
+  const spec = { name: "dispatch:ready", color: "0E8A16", description: "d" };
+  const { fn: created } = fakeExec(() => ok(""));
+  assert.equal(await client(created).createLabel(spec), true);
+
+  const { fn: exists } = fakeExec(() => ({
+    ok: false,
+    stdout: "",
+    stderr: 'label with name "dispatch:ready" already exists; use `--force` to update its color and description\n',
+    code: 1,
+  }));
+  assert.equal(await client(exists).createLabel(spec), true);
+
+  const { fn: forbidden } = fakeExec(() => ({
+    ok: false,
+    stdout: "",
+    stderr: "HTTP 403: Resource not accessible by integration\n",
+    code: 1,
+  }));
+  assert.equal(await client(forbidden).createLabel(spec), false);
 });

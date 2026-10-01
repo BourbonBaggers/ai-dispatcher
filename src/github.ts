@@ -53,6 +53,27 @@ const NO_CHECKS_REPORTED = /no checks reported/i;
 const DIFF_TOO_LARGE =
   /too_large|HTTP 406|exceeded the maximum number of (?:files|lines)|diff is taking too long to generate/i;
 
+/**
+ * gh resolves every `--label` to an ID before it creates anything, so one label the
+ * repository lacks fails the whole `gh issue create` — identically, every time.
+ */
+const MISSING_LABEL = /could not add label: '([^']+)' not found/i;
+
+/** `gh label create` on a name the repository already has (any case). */
+const LABEL_EXISTS = /already exists/i;
+
+/** An issue's number, or gh's failure — kept so a deterministic one can be told apart. */
+export type GithubCreatedIssue =
+  | { ok: true; issue: number }
+  | { ok: false; error: string; missingLabel?: string };
+
+export interface GithubLabelSpec {
+  name: string;
+  /** Six hex digits, no `#`. */
+  color: string;
+  description: string;
+}
+
 /** A PR's unified diff, or why it could not be read. */
 export type GithubPrDiff =
   | { state: "ok"; diff: string }
@@ -160,6 +181,24 @@ export function createIssueArgs(
     "--body-file",
     "-",
     ...request.labels.flatMap((label) => ["--label", label]),
+  ];
+}
+
+/**
+ * Creates a label. Never `--force`: an existing label's color and description belong to
+ * the operator, and only the caller's constants ever reach this argv.
+ */
+export function createLabelArgs(slug: string, label: GithubLabelSpec): string[] {
+  return [
+    "label",
+    "create",
+    label.name,
+    "--repo",
+    slug,
+    "--color",
+    label.color,
+    "--description",
+    label.description,
   ];
 }
 
@@ -380,24 +419,39 @@ export class GithubClient {
   }
 
   /**
-   * Creates an issue and returns its number, or null on failure. The body is piped over
-   * stdin so untrusted audit text never reaches argv.
+   * Creates an issue and returns its number. The body is piped over stdin so untrusted
+   * audit text never reaches argv. A failure keeps gh's error, and names the label when
+   * the repository lacks one, so the audit can tell a deterministic failure apart (#98).
    */
   async createIssue(request: {
     title: string;
     body: string;
     labels: readonly string[];
-  }): Promise<number | null> {
+  }): Promise<GithubCreatedIssue> {
     const result = await this.exec(
       "gh",
       createIssueArgs(this.repo.slug, { title: request.title, labels: request.labels }),
       { stdin: request.body },
     );
-    if (!result.ok) return null;
+    if (!result.ok) {
+      const missingLabel = MISSING_LABEL.exec(result.stderr)?.[1];
+      return {
+        ok: false,
+        error: ghError(result),
+        ...(missingLabel === undefined ? {} : { missingLabel }),
+      };
+    }
     const match = /\/issues\/(\d+)\s*$/.exec(result.stdout.trim());
-    if (!match) return null;
-    const issue = Number.parseInt(match[1]!, 10);
-    return Number.isInteger(issue) && issue > 0 ? issue : null;
+    const issue = match ? Number.parseInt(match[1]!, 10) : Number.NaN;
+    return Number.isInteger(issue) && issue > 0
+      ? { ok: true, issue }
+      : { ok: false, error: "gh issue create printed no issue URL" };
+  }
+
+  /** Creates a label; one the repository already has counts as present and is left as is. */
+  async createLabel(label: GithubLabelSpec): Promise<boolean> {
+    const result = await this.exec("gh", createLabelArgs(this.repo.slug, label));
+    return result.ok || LABEL_EXISTS.test(result.stderr);
   }
 
   /**

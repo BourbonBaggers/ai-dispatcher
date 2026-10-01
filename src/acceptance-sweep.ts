@@ -23,6 +23,7 @@
 
 import {
   AUDIT_FOLLOWUP_LABEL,
+  AUDIT_MAX_DEPTH,
   auditDepth,
   auditDepthLabel,
   decideAudit,
@@ -33,7 +34,13 @@ import {
 } from "./acceptance-audit.ts";
 import { extractAcceptanceCriteria } from "./acceptance-criteria.ts";
 import { changedFilesEvidence, type AuditEvidenceKind } from "./acceptance-evidence.ts";
-import type { GithubPrDiff, GithubPrFile } from "./github.ts";
+import { creationFailureSignature, type AuditFailure } from "./acceptance-retry.ts";
+import type {
+  GithubCreatedIssue,
+  GithubLabelSpec,
+  GithubPrDiff,
+  GithubPrFile,
+} from "./github.ts";
 import { DISPATCH_READY_LABEL } from "./labels.ts";
 import type { Logger } from "./logger.ts";
 import type { Notifier } from "./notify.ts";
@@ -53,7 +60,8 @@ export interface AuditGithub {
     title: string;
     body: string;
     labels: readonly string[];
-  }): Promise<number | null>;
+  }): Promise<GithubCreatedIssue>;
+  createLabel(label: GithubLabelSpec): Promise<boolean>;
   issuesWithLabel(label: string): Promise<{ number: number; body: string }[] | null>;
 }
 
@@ -80,7 +88,8 @@ export interface AuditDeps {
 
 export type AuditOutcome =
   | { action: "skipped"; reason: string }
-  | { action: "unavailable"; reason: string }
+  // The sweep records this as a failed attempt; a signature marks a deterministic failure.
+  | ({ action: "unavailable" } & AuditFailure)
   | { action: "clean" }
   | { action: "filed"; issue: number }
   | { action: "commented"; issue: number }
@@ -91,6 +100,36 @@ export function followUpLabels(depth: number): string[] {
   // `dispatch:ready` admits the follow-up as ordinary work; it routes on its own
   // characteristics like any other issue. The depth label is what bounds generation.
   return [AUDIT_FOLLOWUP_LABEL, auditDepthLabel(depth), DISPATCH_READY_LABEL];
+}
+
+/**
+ * How the audit creates one of its own labels in a repository that lacks it (#98). Only
+ * the constants `followUpLabels` produces have a spec, so nothing else can be created.
+ * Colors and descriptions match the labels first created by hand for #85.
+ */
+export function followUpLabelSpec(name: string): GithubLabelSpec | null {
+  if (name === AUDIT_FOLLOWUP_LABEL) {
+    return { name, color: "0E8A16", description: "Filed by the post-ship acceptance audit (#85)" };
+  }
+  if (name === DISPATCH_READY_LABEL) {
+    return {
+      name,
+      color: "0E8A16",
+      description: "Provider-neutral dispatcher admission using default workload characteristics",
+    };
+  }
+  const depth = auditDepth([name]);
+  if (depth > 0 && name === auditDepthLabel(depth)) {
+    return {
+      name,
+      color: "C2E0C6",
+      description:
+        depth >= AUDIT_MAX_DEPTH
+          ? `Audit follow-up generation depth; depth ${depth} may not file further follow-ups`
+          : `Audit follow-up generation depth ${depth}`,
+    };
+  }
+  return null;
 }
 
 function followUpTitle(parentIssue: number, parentTitle: string): string {
@@ -136,6 +175,36 @@ async function readPrEvidence(
     files: files.length,
   });
   return { kind: "changed-files", text: changedFilesEvidence(files) };
+}
+
+/**
+ * Files the follow-up. gh resolves every label before it creates anything, so a repository
+ * that never had the audit's labels fails every filing the same way — what kept #728's
+ * audit retrying in production. Those labels are this module's constants, so the audit
+ * creates whichever are missing (never altering one that exists) and files once more.
+ */
+async function createFollowUp(
+  deps: AuditDeps,
+  request: { title: string; body: string; labels: readonly string[] },
+): Promise<GithubCreatedIssue> {
+  const first = await deps.github.createIssue(request);
+  if (first.ok || first.missingLabel === undefined) return first;
+  const missing = first.missingLabel.toLowerCase();
+  if (!request.labels.some((label) => label.toLowerCase() === missing)) return first;
+
+  const notCreated: string[] = [];
+  for (const label of request.labels) {
+    const spec = followUpLabelSpec(label);
+    if (spec === null || !(await deps.github.createLabel(spec))) notCreated.push(label);
+  }
+  deps.logger.info("audit: created missing follow-up labels before filing", {
+    missing: first.missingLabel,
+    ...(notCreated.length === 0 ? {} : { notCreated }),
+  });
+
+  const retried = await deps.github.createIssue(request);
+  if (retried.ok || notCreated.length === 0) return retried;
+  return { ...retried, error: `${retried.error} (could not create label ${notCreated.join(", ")})` };
 }
 
 export async function auditShippedIssue(
@@ -220,7 +289,7 @@ export async function auditShippedIssue(
       return { action: "notified", reason: decision.reason };
 
     case "file": {
-      const created = await github.createIssue({
+      const created = await createFollowUp(deps, {
         title: followUpTitle(subject.issueNumber, subject.issueTitle),
         body: followUpIssueBody(
           subject.issueNumber,
@@ -230,20 +299,26 @@ export async function auditShippedIssue(
         ),
         labels: followUpLabels(decision.depth),
       });
-      if (created === null) {
-        // Creation failed; leaving the run unmarked lets the next sweep try again.
-        return { action: "unavailable", reason: "follow-up issue could not be created" };
+      if (!created.ok) {
+        // The verdict is not kept, so a retry judges again. The sweep's backoff, and treating
+        // the same creation failure twice as permanent, keep that to a few calls (#98).
+        const signature = creationFailureSignature(created.error);
+        return {
+          action: "unavailable",
+          reason: `follow-up issue could not be created: ${created.error}`,
+          ...(signature === undefined ? {} : { signature }),
+        };
       }
-      deps.markAudited(subject, created);
+      deps.markAudited(subject, created.issue);
       await github
-        .comment(subject.issueNumber, parentClosureComment(created, decision.omissions))
+        .comment(subject.issueNumber, parentClosureComment(created.issue, decision.omissions))
         .catch(() => false);
       logger.info("audit: filed follow-up work for unaddressed criteria", {
         issue: subject.issueNumber,
-        followUp: created,
+        followUp: created.issue,
         omissions: decision.omissions.length,
       });
-      return { action: "filed", issue: created };
+      return { action: "filed", issue: created.issue };
     }
   }
 }

@@ -1,9 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { auditShippedIssue, followUpLabels, type AuditDeps } from "../src/acceptance-sweep.ts";
+import {
+  auditShippedIssue,
+  followUpLabelSpec,
+  followUpLabels,
+  type AuditDeps,
+} from "../src/acceptance-sweep.ts";
 import { AUDIT_FOLLOWUP_LABEL, auditDepthLabel, type CriterionVerdict } from "../src/acceptance-audit.ts";
 import { DISPATCH_READY_LABEL } from "../src/labels.ts";
-import type { GithubPrDiff, GithubPrFile } from "../src/github.ts";
+import type { GithubCreatedIssue, GithubLabelSpec, GithubPrDiff, GithubPrFile } from "../src/github.ts";
 
 const ISSUE_BODY = ["## Acceptance criteria", "- [ ] A label exists", "- [ ] Tests cover it"].join("\n");
 
@@ -14,6 +19,9 @@ interface Harness {
   marked: (number | null)[];
   pushes: { title: string; priority: number }[];
   judged: Parameters<AuditDeps["judge"]>[0][];
+  /** Every `gh issue create`, including the ones that failed. */
+  createAttempts: { title: string; body: string; labels: readonly string[] }[];
+  labelsCreated: GithubLabelSpec[];
   /** GitHub reads and judge calls, in the order they started. */
   calls: string[];
 }
@@ -27,6 +35,9 @@ function harness(opts: {
   files?: GithubPrFile[] | null;
   openFollowUps?: { number: number; body: string }[] | null;
   createFails?: boolean;
+  /** Results for successive `createIssue` calls; afterwards the default applies. */
+  createResults?: GithubCreatedIssue[];
+  labelCreateFails?: boolean;
 } = {}): Harness {
   const created: Harness["created"] = [];
   const comments: Harness["comments"] = [];
@@ -34,6 +45,9 @@ function harness(opts: {
   const pushes: Harness["pushes"] = [];
   const judged: Harness["judged"] = [];
   const calls: string[] = [];
+  const createAttempts: Harness["createAttempts"] = [];
+  const labelsCreated: Harness["labelsCreated"] = [];
+  const createResults = [...(opts.createResults ?? [])];
   const diff: GithubPrDiff =
     opts.diff === undefined
       ? { state: "ok", diff: "+export const x = 1;" }
@@ -49,6 +63,8 @@ function harness(opts: {
     pushes,
     judged,
     calls,
+    createAttempts,
+    labelsCreated,
     deps: {
       github: {
         issueBody: async () => {
@@ -72,9 +88,18 @@ function harness(opts: {
           return true;
         },
         createIssue: async (request) => {
-          if (opts.createFails) return null;
-          created.push(request);
-          return 91;
+          createAttempts.push(request);
+          const result: GithubCreatedIssue =
+            createResults.shift() ??
+            (opts.createFails
+              ? { ok: false, error: "HTTP 422: Validation Failed: title is too long" }
+              : { ok: true, issue: 91 });
+          if (result.ok) created.push(request);
+          return result;
+        },
+        createLabel: async (spec) => {
+          labelsCreated.push(spec);
+          return !opts.labelCreateFails;
         },
         issuesWithLabel: async () => {
           calls.push("issuesWithLabel");
@@ -185,8 +210,14 @@ test("a failed issue creation leaves the run pending for the next sweep", async 
     createFails: true,
   });
   const outcome = await auditShippedIssue(h.deps, subject);
-  assert.equal(outcome.action, "unavailable");
+  // gh's reason is kept, and signed: the same failure on the next attempt is permanent (#98).
+  assert.deepEqual(outcome, {
+    action: "unavailable",
+    reason: "follow-up issue could not be created: HTTP 422: Validation Failed: title is too long",
+    signature: "http 422: validation failed: title is too long",
+  });
   assert.deepEqual(h.marked, []);
+  assert.equal(h.labelsCreated.length, 0, "only a missing label triggers label creation");
 });
 
 // The depth cap is the ONLY path in this design that involves a human.
@@ -293,4 +324,94 @@ test("an empty changed-file list for a too-large diff is unreadable, not clean (
     reason: "could not read PR changed-file list (its diff is too large)",
   });
   assert.equal(h.judged.length, 0);
+});
+
+// ── #98: follow-up creation failures ──────────────────────────────────────────
+
+const OMISSION: CriterionVerdict[] = [
+  { criterion: "Tests cover it", result: "not_addressed", citation: "no test files in the diff" },
+];
+
+/** gh's error when the target repository lacks a label (#728 in production). */
+function missingLabel(label: string): GithubCreatedIssue {
+  return { ok: false, error: `could not add label: '${label}' not found`, missingLabel: label };
+}
+
+// BourbonBaggers/internal-tools has `dispatch:ready` but never had the audit's own labels,
+// so every filing there failed identically before anything was created.
+test("a repository missing the audit's labels gets them, and the follow-up is filed in the same attempt (#98)", async () => {
+  const h = harness({ verdicts: OMISSION, createResults: [missingLabel(AUDIT_FOLLOWUP_LABEL)] });
+
+  const outcome = await auditShippedIssue(h.deps, subject);
+
+  assert.deepEqual(outcome, { action: "filed", issue: 91 });
+  assert.deepEqual(
+    h.labelsCreated,
+    followUpLabels(1).map((label) => followUpLabelSpec(label)),
+    "every follow-up label is ensured, since gh names only the first one missing",
+  );
+  assert.equal(h.createAttempts.length, 2);
+  assert.deepEqual(h.createAttempts[1], h.createAttempts[0], "the retry files the same issue");
+  assert.equal(h.judged.length, 1, "one verdict, filed without being re-bought");
+  assert.deepEqual(h.marked, [91]);
+});
+
+test("only the audit's own constant labels have a spec to be created from", () => {
+  assert.deepEqual(followUpLabelSpec(AUDIT_FOLLOWUP_LABEL), {
+    name: "audit-followup",
+    color: "0E8A16",
+    description: "Filed by the post-ship acceptance audit (#85)",
+  });
+  assert.deepEqual(followUpLabelSpec(auditDepthLabel(1)), {
+    name: "audit:depth-1",
+    color: "C2E0C6",
+    description: "Audit follow-up generation depth; depth 1 may not file further follow-ups",
+  });
+  assert.equal(followUpLabelSpec(DISPATCH_READY_LABEL)?.name, DISPATCH_READY_LABEL);
+  for (const label of followUpLabels(1)) {
+    assert.match(followUpLabelSpec(label)?.color ?? "", /^[0-9A-F]{6}$/);
+  }
+  for (const other of ["agent-working", "priority:queue-jump", "audit:depth-1x", "audit:depth-0", "Audit-Followup"]) {
+    assert.equal(followUpLabelSpec(other), null, other);
+  }
+});
+
+test("a missing label the audit does not own is never created (#98)", async () => {
+  const h = harness({ verdicts: OMISSION, createResults: [missingLabel("priority:urgent")] });
+  const outcome = await auditShippedIssue(h.deps, subject);
+  assert.equal(outcome.action, "unavailable");
+  assert.equal(h.labelsCreated.length, 0);
+  assert.equal(h.createAttempts.length, 1);
+});
+
+test("labels that cannot be created leave one signed failure that names them (#98)", async () => {
+  const h = harness({
+    verdicts: OMISSION,
+    createResults: [missingLabel(AUDIT_FOLLOWUP_LABEL), missingLabel(AUDIT_FOLLOWUP_LABEL)],
+    labelCreateFails: true,
+  });
+
+  const outcome = await auditShippedIssue(h.deps, subject);
+
+  assert.equal(outcome.action, "unavailable");
+  assert.equal(h.createAttempts.length, 2, "one retry per attempt, never a loop");
+  const reason = outcome.action === "unavailable" ? outcome.reason : "";
+  assert.equal(
+    reason,
+    "follow-up issue could not be created: could not add label: 'audit-followup' not found " +
+      "(could not create label audit-followup, audit:depth-1, dispatch:ready)",
+  );
+  assert.ok(outcome.action === "unavailable" && outcome.signature !== undefined);
+  assert.deepEqual(h.marked, []);
+});
+
+// Two outages in a row say nothing about the request; only the cap may end that audit.
+test("a transient creation failure carries no signature (#98)", async () => {
+  const h = harness({
+    verdicts: OMISSION,
+    createResults: [{ ok: false, error: "HTTP 502: Bad Gateway (https://api.github.com/graphql)" }],
+  });
+  const outcome = await auditShippedIssue(h.deps, subject);
+  assert.equal(outcome.action, "unavailable");
+  assert.equal(outcome.action === "unavailable" ? outcome.signature : "unexpected", undefined);
 });

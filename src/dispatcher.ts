@@ -700,9 +700,7 @@ async function sweepPendingAudits(deps: DispatcherDeps): Promise<void> {
           prNumber: run.prNumber,
         },
       );
-      if (outcome.action === "unavailable") {
-        recordAuditFailure(deps, run, { reason: outcome.reason });
-      }
+      if (outcome.action === "unavailable") recordAuditFailure(deps, run, outcome);
     } catch (err) {
       // The audit is never allowed to break a scan, and a throw is a failed attempt like any
       // other: uncounted, it would retry every scan forever.
