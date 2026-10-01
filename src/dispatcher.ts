@@ -1618,6 +1618,15 @@ async function exhaustRun(
     .catch(() => undefined);
 }
 
+/** Claim the one success push durably before attempting delivery to the notifier. */
+function claimShippedNotification(deps: DispatcherDeps, run: RunRecord): boolean {
+  const current = deps.store.getRun(run.id);
+  if (!current || current.shippedNotificationAt !== undefined) return false;
+  const claimed = deps.store.updateRun(run.id, { shippedNotificationAt: (deps.now ?? Date.now)() });
+  run.shippedNotificationAt = claimed.shippedNotificationAt!;
+  return true;
+}
+
 /** A previously merged PR can become healthy through another deploy while recovery runs. */
 async function probeMergedDelivery(deps: DispatcherDeps, run: RunRecord): Promise<boolean> {
   if (!deps.ship || !deps.config.autoshipCmd) return false;
@@ -1642,6 +1651,12 @@ async function probeMergedDelivery(deps: DispatcherDeps, run: RunRecord): Promis
       generatedConflictCiWaitSeconds: deps.config.generatedConflictCiWaitSeconds,
       ciSelfHealMaxAttempts: deps.config.ciSelfHealMaxAttempts,
       ciEscalationModel: deps.config.ciEscalationModel,
+      claimShippedNotification: () => claimShippedNotification(deps, run),
+      prMergedAt: async (pr) => {
+        const info = await deps.github.prMergeInfo(pr);
+        return info?.mergedAt ? Date.parse(info.mergedAt) : null;
+      },
+      now: deps.now ?? Date.now,
     }, { ...run, status: "pr_ready", exitCode: 0, prNumber: delivery.pr });
     if (outcome.action !== "shipped") return false;
     await deps.github.removeLabel(run.issueNumber, AUTOSHIP_HELD_LABEL);
@@ -1820,6 +1835,12 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
         recordMergedDelivery: (delivery) => {
           store.updateRun(run.id, { mergedDelivery: delivery });
         },
+        claimShippedNotification: () => claimShippedNotification(deps, run),
+        prMergedAt: async (pr) => {
+          const info = await github.prMergeInfo(pr);
+          return info?.mergedAt ? Date.parse(info.mergedAt) : null;
+        },
+        now: deps.now ?? Date.now,
         beforeShip: ({ pr, mergedSha }) => {
           recordRunPhase(deps, run, "deploying", "Autoship deployment started.", {
             status: "ci_pending",

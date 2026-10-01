@@ -116,6 +116,11 @@ export interface AutoshipDeps {
   beforeShip?: (context: { pr: number; mergedSha: string | null }) => void | Promise<void>;
   /** Persist verified merge identity before handling a deploy failure. */
   recordMergedDelivery?: (delivery: { pr: number; sha: string }) => void | Promise<void>;
+  /** Atomically claims the one success notification for this durable run. */
+  claimShippedNotification?: () => boolean | Promise<boolean>;
+  /** Merge timestamp from GitHub, when available, for merge-to-health elapsed time. */
+  prMergedAt?: (pr: number) => Promise<number | null>;
+  now?: () => number;
   /**
    * Persists the first empty-check observation before a delayed workflow recheck, or
    * clears it (`undefined`) once a check suite exists so a later absence gets its own grace.
@@ -421,10 +426,30 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
     );
   }
 
-  await notifier
-    .send(`Autoship: shipped #${run.issueNumber}`, `PR #${pr} merged and deployed.`, NOTIFY_PRIORITY_DEFAULT)
-    .catch(() => undefined);
+  await notifyShipped(deps, run, pr);
   return { action: "shipped" };
+}
+
+async function notifyShipped(deps: AutoshipDeps, run: RunRecord, pr: number): Promise<void> {
+  if (deps.claimShippedNotification && !(await deps.claimShippedNotification())) return;
+  const mergedAt = await deps.prMergedAt?.(pr).catch(() => null) ?? null;
+  const now = deps.now?.() ?? Date.now();
+  const elapsed = mergedAt === null ? "" : `, ${formatElapsed(now - mergedAt)}`;
+  await deps.notifier.send(
+    `Shipped #${run.issueNumber}: ${run.issueTitle}`,
+    `PR #${pr} merged and deployed (verified)${elapsed}.`,
+    NOTIFY_PRIORITY_DEFAULT,
+  ).catch(() => undefined);
+}
+
+function formatElapsed(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s elapsed`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m elapsed`;
+  const hours = Math.floor(minutes / 60);
+  const remainderMinutes = minutes % 60;
+  return remainderMinutes ? `${hours}h ${remainderMinutes}m elapsed` : `${hours}h elapsed`;
 }
 
 /** Unknown production and host/connectivity errors need another ship probe, not code edits. */
@@ -663,13 +688,7 @@ async function alreadyMerged(deps: AutoshipDeps, run: RunRecord, pr: number): Pr
       `Already-merged PR #${pr} deployed successfully, but GitHub issue #${run.issueNumber} could not be closed.`,
     );
   }
-  await notifier
-    .send(
-      `Autoship: shipped #${run.issueNumber}`,
-      `PR #${pr} was already merged; merged commit ${mergeInfo.mergeCommitOid} is now deployed and verified.`,
-      NOTIFY_PRIORITY_DEFAULT,
-    )
-    .catch(() => undefined);
+  await notifyShipped(deps, run, pr);
   return { action: "shipped" };
 }
 

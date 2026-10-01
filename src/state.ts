@@ -123,6 +123,8 @@ export interface RunRecord {
   prNumber: number | null;
   /** Original merged delivery; later launcher results must not replace this PR. */
   mergedDelivery?: { pr: number; sha: string };
+  /** Durable receipt preventing duplicate verified-shipment pushes across rechecks. */
+  shippedNotificationAt?: number;
   /** Backoff for infrastructure deploy probes; never spends model repair budget. */
   deployRetry?: { attempts: number; after: number };
   exitCode: number | null;
