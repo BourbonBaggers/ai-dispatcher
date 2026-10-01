@@ -118,6 +118,11 @@ test("dispatchAgentEnv omits the env-source dir when none is configured, sets it
   assert.equal(env.DISPATCHER_ENV_SOURCE_DIR, "/home/dev/app");
 });
 
+test("dispatchAgentEnv passes the dependency cache override", () => {
+  assert.equal("DISPATCHER_DEPS_CACHE_DIR" in dispatchAgentEnv(config()), false);
+  assert.equal(dispatchAgentEnv(config({ depsCacheDir: "/cache" })).DISPATCHER_DEPS_CACHE_DIR, "/cache");
+});
+
 test("dispatchAgentEnv passes a bounded recovery reason as data for resumed agents", () => {
   const env = dispatchAgentEnv(config(), "merge conflict in docs/memory.md");
   assert.equal(env.DISPATCHER_RECOVERY_REASON, "merge conflict in docs/memory.md");

@@ -106,6 +106,7 @@ export function dispatchAgentEnv(
     [DISPATCHER_TARGET_POLICY_ENV]: "1",
   };
   if (config.envSourceDir) env.DISPATCHER_ENV_SOURCE_DIR = config.envSourceDir;
+  if (config.depsCacheDir) env.DISPATCHER_DEPS_CACHE_DIR = config.depsCacheDir;
   if (recoveryReason) env.DISPATCHER_RECOVERY_REASON = recoveryReason.slice(0, 4_000);
   return env;
 }

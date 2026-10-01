@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -50,6 +50,21 @@ test("miss installs once, hit skips npm and attaches private files", async () =>
   } finally { f.cleanup(); }
 });
 
+test("relative links in cached modules stay inside the attached checkout", async () => {
+  const f = fixture();
+  try {
+    const first = f.checkout("first");
+    await f.run(first);
+    const key = f.entries()[0]!;
+    symlinkSync("value", join(f.root, "state", "deps-cache", "acme-widgets", key, "node_modules", "alias"));
+    const second = f.checkout("second");
+    await f.run(second);
+    writeFileSync(join(second, "node_modules", "value"), "private");
+    assert.equal(readFileSync(join(second, "node_modules", "alias"), "utf8"), "private");
+    assert.equal(readFileSync(join(f.root, "state", "deps-cache", "acme-widgets", key, "node_modules", "alias"), "utf8"), "original");
+  } finally { f.cleanup(); }
+});
+
 test("corrupt entry is rebuilt, and a changed lock or schema gets a new key", async () => {
   const f = fixture();
   try {
@@ -90,7 +105,11 @@ test("changed lockfile in a checkout triggers private install without changing c
 test("pruning keeps the newest three complete entries", async () => {
   const f = fixture();
   try {
-    for (let n = 0; n < 5; n++) await f.run(f.checkout(`run-${n}`, `lock-${n}`));
+    await f.run(f.checkout("run-0", "lock-0"));
+    const staging = join(f.root, "state", "deps-cache", "acme-widgets", ".building-abandoned");
+    mkdirSync(staging);
+    for (let n = 1; n < 5; n++) await f.run(f.checkout(`run-${n}`, `lock-${n}`));
     assert.equal(f.entries().length, 3);
+    assert.equal(readdirSync(join(f.root, "state", "deps-cache", "acme-widgets")).includes(".building-abandoned"), false);
   } finally { f.cleanup(); }
 });

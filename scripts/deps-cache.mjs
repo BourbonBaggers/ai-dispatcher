@@ -3,14 +3,14 @@
 // ordinary copies preserve isolation on filesystems without copy-on-write support.
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { constants, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { constants, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 
 const start = Date.now();
 const checkout = resolve(process.argv[2] ?? ".");
 const repo = process.env.DISPATCHER_REPO ?? "";
 const stateDir = process.env.DISPATCHER_STATE_DIR ?? "./state";
-const cacheRoot = process.env.DISPATCHER_DEPS_CACHE_DIR ?? join(stateDir, "deps-cache");
+const cacheRoot = process.env.DISPATCHER_DEPS_CACHE_DIR || join(stateDir, "deps-cache");
 const repoDir = join(cacheRoot, repo.replace("/", "-"));
 const nodeModules = join(checkout, "node_modules");
 const checkoutKeyFile = join(checkout, ".dispatcher-deps-key");
@@ -53,11 +53,28 @@ function valid(entry, key) {
   } catch { return false; }
 }
 
+function linksStayPrivate(root) {
+  const pending = [root];
+  while (pending.length) {
+    const current = pending.pop();
+    for (const item of readdirSync(current)) {
+      const path = join(current, item);
+      const info = lstatSync(path);
+      if (info.isDirectory()) pending.push(path);
+      if (info.isSymbolicLink()) {
+        const target = resolve(dirname(path), readlinkSync(path));
+        if (!target.startsWith(`${root}${sep}`)) return false;
+      }
+    }
+  }
+  return true;
+}
+
 function attach(entry) {
   const temp = join(checkout, `.dispatcher-node-modules-${process.pid}`);
   rmSync(temp, { recursive: true, force: true });
   try {
-    cpSync(join(entry, "node_modules"), temp, { recursive: true, force: false, mode: constants.COPYFILE_FICLONE });
+    cpSync(join(entry, "node_modules"), temp, { recursive: true, force: false, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE });
     // cpSync's FICLONE option requests CoW and safely copies when unavailable.
     renameSync(temp, nodeModules);
   } finally {
@@ -118,6 +135,10 @@ try {
     process.exit();
   }
   const entry = join(repoDir, key);
+  // A killed installer may leave staging data. The lock proves no builder still owns it.
+  for (const item of readdirSync(repoDir)) {
+    if (item.startsWith(".building-")) rmSync(join(repoDir, item), { recursive: true, force: true });
+  }
   if (existsSync(entry) && !valid(entry, key)) rmSync(entry, { recursive: true, force: true });
   if (valid(entry, key)) {
     try {
@@ -130,9 +151,10 @@ try {
     installPrivate();
     writeFileSync(checkoutKeyFile, key);
     try {
+      if (!linksStayPrivate(nodeModules)) throw new Error("dependencies contain a link outside node_modules");
       const stage = mkdtempSync(join(repoDir, ".building-"));
       try {
-        cpSync(nodeModules, join(stage, "node_modules"), { recursive: true, mode: constants.COPYFILE_FICLONE });
+        cpSync(nodeModules, join(stage, "node_modules"), { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE });
         writeFileSync(join(stage, "complete.json"), JSON.stringify({ key, createdAt: new Date().toISOString() }));
         renameSync(stage, entry);
       } finally { rmSync(stage, { recursive: true, force: true }); }

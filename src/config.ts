@@ -119,6 +119,8 @@ export interface DispatcherConfig {
   pollIntervalSeconds: number;
   maxRuntimeMinutes: number;
   stateDir: string;
+  /** Optional root for lockfile-keyed dependency entries. */
+  depsCacheDir?: string | undefined;
   logLevel: LogLevel;
   /** Optional repo-specific autoship command; null when disabled (the default). */
   autoshipCmd: string | null;
@@ -350,6 +352,9 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
       90,
     ),
     stateDir,
+    depsCacheDir: env.DISPATCHER_DEPS_CACHE_DIR?.trim()
+      ? expandHome(env.DISPATCHER_DEPS_CACHE_DIR.trim())
+      : undefined,
     logLevel: logLevelRaw,
     autoshipCmd: autoship && autoship.trim() !== "" ? autoship : null,
     autoshipTimeoutMinutes: positiveInt(
