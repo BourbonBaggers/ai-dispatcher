@@ -169,7 +169,7 @@ export interface RunRecord {
     at: number;
     /** False only while GitHub has not yet confirmed the external hold label write. */
     labelApplied?: boolean;
-  };
+  } | undefined;
   /** @deprecated Read-only compatibility with pre-ledger state/test fixtures. */
   ciSelfHealAttempts?: number;
   /** @deprecated Read-only compatibility with pre-ledger state/test fixtures. */

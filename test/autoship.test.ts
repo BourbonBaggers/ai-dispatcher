@@ -351,6 +351,20 @@ describe("autoshipRun — CI self-heal", () => {
 });
 
 describe("autoshipRun — already merged (#10)", () => {
+  it("retries a failed ship after the command merges the PR without a status line", async () => {
+    const h = harness({
+      shipResult: { ok: false, stdout: "", stderr: "PROD_SSH_HOST is required", code: 1 },
+    });
+    let reads = 0;
+    h.deps.github.prState = async () => ++reads === 1 ? "open" : "merged";
+    const deliveries: { pr: number; sha: string }[] = [];
+    h.deps.recordMergedDelivery = (delivery) => { deliveries.push(delivery); };
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.equal(r.action, "deploy_retry");
+    assert.deepEqual(deliveries, [{ pr: 42, sha: "merge789" }]);
+    assert.equal(h.closedIssues.length, 0);
+  });
+
   it("retains merged delivery evidence before an infrastructure failure", async () => {
     const deliveries: { pr: number; sha: string }[] = [];
     const h = harness({

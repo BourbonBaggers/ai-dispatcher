@@ -315,13 +315,19 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   });
   const classified = classifyShipResult(result);
   let confirmedMerge: string | null = null;
-  if (await github.prState(pr) === "merged") {
+  const afterShipState = await github.prState(pr);
+  if (afterShipState === "merged") {
     const delivered = await github.prMergeInfo(pr);
     if (delivered?.mergeCommitOid &&
       (!classified.report?.mergedSha || delivered.mergeCommitOid === classified.report.mergedSha)) {
       confirmedMerge = delivered.mergeCommitOid;
       await deps.recordMergedDelivery?.({ pr, sha: delivered.mergeCommitOid });
     }
+  }
+  if (afterShipState === "unknown") {
+    // The ship command may have merged before losing connectivity. Until GitHub can
+    // answer, a code relaunch could create a replacement PR for an already merged one.
+    return { action: "ci_not_green", state: "unknown" };
   }
 
   if (

@@ -742,6 +742,30 @@ test("recheckParkedRun remains parked while detached systemd deployment verifica
   }
 });
 
+test("merged PR infrastructure failure backs off without launching an agent", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const parked = parkedRun(store);
+    const { deps, ships } = parkedDeps(store, {
+      prState: "merged",
+      shipResult: { ok: false, stdout: "", stderr: "PROD_SSH_HOST is required", code: 1 },
+    });
+    await recheckParkedRun(deps, parked);
+    const retry = store.getRun(parked.id)!;
+    assert.equal(retry.status, "ci_pending");
+    assert.equal(retry.deployRetry?.attempts, 1);
+    assert.deepEqual(retry.mergedDelivery, { pr: parked.prNumber, sha: "merged" });
+    assert.equal(ships.count, 1);
+    await recheckParkedRun(deps, retry);
+    assert.equal(ships.count, 1, "the next probe waits for the durable backoff");
+    assert.equal(retry.recovery?.deploy?.attempts ?? 0, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("recheckParkedRun promotes a draft PR and ships it once CI is green (no human-review-required)", async () => {
   const dir = tmp();
   try {
