@@ -38,6 +38,14 @@ test("::result:: with an unknown ci token falls back to none, not a crash", () =
   assert.equal(parsed?.result?.exit, 1);
 });
 
+test("::result:: carries ci=absent (CI did not start) as its own state, not none (#96)", () => {
+  const parsed = parseControlLine(
+    "::result:: exit=0 pr=https://x/pull/9 commit=abc123 plan= commits=2 ci=absent disposition=normal",
+  );
+  assert.equal(parsed?.result?.ci, "absent");
+  assert.equal(parsed?.result?.commits, 2);
+});
+
 test("::result:: carries a trusted closed-issue retirement disposition", () => {
   const parsed = parseControlLine(
     "::result:: exit=0 pr= commit= plan= commits=0 ci=none disposition=abandoned",
