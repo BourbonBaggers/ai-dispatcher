@@ -1648,3 +1648,194 @@ test("recheckHeldRun on an un-held already-merged PR deploys and verifies it", a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── post-ship audit retries (#98: backoff, a cap, and a terminal state) ─────────
+
+const AUDIT_START = 10_000_000;
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+
+interface AuditSweepHarness {
+  deps: DispatcherDeps;
+  clock: { now: number };
+  /** Every attempt reads the issue body first, so this counts attempts. */
+  bodyReads: number[];
+  judgeCalls: { count: number };
+  logs: Array<{ level: string; msg: string } & Record<string, unknown>>;
+}
+
+function auditSweepHarness(
+  store: StateStore,
+  opts: {
+    issueBody?: () => Promise<string | null>;
+    judge?: DispatcherDeps["judgeAcceptance"];
+  } = {},
+): AuditSweepHarness {
+  const clock = { now: AUDIT_START };
+  const bodyReads: number[] = [];
+  const judgeCalls = { count: 0 };
+  const logs: AuditSweepHarness["logs"] = [];
+  const deps: DispatcherDeps = {
+    config: {
+      ...autoshipConfig({ autoshipCmd: null }),
+      dryRun: false,
+      worktreeDir: "/worktrees",
+      authorAuth: { ok: true, mode: "none", trustedAuthors: new Set() },
+      blockedQueueAuditModel: "claude-sonnet-5",
+      blockedQueueAuditEffortLabel: "effort:low",
+      blockedQueueAuditMaxCandidates: 3,
+    } as DispatcherConfig,
+    store,
+    logger: createLogger("info", (line) => logs.push(JSON.parse(line))),
+    notifier: { send: async () => undefined },
+    github: {
+      // An idle queue: the audit sweep is the only work these scans can do.
+      listOpenIssues: async () => ({ ok: true, issues: [] }),
+      issueBody: async () => {
+        bodyReads.push(clock.now);
+        return opts.issueBody
+          ? opts.issueBody()
+          : ["## Acceptance criteria", "- [ ] Retries back off", "- [ ] Tests cover it"].join("\n");
+      },
+      issueLabels: async () => [],
+      prDiff: async () => "+export const backoff = true;",
+      issuesWithLabel: async () => [],
+      createIssue: async () => null,
+      comment: async () => true,
+    } as unknown as DispatcherDeps["github"],
+    judgeAcceptance: async (request) => {
+      judgeCalls.count += 1;
+      return opts.judge
+        ? opts.judge(request)
+        : request.criteria.map((criterion) => ({ criterion, result: "addressed" as const }));
+    },
+    readCapacity: async () => ({ snapshots: new Map(), errors: new Map() }),
+    blockedQueueAuditor: async () => {
+      throw new Error("an empty queue has no blocked candidates to audit");
+    },
+    now: () => clock.now,
+  };
+  return { deps, clock, bodyReads, judgeCalls, logs };
+}
+
+/** A shipped run whose audit was queued exactly as releases before #98 queued it. */
+function shippedRunAwaitingAudit(store: StateStore): RunRecord {
+  const created = store.createRun({
+    issueNumber: 737,
+    issueTitle: "Delete plan files for closed issues",
+    issueUrl: "https://x/737",
+    agent: "codex",
+    modelLabel: "model:gpt-5.5",
+    cliModel: "gpt-5.5",
+    effortLabel: "effort:medium",
+    cliEffort: "medium",
+    branch: "issue-737-x",
+    checkoutPath: "/w/issue-737-x",
+    planPath: null,
+    trigger: "poll",
+  });
+  return store.updateRun(created.id, {
+    status: "shipped",
+    prNumber: 760,
+    prUrl: "https://x/pull/760",
+    finishedAt: AUDIT_START,
+    audit: { status: "pending", at: AUDIT_START },
+  });
+}
+
+test("an unreadable audit backs off with growing delays, never calls the judge, and goes terminal at the cap (#98)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const shipped = shippedRunAwaitingAudit(store);
+    const h = auditSweepHarness(store, { issueBody: async () => null });
+
+    // Scan every 20 seconds — faster than any production interval — for 52 hours, which
+    // spans every backoff window.
+    const end = AUDIT_START + 52 * HOUR_MS;
+    for (; h.clock.now <= end; h.clock.now += 20_000) await runScanOnce(h.deps);
+
+    const gaps = h.bodyReads.slice(1).map((at, index) => at - h.bodyReads[index]!);
+    assert.equal(h.bodyReads.length, 6, "the cap bounds attempts, not the scan count");
+    assert.deepEqual(gaps, [5 * MINUTE_MS, 30 * MINUTE_MS, 2 * HOUR_MS, 24 * HOUR_MS, 24 * HOUR_MS]);
+    assert.equal(h.judgeCalls.count, 0, "no evidence, no judge call");
+
+    const audit = store.getRun(shipped.id)?.audit;
+    assert.equal(audit?.status, "unavailable");
+    assert.equal(audit?.attempts, 6);
+    assert.match(audit?.reason ?? "", /^gave up after 6 attempts: .*could not be read/);
+
+    const terminal = h.logs.filter((line) => line.msg === "audit: giving up; marked unavailable");
+    assert.equal(terminal.length, 1, "one clear line when the audit goes terminal");
+    assert.equal(terminal[0]!.level, "warn");
+    assert.equal(terminal[0]!.issue, 737);
+    assert.equal(terminal[0]!.reason, audit?.reason);
+
+    // Terminal is final: a year of further scans makes no attempt.
+    h.clock.now += 365 * 24 * HOUR_MS;
+    await runScanOnce(h.deps);
+    assert.equal(h.bodyReads.length, 6);
+    // The audit never touched delivery: the run is still shipped and claims nothing.
+    assert.equal(store.getRun(shipped.id)?.status, "shipped");
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an audit that fails once and then reads its evidence resolves normally (#98)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const shipped = shippedRunAwaitingAudit(store);
+    let readable = false;
+    const h = auditSweepHarness(store, {
+      issueBody: async () =>
+        readable ? ["## Acceptance criteria", "- [ ] Retries back off"].join("\n") : null,
+    });
+
+    await runScanOnce(h.deps);
+    assert.equal(store.getRun(shipped.id)?.audit?.attempts, 1);
+    assert.equal(store.getRun(shipped.id)?.audit?.nextAttemptAt, AUDIT_START + 5 * MINUTE_MS);
+    assert.ok(
+      h.logs.some((line) => line.msg === "audit: attempt failed; retrying after backoff" && line.attempt === 1),
+    );
+
+    readable = true;
+    h.clock.now = AUDIT_START + 4 * MINUTE_MS;
+    await runScanOnce(h.deps);
+    assert.equal(h.bodyReads.length, 1, "still inside the first backoff window");
+
+    h.clock.now = AUDIT_START + 5 * MINUTE_MS;
+    await runScanOnce(h.deps);
+    assert.equal(h.judgeCalls.count, 1);
+    assert.deepEqual(store.getRun(shipped.id)?.audit, { status: "done", at: AUDIT_START + 5 * MINUTE_MS });
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a thrown audit attempt is counted and backed off instead of retried every scan (#98)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const shipped = shippedRunAwaitingAudit(store);
+    const h = auditSweepHarness(store, {
+      issueBody: async () => {
+        throw new Error("gh vanished");
+      },
+    });
+
+    for (let scan = 0; scan < 10; scan += 1, h.clock.now += 20_000) await runScanOnce(h.deps);
+
+    assert.equal(h.bodyReads.length, 1);
+    const audit = store.getRun(shipped.id)?.audit;
+    assert.equal(audit?.status, "pending");
+    assert.equal(audit?.attempts, 1);
+    assert.equal(audit?.reason, "audit threw: gh vanished");
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
