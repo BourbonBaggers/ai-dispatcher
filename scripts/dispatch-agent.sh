@@ -22,6 +22,7 @@
 #   ::pid:: <pid>                  the process group to kill / probe for liveness
 #   ::event:: <ISO8601> <message>  lifecycle milestones for the run timeline
 #   ::result:: exit=<n> pr=<url> commit=<sha> plan=<path> commits=<n> ci=<state>
+#              (ci: pass | fail | pending | absent | none — see lib/dispatch-ci.sh)
 # Everything else on stdout/stderr is raw agent output, streamed as it happens.
 set -euo pipefail
 
@@ -77,6 +78,10 @@ KILL_GRACE_SECONDS=30
 # this leaves room for a queue without stalling the dispatcher.
 CI_WAIT_SECONDS=900
 CI_POLL_SECONDS=20
+# A PR opened seconds ago has no checks registered yet; GitHub normally creates them well
+# within this window. Absence beyond it is reported as `ci=absent` (CI did not start) —
+# parked for the dispatcher's recheck, never red CI and never an agent relaunch.
+CI_START_GRACE_SECONDS=120
 
 ISSUE="" AGENT="" MODEL="" EFFORT="" BRANCH="" MODE="start" MAX_MINUTES="90"
 
@@ -130,6 +135,9 @@ event() { printf '::event:: %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&3; 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/dispatch-capture.sh
 source "$SCRIPT_DIR/lib/dispatch-capture.sh"
+# The CI read rules: structured check buckets, never the bare `gh pr checks` exit code.
+# shellcheck source=scripts/lib/dispatch-ci.sh
+source "$SCRIPT_DIR/lib/dispatch-ci.sh"
 
 # Own the whole process group so a timeout or a dropped connection takes the agent (and
 # everything it spawned) down with us — no orphaned agents on the box.
@@ -377,20 +385,20 @@ PROMPT
   # while CI stays red.
   RESUME_PR="$(gh pr list --repo "$REPO_SLUG" --head "$BRANCH" --json url --jq '.[0].url // empty' 2>/dev/null || true)"
   if [[ -n "$RESUME_PR" ]]; then
-    resume_rc=0
-    gh pr checks "$RESUME_PR" >/dev/null 2>&1 || resume_rc=$?
+    # Only a check GitHub reports failed or cancelled makes the PR red. A head commit CI
+    # has not picked up yet ("no checks reported" — the same gh exit code as a failure),
+    # pending checks, and an unreadable gh are not failures; calling them red sends the
+    # agent hunting for a bug that does not exist.
+    read_pr_ci "$RESUME_PR"
 
-    if [[ "$resume_rc" -ne 0 && "$resume_rc" -ne 8 ]]; then
+    if [[ "$CI_VERDICT" == "fail" ]]; then
       event "resume: the existing PR is RED — handing the failures to the agent"
       {
         printf '\nYOUR EXISTING PULL REQUEST IS FAILING CI: %s\n\n' "$RESUME_PR"
         printf 'The plan may say every milestone is [DONE]. It is not done: the work is not\n'
         printf 'mergeable while CI is red. Your task on this run is to make it green.\n\n'
         printf 'Failing checks:\n'
-        # `gh pr checks` exits non-zero when checks are red, and `grep` exits non-zero
-        # when it matches nothing — either one is fatal under `set -euo pipefail`.
-        # This is a report, not a control-flow decision: it must never kill the run.
-        { gh pr checks "$RESUME_PR" 2>/dev/null || true; } | { grep -iE '\bfail' || true; } | head -5
+        printf '%s\n' "$CI_FAILING_CHECKS"
         printf '\nReproduce the failure locally, fix the cause, commit, and push to the same\n'
         printf 'branch. Do not open a new PR — this one updates itself.\n'
         printf 'If an existing test now fails because your change altered real behaviour, decide\n'
@@ -628,39 +636,14 @@ fi
 
 # ─── Verify CI, rather than believing the agent ──────────────────────────────
 # An agent's self-report is evidence, not proof — it has claimed a green suite while CI
-# was red. Wait for the real answer.
+# was red. Wait for the real answer. A PR opened moments ago has no checks yet, so
+# absent and pending checks keep the wait going; only a real failed/cancelled check is
+# `fail`, and absence past the start grace is its own `absent` state (lib/dispatch-ci.sh).
 CI_STATE="none"
 if [[ -n "$PR_URL" ]]; then
   event "waiting for CI on $PR_URL (up to ${CI_WAIT_SECONDS}s)"
-  ci_deadline=$(( SECONDS + CI_WAIT_SECONDS ))
-
-  while (( SECONDS < ci_deadline )); do
-    # gh pr checks exits 0 when all checks pass, 8 while any are still pending, and
-    # non-zero otherwise. Capture the code WITHOUT letting `set -e` see a bare failing
-    # command: a plain `gh pr checks; case $?` kills the script on the very first
-    # pending poll.
-    ci_rc=0
-    gh pr checks "$PR_URL" >/dev/null 2>&1 || ci_rc=$?
-
-    case "$ci_rc" in
-      0) CI_STATE="pass"; break ;;
-      8) sleep "$CI_POLL_SECONDS" ;;
-      *) CI_STATE="fail"; break ;;
-    esac
-  done
-
-  [[ "$CI_STATE" == "none" ]] && CI_STATE="pending"
-
-  case "$CI_STATE" in
-    pass) event "CI PASSED — the PR is green and ready for autoship" ;;
-    fail)
-      event "CI FAILED — this run did not produce mergeable work:"
-      while IFS= read -r line; do
-        [[ -n "$line" ]] && event "  $line"
-      done < <({ gh pr checks "$PR_URL" 2>/dev/null || true; } | { grep -iE '\bfail' || true; } | head -5)
-      ;;
-    pending) event "CI still running after ${CI_WAIT_SECONDS}s — outcome unverified" ;;
-  esac
+  wait_for_pr_ci "$PR_URL"
+  report_pr_ci "$PR_URL"
 fi
 
 # An audit follow-up (#85) can be filed against work that was already done, because the
