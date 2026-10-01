@@ -102,6 +102,7 @@ export function dispatchAgentEnv(
     DISPATCHER_REPO_SLUG: config.repo.slug,
     DISPATCHER_REPO_DIR: config.repoDir,
     DISPATCHER_WORKTREE_DIR: config.worktreeDir,
+    DISPATCHER_STATE_DIR: config.stateDir,
     [DISPATCHER_TARGET_POLICY_ENV]: "1",
   };
   if (config.envSourceDir) env.DISPATCHER_ENV_SOURCE_DIR = config.envSourceDir;

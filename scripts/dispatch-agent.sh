@@ -263,9 +263,15 @@ if [[ ! -f .env && -n "$DISPATCHER_ENV_SOURCE_DIR" && -f "$DISPATCHER_ENV_SOURCE
   event "seeded .env from $DISPATCHER_ENV_SOURCE_DIR"
 fi
 
-if [[ -f package.json && ! -d node_modules ]]; then
-  event "installing dependencies (npm ci)"
-  npm ci >/dev/null 2>&1 || die "npm ci failed in $CHECKOUT"
+if [[ -f package.json ]]; then
+  # The helper keeps every checkout's node_modules private. In particular, a resumed
+  # agent that edited the lockfile gets a private reinstall, never writes into cache.
+  if deps_event="$(node "$SCRIPT_DIR/deps-cache.mjs" "$CHECKOUT" 2>&1)"; then
+    event "$deps_event"
+  else
+    event "dependencies failed: ${deps_event//$'\n'/ }"
+    die "dependency installation failed in $CHECKOUT"
+  fi
 fi
 
 # ─── Bootstrap prompt ────────────────────────────────────────────────────────

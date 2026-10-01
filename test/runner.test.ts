@@ -108,6 +108,7 @@ test("dispatchAgentEnv threads the required repo identity through the environmen
   assert.equal(env.DISPATCHER_REPO_SLUG, "acme/widgets");
   assert.equal(env.DISPATCHER_REPO_DIR, "/home/dev/mirror");
   assert.equal(env.DISPATCHER_WORKTREE_DIR, "/home/dev/worktrees");
+  assert.equal(env.DISPATCHER_STATE_DIR, "/home/dev/state");
   assert.equal(env[DISPATCHER_TARGET_POLICY_ENV], "1");
 });
 
