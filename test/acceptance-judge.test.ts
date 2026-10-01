@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { JUDGE_SHELL, buildJudgePrompt, judgeAcceptance, judgeArgs } from "../src/acceptance-judge.ts";
+import { MAX_EVIDENCE_CHARS } from "../src/acceptance-evidence.ts";
 import type { ExecResult } from "../src/exec.ts";
 
 const request = {
@@ -105,4 +106,27 @@ test("an injected instruction in the diff cannot force an addressed verdict", as
   );
   // Unparseable prose is unclear, whatever it claims — the enum is the only channel.
   assert.ok(verdicts.every((v) => v.result === "unclear"));
+});
+
+// The fallback listing is partial by construction. The judge must be told so by trusted
+// text, outside the untrusted block, or a file shown without its patch reads as omitted.
+test("a changed-files listing is framed as partial evidence by trusted prompt text (#98)", () => {
+  const prompt = buildJudgePrompt({ ...request, evidence: "changed-files" });
+  const note = prompt.indexOf("GitHub refused this pull request's unified diff as too large");
+  assert.ok(note !== -1);
+  assert.ok(note < prompt.indexOf("<<<ISSUE"), "the framing must sit outside the untrusted data");
+  assert.match(prompt, /A listed file did change even when no patch is shown/);
+  assert.match(prompt, /never evidence\s+for "not_addressed"/);
+});
+
+test("an ordinary diff carries no changed-files framing (#98)", () => {
+  for (const prompt of [buildJudgePrompt(request), buildJudgePrompt({ ...request, evidence: "diff" })]) {
+    assert.doesNotMatch(prompt, /refused this pull request's unified diff/);
+  }
+});
+
+test("the evidence is bounded by the shared evidence budget", () => {
+  const prompt = buildJudgePrompt({ ...request, diff: "d".repeat(MAX_EVIDENCE_CHARS + 500) });
+  assert.ok(prompt.includes("d".repeat(MAX_EVIDENCE_CHARS)));
+  assert.ok(!prompt.includes("d".repeat(MAX_EVIDENCE_CHARS + 1)));
 });

@@ -21,12 +21,12 @@
 
 import type { ExecResult } from "./exec.ts";
 import { parseJudgeVerdicts, type CriterionVerdict } from "./acceptance-audit.ts";
+import { MAX_EVIDENCE_CHARS, type AuditEvidenceKind } from "./acceptance-evidence.ts";
 
 /** Haiku carries this; the audit is deliberately the cheapest lane available. */
 export const DEFAULT_JUDGE_MODEL = "claude-haiku-4-5-20251001";
 export const JUDGE_TIMEOUT_MS = 5 * 60 * 1000;
 
-const MAX_DIFF_CHARS = 60_000;
 const MAX_ISSUE_CHARS = 12_000;
 
 export type JudgeExec = (
@@ -40,6 +40,8 @@ export interface JudgeRequest {
   issueBody: string;
   diff: string;
   criteria: readonly string[];
+  /** What `diff` holds. `changed-files` is the listing used when GitHub refuses a diff (#98). */
+  evidence?: AuditEvidenceKind;
 }
 
 /**
@@ -95,6 +97,19 @@ export function buildJudgePrompt(request: JudgeRequest): string {
     'answer wastes real effort. When you use it you MUST supply a "citation": one short',
     "sentence naming what you looked for and did not find.",
     "",
+    // Trusted framing for the fallback listing, kept outside the untrusted block on purpose:
+    // the judge must believe it, and a partial view must never read as an omission.
+    ...(request.evidence === "changed-files"
+      ? [
+          "GitHub refused this pull request's unified diff as too large, so the DIFF section",
+          "below holds its changed-file list instead: every changed file with its status and",
+          "line counts, then whole per-file patches where GitHub supplied one and space",
+          "allowed. A listed file did change even when no patch is shown, and a removed",
+          "file's content is never shown. Anything you cannot see is unknown, never evidence",
+          'for "not_addressed".',
+          "",
+        ]
+      : []),
     "Respond with ONLY a JSON array, no prose and no code fence:",
     '[{"index": 0, "result": "addressed"}, {"index": 1, "result": "not_addressed", "citation": "..."}]',
     "",
@@ -112,7 +127,7 @@ export function buildJudgePrompt(request: JudgeRequest): string {
     "CRITERIA",
     "",
     "<<<DIFF",
-    request.diff.slice(0, MAX_DIFF_CHARS),
+    request.diff.slice(0, MAX_EVIDENCE_CHARS),
     "DIFF",
   ].join("\n");
 }

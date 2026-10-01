@@ -28,6 +28,7 @@ import { StateStore } from "../src/state.ts";
 import { createLogger } from "../src/logger.ts";
 import type { RunRecord } from "../src/state.ts";
 import type { DispatcherConfig } from "../src/config.ts";
+import type { GithubPrDiff, GithubPrFile } from "../src/github.ts";
 import { assessCapacity } from "../src/capacity.ts";
 
 function tmp(): string {
@@ -578,7 +579,7 @@ function parkedDeps(store: StateStore, opts: {
         reviewDecision: null,
         mergeCommitOid: "merged",
       }),
-      prDiff: async () => "",
+      prDiff: async () => ({ state: "ok", diff: "" }),
       comment: async (_i: number, b: string) => { comments.push(b); return true; },
       addLabel: async (_i: number, l: string) => { labels.push(l); return true; },
       removeLabel: async (_i: number, l: string) => { removedLabels.push(l); return true; },
@@ -1668,6 +1669,8 @@ function auditSweepHarness(
   store: StateStore,
   opts: {
     issueBody?: () => Promise<string | null>;
+    prDiff?: () => Promise<GithubPrDiff>;
+    prFiles?: () => Promise<GithubPrFile[] | null>;
     judge?: DispatcherDeps["judgeAcceptance"];
   } = {},
 ): AuditSweepHarness {
@@ -1698,7 +1701,8 @@ function auditSweepHarness(
           : ["## Acceptance criteria", "- [ ] Retries back off", "- [ ] Tests cover it"].join("\n");
       },
       issueLabels: async () => [],
-      prDiff: async () => "+export const backoff = true;",
+      prDiff: opts.prDiff ?? (async () => ({ state: "ok", diff: "+export const backoff = true;" })),
+      prFiles: opts.prFiles ?? (async () => null),
       issuesWithLabel: async () => [],
       createIssue: async () => null,
       comment: async () => true,
@@ -1763,7 +1767,7 @@ test("an unreadable audit backs off with growing delays, never calls the judge, 
     const audit = store.getRun(shipped.id)?.audit;
     assert.equal(audit?.status, "unavailable");
     assert.equal(audit?.attempts, 6);
-    assert.match(audit?.reason ?? "", /^gave up after 6 attempts: .*could not be read/);
+    assert.equal(audit?.reason, "gave up after 6 attempts: could not read the issue body");
 
     const terminal = h.logs.filter((line) => line.msg === "audit: giving up; marked unavailable");
     assert.equal(terminal.length, 1, "one clear line when the audit goes terminal");
@@ -1834,6 +1838,45 @@ test("a thrown audit attempt is counted and backed off instead of retried every 
     assert.equal(audit?.status, "pending");
     assert.equal(audit?.attempts, 1);
     assert.equal(audit?.reason, "audit threw: gh vanished");
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #737 in production: its PR deleted 302 files, GitHub refuses the diff, and the audit was
+// retried every scan for hours. A record queued before #98 now resolves on its first sweep.
+test("a legacy pending audit whose diff is too large resolves from the changed-file list (#98)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const shipped = shippedRunAwaitingAudit(store);
+    const judged: string[] = [];
+    const h = auditSweepHarness(store, {
+      prDiff: async () => ({
+        state: "too_large",
+        error: "could not find pull request diff: HTTP 406: Sorry, the diff exceeded the maximum number of files (300).",
+      }),
+      prFiles: async () => [
+        { filename: "scripts/lib/plan-discovery.sh", status: "modified", additions: 9, deletions: 1, patch: "@@ -1 +1,9 @@\n+rm_plan" },
+        ...Array.from({ length: 302 }, (_, index) => ({
+          filename: `docs/plans/plan-${index}.md`,
+          status: "removed",
+          additions: 0,
+          deletions: 40,
+        })),
+      ],
+      judge: async (request) => {
+        judged.push(request.evidence);
+        return request.criteria.map((criterion) => ({ criterion, result: "addressed" as const }));
+      },
+    });
+
+    await runScanOnce(h.deps);
+
+    assert.deepEqual(judged, ["changed-files"]);
+    assert.deepEqual(store.getRun(shipped.id)?.audit, { status: "done", at: AUDIT_START });
+    assert.ok(h.logs.some((line) => line.msg === "audit: PR diff too large; auditing its changed-file list"));
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -14,6 +14,11 @@
  *   - an open follow-up referencing the same parent is found by label search as a backstop
  *     for records written before that marking landed.
  * A failed GitHub read is never treated as "no follow-up exists" — that would duplicate.
+ *
+ * Every read happens before the judge runs (#98). The judge call is the one expensive
+ * step, so it is spent only on complete evidence; a failed read ends the attempt, and the
+ * sweep backs off before trying again. A diff GitHub refuses as too large is not a failed
+ * read: it is permanent for the PR, so the audit reads the PR's changed-file list instead.
  */
 
 import {
@@ -27,6 +32,8 @@ import {
   type CriterionVerdict,
 } from "./acceptance-audit.ts";
 import { extractAcceptanceCriteria } from "./acceptance-criteria.ts";
+import { changedFilesEvidence, type AuditEvidenceKind } from "./acceptance-evidence.ts";
+import type { GithubPrDiff, GithubPrFile } from "./github.ts";
 import { DISPATCH_READY_LABEL } from "./labels.ts";
 import type { Logger } from "./logger.ts";
 import type { Notifier } from "./notify.ts";
@@ -39,7 +46,8 @@ export function followUpMarker(parentIssue: number): string {
 export interface AuditGithub {
   issueBody(issue: number): Promise<string | null>;
   issueLabels(issue: number): Promise<string[] | null>;
-  prDiff(pr: number): Promise<string | null>;
+  prDiff(pr: number): Promise<GithubPrDiff>;
+  prFiles(pr: number): Promise<GithubPrFile[] | null>;
   comment(issue: number, body: string): Promise<boolean>;
   createIssue(request: {
     title: string;
@@ -62,6 +70,7 @@ export interface AuditDeps {
     issueBody: string;
     diff: string;
     criteria: readonly string[];
+    evidence: AuditEvidenceKind;
   }): Promise<CriterionVerdict[]>;
   logger: Logger;
   notifier: Notifier;
@@ -105,41 +114,71 @@ async function existingFollowUp(
   return open.find((issue) => issue.body.includes(marker))?.number;
 }
 
+/**
+ * The PR's diff, or its changed-file list when GitHub refuses the diff as too large.
+ * Returns what could not be read instead when neither is available.
+ */
+async function readPrEvidence(
+  deps: AuditDeps,
+  subject: AuditSubject,
+): Promise<{ kind: AuditEvidenceKind; text: string } | { unread: string }> {
+  const diff = await deps.github.prDiff(subject.prNumber);
+  if (diff.state === "ok") return { kind: "diff", text: diff.diff };
+  if (diff.state === "unavailable") return { unread: `PR diff (${diff.error})` };
+
+  const files = await deps.github.prFiles(subject.prNumber);
+  if (files === null || files.length === 0) {
+    return { unread: "PR changed-file list (its diff is too large)" };
+  }
+  deps.logger.info("audit: PR diff too large; auditing its changed-file list", {
+    issue: subject.issueNumber,
+    pr: subject.prNumber,
+    files: files.length,
+  });
+  return { kind: "changed-files", text: changedFilesEvidence(files) };
+}
+
 export async function auditShippedIssue(
   deps: AuditDeps,
   subject: AuditSubject,
 ): Promise<AuditOutcome> {
   const { github, logger } = deps;
 
-  const [body, labels, diff] = await Promise.all([
-    github.issueBody(subject.issueNumber),
-    github.issueLabels(subject.issueNumber),
-    github.prDiff(subject.prNumber),
-  ]);
+  // An unreadable input is not evidence of an omission. Leave the audit pending; the sweep
+  // backs off and retries, and nothing about delivery depends on this completing now.
+  const body = await github.issueBody(subject.issueNumber);
+  if (body === null) return { action: "unavailable", reason: "could not read the issue body" };
 
-  // An unreadable input is not evidence of an omission. Leave the run unmarked so the
-  // next sweep retries; nothing about delivery depends on this completing now.
-  if (body === null || labels === null || diff === null) {
-    return { action: "unavailable", reason: "issue or PR evidence could not be read" };
-  }
-
+  // Settled before any PR read: an issue without criteria needs no other evidence.
   const criteria = extractAcceptanceCriteria(`${subject.issueTitle}\n${body}`);
   if (criteria.length === 0) {
     deps.markAudited(subject, null);
     return { action: "skipped", reason: "issue states no acceptance criteria" };
   }
 
+  // The follow-up search is read here too. It used to run after the judge, so its failure
+  // threw away a verdict that every retry then paid for again.
+  const [labels, evidence, found] = await Promise.all([
+    github.issueLabels(subject.issueNumber),
+    readPrEvidence(deps, subject),
+    existingFollowUp(github, subject.issueNumber),
+  ]);
+  if (labels === null || "unread" in evidence || found === null) {
+    const unread = [
+      ...(labels === null ? ["issue labels"] : []),
+      ...("unread" in evidence ? [evidence.unread] : []),
+      ...(found === null ? ["existing audit follow-ups"] : []),
+    ];
+    return { action: "unavailable", reason: `could not read ${unread.join(", ")}` };
+  }
+
   const verdicts = await deps.judge({
     issueTitle: subject.issueTitle,
     issueBody: body,
-    diff,
+    diff: evidence.text,
     criteria,
+    evidence: evidence.kind,
   });
-
-  const found = await existingFollowUp(github, subject.issueNumber);
-  if (found === null) {
-    return { action: "unavailable", reason: "existing follow-up could not be checked" };
-  }
 
   const decision: AuditDecision = decideAudit({
     parentIssue: subject.issueNumber,
