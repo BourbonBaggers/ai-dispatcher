@@ -1463,11 +1463,14 @@ async function escalateRun(
   fallbackCliModel: string,
   kind: RecoveryKind,
   reason: string,
+  forceConfigured = false,
 ): Promise<void> {
   const { config, store, github, logger, notifier } = deps;
   const now = deps.now ?? (() => Date.now());
 
-  const escalation = await resolveEscalationModel(deps, run, kind, fallbackCliModel, now());
+  const escalation = forceConfigured
+    ? { cliModel: fallbackCliModel, effortLabel: "effort:max", rationale: "configured final frontier attempt" }
+    : await resolveEscalationModel(deps, run, kind, fallbackCliModel, now());
   const cliModel = escalation.cliModel;
   const modelEntry = modelByCliModel(cliModel);
   const agent: DispatcherAgent = modelEntry?.cli === "codex" ? "codex" : "claude";
@@ -1529,6 +1532,14 @@ async function exhaustRun(
   reason: string,
 ): Promise<void> {
   if (await probeMergedDelivery(deps, run)) return;
+  // A configured frontier name is not proof that it ran. Capacity routing can select
+  // an intermediate model while the frontier pool is unavailable.
+  if (run.cliModel !== deps.config.ciEscalationModel ||
+    !modelByCliModel(run.cliModel)?.frontier ||
+    !phaseReachedFrontier(run.recovery, kind, run.cliModel)) {
+    await escalateRun(deps, run, deps.config.ciEscalationModel, kind, reason, true);
+    return;
+  }
   const exhaustedAt = (deps.now ?? (() => Date.now()))();
   let finalRun = recordRunPhase(deps, run, "held", `${kind} recovery exhausted.`, {
     status: "held",
@@ -1557,8 +1568,11 @@ async function exhaustRun(
       "",
       reason,
       "",
-      `The assigned model used ${deps.config.ciSelfHealMaxAttempts} repair attempt(s), then ` +
-        `\`${deps.config.ciEscalationModel}\` made the final attempt. Automation is now exhausted.`,
+      `Attempted models in this phase: ${[
+        run.assignedCliModel,
+        ...(run.recovery?.[kind]?.ladder?.map((rung) => rung.cliModel) ?? []),
+      ].map((model) => `\`${model}\``).join(" → ")}.`,
+      `Final attempt: \`${run.cliModel}\`. Automation is now exhausted.`,
       "",
       "This is the only state that requires operator involvement.",
     ].join("\n"),

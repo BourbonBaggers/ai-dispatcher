@@ -388,6 +388,20 @@ describe("autoshipRun — already merged (#10)", () => {
     assert.equal(r.action, "shipped");
     assert.deepEqual(h.closedIssues, [1]);
   });
+
+  it("does not clear a merged claim using a status report for another merge", async () => {
+    const h = harness({
+      prState: "merged",
+      shipResult: {
+        ok: true,
+        stdout: "::autoship:: state=shipped health=pass merged=other deployed=other\n",
+        stderr: "", code: 0,
+      },
+    });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.notEqual(r.action, "shipped");
+    assert.deepEqual(h.closedIssues, []);
+  });
   it("deploys and verifies an already-merged PR instead of holding", async () => {
     const h = harness({ prState: "merged" });
     const r = await autoshipRun(h.deps, succeededRun());

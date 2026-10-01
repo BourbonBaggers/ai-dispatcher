@@ -813,9 +813,14 @@ test("recheckParkedRun pages only after CI repairs and frontier escalation are e
     const store = StateStore.open(dir);
     const created = parkedRun(store);
     const exhausted = store.updateRun(created.id, {
-      recovery: { ci: { attempts: 2, escalated: true } },
+      cliModel: "claude-opus-5-5",
+      recovery: { ci: { attempts: 2, escalated: true, rung: {
+        modelLabel: "model:claude-opus-5.5", cliModel: "claude-opus-5-5",
+        effortLabel: "effort:max", reason: "final attempt", at: 1000,
+      } } },
     });
     const { deps, comments, labels, notifications } = parkedDeps(store, { ci: "fail" });
+    deps.config.ciEscalationModel = "claude-opus-5-5";
 
     await recheckParkedRun(deps, exhausted);
 
@@ -823,6 +828,34 @@ test("recheckParkedRun pages only after CI repairs and frontier escalation are e
     assert.ok(labels.includes("autoship-held"));
     assert.equal(notifications.count, 1, "one final operator page");
     assert.match(comments.at(-1) ?? "", /Dispatcher exhausted/i);
+    assert.match(comments.at(-1) ?? "", /Final attempt: `claude-opus-5-5`/);
+    assert.doesNotMatch(comments.at(-1) ?? "", /Final attempt: `gpt-5.6-sol`/);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a non-frontier final model cannot create a false exhaustion hold", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const created = parkedRun(store);
+    const current = store.updateRun(created.id, {
+      cliModel: "gpt-5.6-sol",
+      recovery: { ci: { attempts: 2, escalated: true } },
+    });
+    const { deps, labels } = parkedDeps(store, { ci: "fail" });
+    deps.config.ciEscalationModel = "claude-opus-5-5";
+    const launched: string[] = [];
+    deps.launch = async (retry) => {
+      launched.push(retry.cliModel);
+      return store.updateRun(retry.id, { status: "abandoned" });
+    };
+    await recheckParkedRun(deps, current);
+    assert.deepEqual(launched, ["claude-opus-5-5"]);
+    assert.ok(!labels.includes("autoship-held"));
+    assert.equal(store.getRun(current.id)?.exhaustion, undefined);
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -629,7 +629,8 @@ async function alreadyMerged(deps: AutoshipDeps, run: RunRecord, pr: number): Pr
   ) {
     return { action: "deploy_pending", mergedSha: mergeInfo.mergeCommitOid };
   }
-  if (result.code !== 0 || classified.state !== "shipped" || classified.health !== "pass") {
+  if (result.code !== 0 || classified.state !== "shipped" || classified.health !== "pass" ||
+    classified.report?.mergedSha !== mergeInfo.mergeCommitOid) {
     if (retryableDeployFailure(classified, result)) {
       return { action: "deploy_retry", mergedSha: mergeInfo.mergeCommitOid, reason: autoshipFailureBody(pr, result.code, classified) };
     }

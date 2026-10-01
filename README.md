@@ -689,6 +689,21 @@ the issue claim, posts the exhausted evidence, and sends one high-priority page.
 
 GitHub transport/auth/read failures are parked as unknown and rechecked; they are not
 misreported as red CI, merge failure, or operator removal of an exhausted hold.
+When a PR has merged, infrastructure deploy failures retry the ship command with
+bounded backoff while retaining that PR's merge SHA. A later healthy production
+release containing the merge completes the claim, including from a stale hold.
+
+To release a genuinely exhausted claim without editing `state.json`, stop the
+dispatcher service, then run:
+
+```sh
+ai-dispatcher release --repo owner/repo --issue 93 --state-dir /path/to/state
+ai-dispatcher release --repo owner/repo --issue 93 --pr 749 --state-dir /path/to/state
+```
+
+`--pr` selects a different PR only if GitHub confirms it is merged. The command
+retains the run claim, removes `autoship-held`, and lets the restarted dispatcher
+resume the selected PR. The state lock prevents release while the service is running.
 
 When no active, resumable, parked, held, or normally eligible issue remains, the
 dispatcher can audit a bounded slice of the `blocked` queue. It reads each candidate's

@@ -29,6 +29,8 @@ import { runHistoryCommand, runStatusCommand } from "./status.ts";
 import { runDashboardCommand } from "./dashboard.ts";
 import { parseDoctorCommand, parseInitCommand, runDoctor, runInit, type DoctorOptions, type InitOptions } from "./setup.ts";
 import { shipRun, type ShipDeps, type ShipOutcome } from "./ship.ts";
+import { releaseHeldRun } from "./release.ts";
+import { parseRepoSlug } from "./config.ts";
 import {
   resolvePolicyCleanupConfig,
   runPolicyCleanup,
@@ -251,6 +253,40 @@ export async function runPolicyCleanupCommand(
 }
 
 export async function main(argv: string[]): Promise<number> {
+  if (argv[0] === "release") {
+    const args = argv.slice(1);
+    const value = (flag: string): string | undefined => {
+      const index = args.indexOf(flag);
+      return index >= 0 ? args[index + 1] : undefined;
+    };
+    const issue = Number(value("--issue"));
+    const prRaw = value("--pr");
+    const pr = prRaw === undefined ? undefined : Number(prRaw);
+    const repo = parseRepoSlug(value("--repo") ?? process.env.DISPATCHER_REPO);
+    if (!repo.ok || !Number.isSafeInteger(issue) || issue < 1 ||
+      (pr !== undefined && (!Number.isSafeInteger(pr) || pr < 1))) {
+      process.stderr.write("Usage: ai-dispatcher release --repo owner/repo --issue N [--pr M] [--state-dir DIR]\n");
+      return 2;
+    }
+    let store: StateStore;
+    try {
+      store = StateStore.open(stateDirFor(args, process.env));
+    } catch (err) {
+      process.stderr.write(`Cannot open state (stop the dispatcher service first): ${err instanceof Error ? err.message : String(err)}\n`);
+      return 3;
+    }
+    try {
+      const result = await releaseHeldRun(store, new GithubClient(repo.value), repo.value.slug, issue, pr);
+      if (!result.ok) {
+        process.stderr.write(`${result.reason}\n`);
+        return 1;
+      }
+      process.stdout.write(`Released held issue #${issue} on PR #${result.pr ?? "unknown"}; the dispatcher will resume its claim.\n`);
+      return 0;
+    } finally {
+      store.releaseLock();
+    }
+  }
   if (argv[0] === "init") {
     const parsed = parseInitCommand(argv.slice(1), process.env);
     if (!parsed.ok || parsed.help) {
