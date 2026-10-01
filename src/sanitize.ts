@@ -202,10 +202,14 @@ function renderCodexEvent(event: Record<string, unknown>): string[] {
   }
 }
 
-/** The real CI verdict on the run's PR, as observed by the runner — not self-reported. */
-export type CiState = "pass" | "fail" | "pending" | "none";
+/**
+ * The real CI verdict on the run's PR, as observed by the runner — not self-reported.
+ * `absent` means no check had registered within the launcher's start grace: CI did not
+ * start, which is not a verdict on the work (#96). `none` means there was no PR to check.
+ */
+export type CiState = "pass" | "fail" | "pending" | "absent" | "none";
 
-const CI_STATES: CiState[] = ["pass", "fail", "pending", "none"];
+const CI_STATES: CiState[] = ["pass", "fail", "pending", "absent", "none"];
 
 export interface ControlResult {
   exit: number;

@@ -15,8 +15,8 @@
  *      needed. `ci_pending` preserves that trust while fresh checks or detached
  *      deployment verification are pending.
  *      Nothing else (an agent that gave up or crashed) ships.
- *   2. Re-confirm CI is green NOW, from `gh pr checks` exit status — never a verdict
- *      observed earlier, never the agent's self-report.
+ *   2. Re-confirm CI is green NOW, from `gh pr checks` structured buckets — never its
+ *      bare exit code, never a verdict observed earlier, never the agent's self-report.
  *   3. Promote drafts and repair merge conflicts; unresolved merge state enters the
  *      agent-repair ladder rather than a human hold.
  *   4. Invoke the ship command. Exit status and structured health must both prove
@@ -116,8 +116,11 @@ export interface AutoshipDeps {
   beforeShip?: (context: { pr: number; mergedSha: string | null }) => void | Promise<void>;
   /** Persist verified merge identity before handling a deploy failure. */
   recordMergedDelivery?: (delivery: { pr: number; sha: string }) => void | Promise<void>;
-  /** Persists the first empty-check observation before a delayed workflow recheck. */
-  recordMissingChecksAt?: (at: number) => void | Promise<void>;
+  /**
+   * Persists the first empty-check observation before a delayed workflow recheck, or
+   * clears it (`undefined`) once a check suite exists so a later absence gets its own grace.
+   */
+  recordMissingChecksAt?: (at: number | undefined) => void | Promise<void>;
   repairGeneratedConflicts?: (
     request: GeneratedConflictRepairRequest,
   ) => Promise<GeneratedConflictRepairResult>;
@@ -226,6 +229,11 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
     // The first empty result is durable evidence of when the grace clock began, not
     // proof that CI is pending. Persist it before returning so restart cannot reset it.
     await deps.recordMissingChecksAt?.(firstNoChecks ?? Date.now());
+  } else if ((ciEvidence.checkCount ?? 0) > 0 && run.ciChecksFirstObservedAt !== undefined) {
+    // A suite exists, so that absence is over. The grace measures one continuous absence:
+    // a stale start would turn the next transient empty read — a repair push whose checks
+    // have not registered yet — into an immediate CI repair (#96).
+    await deps.recordMissingChecksAt?.(undefined);
   }
   if (readiness.kind === "repair" && readiness.reason === "checks-missing") {
     await github.comment(

@@ -158,7 +158,9 @@ export type RunOutcome =
  *   4. clean exit, zero commits (agent gave up — not "complete")
  *   5. clean exit, CI red -> `ci_failed` (drives the self-heal/escalate/held ladder)
  *   6. clean exit, CI pending -> `ci_pending` (parked; the NEXT scan re-checks CI only,
- *      it does not relaunch the agent)
+ *      it does not relaunch the agent). CI absent (no check registered within the
+ *      launcher's start grace: CI did not start) parks the same way, with its own
+ *      summary -- it is not a verdict on the work, so it never spends recovery (#96).
  *   7. clean exit, CI pass -> `pr_ready`: an honest hand-off, not production success.
  *      `evaluateAutoship` re-checks CI and may park, repair, exhaust, or persist
  *      `shipped` only after merge + deploy + health + issue closure.
@@ -310,6 +312,20 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
       exitCode: 0,
       summary:
         "The agent opened a PR; CI had not finished when the run ended. The dispatcher will re-check CI on its own, without relaunching the agent, until it resolves.",
+      ...(classification ? { classification } : {}),
+    };
+  }
+
+  if (exitCode === 0 && resultCi === "absent") {
+    // No check registered within the launcher's start grace: CI did not start. That says
+    // nothing about the work, so it must not become `ci_failed` -- that ladder relaunches
+    // the agent and spends a recovery attempt on a build that was never red. Park it like
+    // pending CI; autoship's recheck owns the durable-absence decision (#60).
+    return {
+      status: "ci_pending",
+      exitCode: 0,
+      summary:
+        "The agent opened a PR, but no CI checks registered on it within the start grace period — CI did not start. The dispatcher will re-check CI on its own, without relaunching the agent or spending a recovery attempt.",
       ...(classification ? { classification } : {}),
     };
   }

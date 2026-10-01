@@ -130,8 +130,11 @@ export interface RunRecord {
   failureCategory?: string;
   /** Redacted evidence excerpt explaining the failure classification. */
   failureEvidence?: string;
-  /** First observation of an empty check suite; survives scans so it cannot wait forever. */
-  ciChecksFirstObservedAt?: number;
+  /**
+   * First observation of an empty check suite; survives scans so it cannot wait forever.
+   * Cleared once a suite is observed, so each absence gets its own grace period.
+   */
+  ciChecksFirstObservedAt?: number | undefined;
   resumeCount: number;
   /** Monotonic launch sequence; telemetry idempotency must not depend on clock timing. */
   attemptNumber: number;

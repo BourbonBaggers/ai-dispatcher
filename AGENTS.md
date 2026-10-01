@@ -257,6 +257,7 @@ ROUTING.md                the routing rubric decision table (the planning-repo p
 scripts/
   dispatch-agent.sh       the bundled per-run launcher (repo-parameterized, fails fast)
   lib/dispatch-capture.sh the uncommitted-work safety net (sourced by the launcher)
+  lib/dispatch-ci.sh      the post-run CI wait: structured check buckets, never gh exit codes
   self-ship.sh            detached restart, health verification, and rollback
   shellcheck-ci.sh        bounded tracked-shell-file ShellCheck wrapper
 test/                     node:test suites, one per module
@@ -357,6 +358,11 @@ optional effort authoritative for the initial launch.
   `maxBuffer` abort, and return a repairable timeout. The default ceiling is 120 minutes.
 - A GitHub read failure is `unknown`, never fabricated red CI or proof that an exhausted
   hold label was removed. Unknown state parks and rechecks without spending model budget.
+- A `gh pr checks` exit code is not a CI verdict: gh exits 1 for red CI, for a transport
+  error, and for a PR whose checks have not registered yet (`no checks reported`). Read
+  structured buckets; only `fail`/`cancel` is red. The launcher waits through absence,
+  then reports `ci=absent`, which parks without an agent relaunch or recovery spend (#96).
+  Autoship's missing-suite grace restarts whenever a suite is observed.
 - Exit zero from a ship command is not production evidence. A terminal structured status
   with merged and deployed SHA evidence plus passing health is required for `shipped`.
 - Every agent relaunch consumes finite resume budget even when the provider emits output;

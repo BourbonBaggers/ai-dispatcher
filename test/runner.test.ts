@@ -275,6 +275,20 @@ test("a clean exit with commits and pending CI is parked (ci_pending), not succe
   assert.match(outcome.status === "ci_pending" ? (outcome.summary ?? "") : "", /re-check CI/i);
 });
 
+test("CI that never started (ci=absent) parks as ci_pending, never ci_failed (#96)", () => {
+  const outcome = classifyRunOutcome(signals({ resultCi: "absent" }));
+  // Not ci_failed: that status drives the repair ladder, which relaunches the agent and
+  // spends a recovery attempt on a build that was never red.
+  assert.equal(outcome.status, "ci_pending");
+  assert.equal(outcome.exitCode, 0);
+  const summary = outcome.status === "ci_pending" ? (outcome.summary ?? "") : "";
+  assert.match(summary, /CI did not start/);
+  assert.match(summary, /without relaunching the agent or spending a recovery attempt/);
+  // Its own state in the run record: distinct from the still-running wording.
+  const stillRunning = classifyRunOutcome(signals({ resultCi: "pending" }));
+  assert.notEqual(summary, stillRunning.status === "ci_pending" ? stillRunning.summary : null);
+});
+
 test("a plain non-zero exit with a result line is a failure carrying the exit code", () => {
   const outcome = classifyRunOutcome(
     signals({ resultExit: 3, resultCommits: 1, resultCi: "none" }),
