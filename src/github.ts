@@ -31,6 +31,7 @@ export interface GithubPrMergeInfo {
   mergeStateStatus: string;
   reviewDecision: string | null;
   mergeCommitOid: string | null;
+  mergedAt?: string | null;
 }
 
 export interface GithubPrChecksEvidence {
@@ -232,7 +233,7 @@ export function prMergeInfoArgs(slug: string, pr: number): string[] {
     "--repo",
     slug,
     "--json",
-    "baseRefName,baseRefOid,headRefName,headRefOid,isDraft,mergeStateStatus,reviewDecision,mergeCommit",
+    "baseRefName,baseRefOid,headRefName,headRefOid,isDraft,mergeStateStatus,reviewDecision,mergeCommit,mergedAt",
   ];
 }
 
@@ -601,6 +602,9 @@ export class GithubClient {
           raw.mergeCommit && typeof raw.mergeCommit.oid === "string"
             ? raw.mergeCommit.oid
             : null,
+        mergedAt: typeof (raw as { mergedAt?: unknown }).mergedAt === "string"
+          ? (raw as { mergedAt: string }).mergedAt
+          : null,
       };
     } catch {
       return null;

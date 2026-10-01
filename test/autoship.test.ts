@@ -42,6 +42,7 @@ interface Harness {
   comments: string[];
   labels: string[];
   pushes: { title: string; priority: number }[];
+  pushBodies: string[];
   repairs: number;
   errors: string[];
   promotions: number;
@@ -76,6 +77,7 @@ function harness(opts: {
   const comments: string[] = [];
   const labels: string[] = [];
   const pushes: Harness["pushes"] = [];
+  const pushBodies: string[] = [];
   const errors: string[] = [];
   const closedIssues: number[] = [];
   let repairs = 0;
@@ -136,7 +138,7 @@ function harness(opts: {
       };
     },
     ship: async (command, env, options) => { shipped.push({ command, env, cwd: options?.cwd }); return opts.shipResult ?? ok; },
-    notifier: { send: async (title, _b, priority = 3) => { pushes.push({ title, priority }); } },
+    notifier: { send: async (title, body, priority = 3) => { pushes.push({ title, priority }); pushBodies.push(body); } },
     logger: {
       debug() {},
       info() {},
@@ -150,6 +152,7 @@ function harness(opts: {
     comments,
     labels,
     pushes,
+    pushBodies,
     errors,
     closedIssues,
     get repairs() {
@@ -439,11 +442,16 @@ describe("autoshipRun — already merged (#10)", () => {
   });
   it("deploys and verifies an already-merged PR instead of holding", async () => {
     const h = harness({ prState: "merged" });
+    h.deps.prMergedAt = async () => 10_000;
+    h.deps.now = () => 70_000;
     const r = await autoshipRun(h.deps, succeededRun());
     assert.deepEqual(r, { action: "shipped" });
     assert.equal(h.shipped.length, 1);
     assert.equal(h.shipped[0]!.env.AUTOSHIP_MERGED_SHA, "merge789");
     assert.ok(!h.labels.includes(AUTOSHIP_HELD_LABEL));
+    assert.deepEqual(h.pushes.map((push) => push.title), ["Shipped #1: t"]);
+    assert.deepEqual(h.pushBodies, ["PR #42 merged and deployed (verified), 1m elapsed."]);
+    assert.ok(!h.pushBodies[0]!.includes("already merged"));
   });
 
   it("closes the issue after the already-merged commit is verified in production", async () => {
@@ -458,6 +466,16 @@ describe("autoshipRun — already merged (#10)", () => {
     const r = await autoshipRun(h.deps, succeededRun());
     assert.equal(r.action, "shipped");
     assert.equal(h.shipped.length, 1);
+    assert.deepEqual(h.pushes.map((push) => push.title), ["Shipped #1: t"]);
+    assert.deepEqual(h.pushBodies, ["PR #42 merged and deployed (verified)."]);
+  });
+
+  it("suppresses a second success push when the durable run already claimed it", async () => {
+    const h = harness({ prState: "merged" });
+    h.deps.claimShippedNotification = () => false;
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.equal(r.action, "shipped");
+    assert.deepEqual(h.pushes, []);
   });
 });
 

@@ -157,6 +157,7 @@ test("prMergeInfo parses structured PR mergeability fields", async () => {
         mergeStateStatus: "DIRTY",
         reviewDecision: null,
         mergeCommit: { oid: "merge789" },
+        mergedAt: "2026-10-01T00:00:00Z",
       }),
     ),
   );
@@ -170,6 +171,7 @@ test("prMergeInfo parses structured PR mergeability fields", async () => {
     mergeStateStatus: "DIRTY",
     reviewDecision: null,
     mergeCommitOid: "merge789",
+    mergedAt: "2026-10-01T00:00:00Z",
   });
 });
 
