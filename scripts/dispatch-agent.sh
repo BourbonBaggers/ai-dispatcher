@@ -575,7 +575,9 @@ if [[ "$LOCAL_COMMITS" -eq 0 && "$REMOTE_COMMITS" -gt 0 ]]; then
   event "agent committed outside this checkout — $REMOTE_COMMITS commit(s) found on origin/$BRANCH"
 fi
 
-PR_URL="$(gh pr list --repo "$REPO_SLUG" --head "$BRANCH" --state all --json url --jq '.[0].url // empty' 2>/dev/null || true)"
+# If the branch has ever merged, its original PR remains the delivery identity even
+# after a recovery launch makes further commits. Never switch the result to a newer PR.
+PR_URL="$(gh pr list --repo "$REPO_SLUG" --head "$BRANCH" --state all --json url,state --jq '([.[] | select(.state == "MERGED")][0].url // .[0].url // empty)' 2>/dev/null || true)"
 
 if [[ -n "$PR_URL" ]]; then
   event "pull request: $PR_URL"

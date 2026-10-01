@@ -742,6 +742,30 @@ test("recheckParkedRun remains parked while detached systemd deployment verifica
   }
 });
 
+test("merged PR infrastructure failure backs off without launching an agent", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const parked = parkedRun(store);
+    const { deps, ships } = parkedDeps(store, {
+      prState: "merged",
+      shipResult: { ok: false, stdout: "", stderr: "PROD_SSH_HOST is required", code: 1 },
+    });
+    await recheckParkedRun(deps, parked);
+    const retry = store.getRun(parked.id)!;
+    assert.equal(retry.status, "ci_pending");
+    assert.equal(retry.deployRetry?.attempts, 1);
+    assert.deepEqual(retry.mergedDelivery, { pr: parked.prNumber, sha: "merged" });
+    assert.equal(ships.count, 1);
+    await recheckParkedRun(deps, retry);
+    assert.equal(ships.count, 1, "the next probe waits for the durable backoff");
+    assert.equal(retry.recovery?.deploy?.attempts ?? 0, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("recheckParkedRun promotes a draft PR and ships it once CI is green (no human-review-required)", async () => {
   const dir = tmp();
   try {
@@ -789,9 +813,14 @@ test("recheckParkedRun pages only after CI repairs and frontier escalation are e
     const store = StateStore.open(dir);
     const created = parkedRun(store);
     const exhausted = store.updateRun(created.id, {
-      recovery: { ci: { attempts: 2, escalated: true } },
+      cliModel: "claude-opus-5-5",
+      recovery: { ci: { attempts: 2, escalated: true, rung: {
+        modelLabel: "model:claude-opus-5.5", cliModel: "claude-opus-5-5",
+        effortLabel: "effort:max", reason: "final attempt", at: 1000,
+      } } },
     });
     const { deps, comments, labels, notifications } = parkedDeps(store, { ci: "fail" });
+    deps.config.ciEscalationModel = "claude-opus-5-5";
 
     await recheckParkedRun(deps, exhausted);
 
@@ -799,6 +828,34 @@ test("recheckParkedRun pages only after CI repairs and frontier escalation are e
     assert.ok(labels.includes("autoship-held"));
     assert.equal(notifications.count, 1, "one final operator page");
     assert.match(comments.at(-1) ?? "", /Dispatcher exhausted/i);
+    assert.match(comments.at(-1) ?? "", /Final attempt: `claude-opus-5-5`/);
+    assert.doesNotMatch(comments.at(-1) ?? "", /Final attempt: `gpt-5.6-sol`/);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a non-frontier final model cannot create a false exhaustion hold", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const created = parkedRun(store);
+    const current = store.updateRun(created.id, {
+      cliModel: "gpt-5.6-sol",
+      recovery: { ci: { attempts: 2, escalated: true } },
+    });
+    const { deps, labels } = parkedDeps(store, { ci: "fail" });
+    deps.config.ciEscalationModel = "claude-opus-5-5";
+    const launched: string[] = [];
+    deps.launch = async (retry) => {
+      launched.push(retry.cliModel);
+      return store.updateRun(retry.id, { status: "abandoned" });
+    };
+    await recheckParkedRun(deps, current);
+    assert.deepEqual(launched, ["claude-opus-5-5"]);
+    assert.ok(!labels.includes("autoship-held"));
+    assert.equal(store.getRun(current.id)?.exhaustion, undefined);
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -816,7 +873,7 @@ function heldRun(store: StateStore): RunRecord {
   });
 }
 
-test("recheckHeldRun reopens a prematurely closed exhausted issue and retains its hold", async () => {
+test("recheckHeldRun reopens a prematurely closed issue and verifies its merged PR", async () => {
   const dir = tmp();
   try {
     const store = StateStore.open(dir);
@@ -830,15 +887,15 @@ test("recheckHeldRun reopens a prematurely closed exhausted issue and retains it
 
     const { rechecked } = await recheckHeldRun(deps, run1);
 
-    assert.equal(rechecked, false);
-    assert.equal(store.getRun(run1.id)?.status, "held");
+    assert.equal(rechecked, true);
+    assert.equal(store.getRun(run1.id)?.status, "shipped");
     assert.equal(reopened.count, 1, "closure without verified production is repaired");
     assert.equal(reads.issueLabels, 1);
-    assert.equal(ships.count, 0);
+    assert.equal(ships.count, 1);
     assert.equal(comments.length, 0);
     assert.equal(labels.length, 0);
-    assert.equal(removedLabels.length, 0);
-    assert.equal(notifications.count, 0);
+    assert.deepEqual(removedLabels, ["autoship-held"]);
+    assert.equal(notifications.count, 1);
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1426,6 +1483,26 @@ test("recheckHeldRun is a no-op while the issue still carries autoship-held", as
     assert.equal(ships.count, 0, "the ship command must not run while still held");
     assert.equal(comments.length, 0);
     assert.equal(labels.length, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recheckHeldRun completes a merged PR already in production despite a stale hold", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const held = heldRun(store);
+    const run1 = store.updateRun(held.id, { mergedDelivery: { pr: held.prNumber!, sha: "merged" } });
+    const { deps, removedLabels, ships } = parkedDeps(store, {
+      ci: "pass", prState: "merged", issueLabels: ["autoship-held"],
+    });
+    const result = await recheckHeldRun(deps, run1);
+    assert.equal(result.rechecked, true);
+    assert.equal(ships.count, 1);
+    assert.equal(store.getRun(run1.id)?.status, "shipped");
+    assert.ok(removedLabels.includes("autoship-held"));
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });

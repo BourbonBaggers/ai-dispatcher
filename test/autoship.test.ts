@@ -351,6 +351,57 @@ describe("autoshipRun — CI self-heal", () => {
 });
 
 describe("autoshipRun — already merged (#10)", () => {
+  it("retries a failed ship after the command merges the PR without a status line", async () => {
+    const h = harness({
+      shipResult: { ok: false, stdout: "", stderr: "PROD_SSH_HOST is required", code: 1 },
+    });
+    let reads = 0;
+    h.deps.github.prState = async () => ++reads === 1 ? "open" : "merged";
+    const deliveries: { pr: number; sha: string }[] = [];
+    h.deps.recordMergedDelivery = (delivery) => { deliveries.push(delivery); };
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.equal(r.action, "deploy_retry");
+    assert.deepEqual(deliveries, [{ pr: 42, sha: "merge789" }]);
+    assert.equal(h.closedIssues.length, 0);
+  });
+
+  it("retains merged delivery evidence before an infrastructure failure", async () => {
+    const deliveries: { pr: number; sha: string }[] = [];
+    const h = harness({
+      prState: "merged",
+      shipResult: { ok: false, stdout: "", stderr: "PROD_SSH_HOST is required", code: 1 },
+    });
+    h.deps.recordMergedDelivery = (delivery) => { deliveries.push(delivery); };
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.equal(r.action, "deploy_retry");
+    assert.deepEqual(deliveries, [{ pr: 42, sha: "merge789" }]);
+    assert.equal(h.closedIssues.length, 0);
+  });
+
+  it("completes a previously failed merged PR when production now contains it", async () => {
+    const h = harness({ prState: "merged" });
+    const r = await autoshipRun(h.deps, succeededRun({
+      status: "ci_pending",
+      mergedDelivery: { pr: 42, sha: "merge789" },
+      deployRetry: { attempts: 1, after: 0 },
+    }));
+    assert.equal(r.action, "shipped");
+    assert.deepEqual(h.closedIssues, [1]);
+  });
+
+  it("does not clear a merged claim using a status report for another merge", async () => {
+    const h = harness({
+      prState: "merged",
+      shipResult: {
+        ok: true,
+        stdout: "::autoship:: state=shipped health=pass merged=other deployed=other\n",
+        stderr: "", code: 0,
+      },
+    });
+    const r = await autoshipRun(h.deps, succeededRun());
+    assert.notEqual(r.action, "shipped");
+    assert.deepEqual(h.closedIssues, []);
+  });
   it("deploys and verifies an already-merged PR instead of holding", async () => {
     const h = harness({ prState: "merged" });
     const r = await autoshipRun(h.deps, succeededRun());

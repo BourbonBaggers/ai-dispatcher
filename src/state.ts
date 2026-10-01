@@ -120,6 +120,10 @@ export interface RunRecord {
   lastCommit: string | null;
   prUrl: string | null;
   prNumber: number | null;
+  /** Original merged delivery; later launcher results must not replace this PR. */
+  mergedDelivery?: { pr: number; sha: string };
+  /** Backoff for infrastructure deploy probes; never spends model repair budget. */
+  deployRetry?: { attempts: number; after: number };
   exitCode: number | null;
   failureSummary: string | null;
   /** Classification of the failure (if any) — drives evidence-based recovery decisions. */
@@ -165,7 +169,7 @@ export interface RunRecord {
     at: number;
     /** False only while GitHub has not yet confirmed the external hold label write. */
     labelApplied?: boolean;
-  };
+  } | undefined;
   /** @deprecated Read-only compatibility with pre-ledger state/test fixtures. */
   ciSelfHealAttempts?: number;
   /** @deprecated Read-only compatibility with pre-ledger state/test fixtures. */

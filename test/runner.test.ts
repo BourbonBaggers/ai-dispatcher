@@ -283,6 +283,12 @@ test("a plain non-zero exit with a result line is a failure carrying the exit co
   assert.equal(outcome.exitCode, 3);
 });
 
+test("launcher-synthesized exit 75 resumes unpublished work without agent exhaustion", () => {
+  const outcome = classifyRunOutcome(signals({ resultExit: 75, resultCommits: 1, resultCi: "none" }));
+  assert.equal(outcome.status, "interrupted");
+  assert.equal(outcome.exitCode, 75);
+});
+
 test("the result line's exit code wins over the child's close code", () => {
   // The script may exit 0 overall while its ::result:: reports the agent's own code.
   const outcome = classifyRunOutcome(
