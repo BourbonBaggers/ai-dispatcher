@@ -108,6 +108,7 @@ test("dispatchAgentEnv threads the required repo identity through the environmen
   assert.equal(env.DISPATCHER_REPO_SLUG, "acme/widgets");
   assert.equal(env.DISPATCHER_REPO_DIR, "/home/dev/mirror");
   assert.equal(env.DISPATCHER_WORKTREE_DIR, "/home/dev/worktrees");
+  assert.equal(env.DISPATCHER_STATE_DIR, "/home/dev/state");
   assert.equal(env[DISPATCHER_TARGET_POLICY_ENV], "1");
 });
 
@@ -115,6 +116,11 @@ test("dispatchAgentEnv omits the env-source dir when none is configured, sets it
   assert.equal("DISPATCHER_ENV_SOURCE_DIR" in dispatchAgentEnv(config()), false);
   const env = dispatchAgentEnv(config({ envSourceDir: "/home/dev/app" }));
   assert.equal(env.DISPATCHER_ENV_SOURCE_DIR, "/home/dev/app");
+});
+
+test("dispatchAgentEnv passes the dependency cache override", () => {
+  assert.equal("DISPATCHER_DEPS_CACHE_DIR" in dispatchAgentEnv(config()), false);
+  assert.equal(dispatchAgentEnv(config({ depsCacheDir: "/cache" })).DISPATCHER_DEPS_CACHE_DIR, "/cache");
 });
 
 test("dispatchAgentEnv passes a bounded recovery reason as data for resumed agents", () => {

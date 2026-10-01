@@ -849,6 +849,23 @@ The audit is advisory, so its retries are bounded and it never blocks delivery (
 
 ## State model
 
+### Dependency cache
+
+For targets with `package-lock.json`, the launcher keys installed dependencies by the
+lockfile SHA-256, Node major version, and optional `prisma/schema.prisma` SHA-256.
+Completed entries live under `<state-dir>/deps-cache/<owner>-<repo>/<key>/`; set
+`DISPATCHER_DEPS_CACHE_DIR` to move the cache root. A repository-wide file lock makes
+simultaneous misses install once. A miss runs `npm ci` and, when the target defines it,
+`npm run db:generate` before publishing the entry. Only entries with a completion marker
+are reused. The three newest completed keys per repository are retained.
+
+Each checkout receives a private `node_modules` tree so generators or agents cannot
+change a shared entry. Filesystems with copy-on-write cloning share file data without
+sharing writes; other filesystems copy file data while still skipping `npm ci` and its
+scripts on a hit. A changed lockfile or schema in a resumed checkout triggers a private
+install. Cache and attachment failures also fall back to private `npm ci`, with the
+reason and elapsed time in the run timeline.
+
 All durable state is one atomically-written JSON file plus a lock, under `--state-dir`:
 
 - `state.json` — runs (status, claim, resume/progress counters, parked/ladder CI

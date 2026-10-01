@@ -265,6 +265,7 @@ src/
 ROUTING.md                the routing rubric decision table (the planning-repo policy deliverable)
 scripts/
   dispatch-agent.sh       the bundled per-run launcher (repo-parameterized, fails fast)
+  deps-cache.mjs           private checkout dependencies from a lockfile-keyed cache
   lib/dispatch-capture.sh the uncommitted-work safety net (sourced by the launcher)
   lib/dispatch-ci.sh      the post-run CI wait: structured check buckets, never gh exit codes
   self-ship.sh            detached restart, health verification, and rollback
