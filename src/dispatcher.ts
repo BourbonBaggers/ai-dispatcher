@@ -1528,6 +1528,7 @@ async function exhaustRun(
   kind: RecoveryKind,
   reason: string,
 ): Promise<void> {
+  if (await probeMergedDelivery(deps, run)) return;
   const exhaustedAt = (deps.now ?? (() => Date.now()))();
   let finalRun = recordRunPhase(deps, run, "held", `${kind} recovery exhausted.`, {
     status: "held",
@@ -1575,6 +1576,51 @@ async function exhaustRun(
       NOTIFY_PRIORITY_HIGH,
     )
     .catch(() => undefined);
+}
+
+/** A previously merged PR can become healthy through another deploy while recovery runs. */
+async function probeMergedDelivery(deps: DispatcherDeps, run: RunRecord): Promise<boolean> {
+  if (!deps.ship || !deps.config.autoshipCmd) return false;
+  try {
+    let delivery = run.mergedDelivery;
+    if (!delivery && run.prNumber !== null && await deps.github.prState(run.prNumber) === "merged") {
+      const merge = await deps.github.prMergeInfo(run.prNumber);
+      if (merge?.mergeCommitOid) delivery = { pr: run.prNumber, sha: merge.mergeCommitOid };
+    }
+    if (!delivery) return false;
+    const outcome = await autoshipRun({
+      github: deps.github,
+      ship: deps.ship,
+      notifier: deps.notifier,
+      logger: deps.logger,
+      autoshipCmd: deps.config.autoshipCmd,
+      autoshipDeploymentCheckout: deps.config.autoshipDeploymentDir,
+      repoSlug: deps.config.repo.slug,
+      generatedConflictAllowlist: deps.config.generatedConflictAllowlist,
+      generatedConflictRegenCmd: deps.config.generatedConflictRegenCmd,
+      generatedConflictMaxAttempts: deps.config.generatedConflictMaxAttempts,
+      generatedConflictCiWaitSeconds: deps.config.generatedConflictCiWaitSeconds,
+      ciSelfHealMaxAttempts: deps.config.ciSelfHealMaxAttempts,
+      ciEscalationModel: deps.config.ciEscalationModel,
+    }, { ...run, status: "pr_ready", exitCode: 0, prNumber: delivery.pr });
+    if (outcome.action !== "shipped") return false;
+    await deps.github.removeLabel(run.issueNumber, AUTOSHIP_HELD_LABEL);
+    recordRunPhase(deps, run, "verifying", "Original merged PR is verified in production.", {
+      status: "shipped",
+      prNumber: delivery.pr,
+      prUrl: `https://github.com/${deps.config.repo.slug}/pull/${delivery.pr}`,
+      exhaustion: undefined,
+      audit: { status: "pending", at: (deps.now ?? (() => Date.now()))() },
+      finalizationPending: false,
+    });
+    return true;
+  } catch (err) {
+    deps.logger.warn("merged delivery probe failed; retaining claim", {
+      runId: run.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
 }
 
 /**
@@ -1731,6 +1777,9 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
         generatedConflictCiWaitSeconds: deps.config.generatedConflictCiWaitSeconds,
         ciSelfHealMaxAttempts: deps.config.ciSelfHealMaxAttempts,
         ciEscalationModel: deps.config.ciEscalationModel,
+        recordMergedDelivery: (delivery) => {
+          store.updateRun(run.id, { mergedDelivery: delivery });
+        },
         beforeShip: ({ pr, mergedSha }) => {
           recordRunPhase(deps, run, "deploying", "Autoship deployment started.", {
             status: "ci_pending",
@@ -1782,6 +1831,17 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
           status: "ci_pending",
         });
         return { relaunched: false };
+      case "deploy_retry": {
+        const attempts = (run.deployRetry?.attempts ?? 0) + 1;
+        const delayMs = Math.min(60 * 60_000, 60_000 * 2 ** Math.min(attempts - 1, 6));
+        recordRunPhase(deps, run, "verifying", "Retrying merged PR deployment after infrastructure failure.", {
+          status: "ci_pending",
+          mergedDelivery: { pr: run.prNumber!, sha: outcome.mergedSha },
+          deployRetry: { attempts, after: (deps.now ?? (() => Date.now()))() + delayMs },
+          failureSummary: outcome.reason,
+        });
+        return { relaunched: false };
+      }
       case "ci_not_green":
         if (outcome.state === "pending" || outcome.state === "unknown") {
           // Only touch the record on the TRANSITION into parked -- a recheck that finds
@@ -1872,6 +1932,7 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
  * notify for every outcome that actually changes.
  */
 export async function recheckParkedRun(deps: DispatcherDeps, run: RunRecord): Promise<void> {
+  if (run.deployRetry && (deps.now ?? (() => Date.now()))() < run.deployRetry.after) return;
   deps.logger.info("rechecking parked run's CI", { runId: run.id, issue: run.issueNumber });
   recordRunPhase(deps, run, "waiting_ci", "Rechecking parked PR checks.");
   await evaluateAutoship(deps, run);
@@ -1939,6 +2000,7 @@ export async function recheckHeldRun(deps: DispatcherDeps, run: RunRecord): Prom
   }
   if (labels.includes(AUTOSHIP_HELD_LABEL) && run.exhaustion) {
     // A current-version hold carries durable proof that the full ladder was spent.
+    if (await probeMergedDelivery(deps, run)) return { rechecked: true };
     return { rechecked: false };
   }
   if (labels.includes(AUTOSHIP_HELD_LABEL)) {

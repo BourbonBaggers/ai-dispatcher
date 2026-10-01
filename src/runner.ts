@@ -251,6 +251,16 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
     };
   }
 
+  if (exitCode === 75 && sawResult) {
+    // The launcher synthesized this after a clean provider exit when work remains
+    // unpublished. It is a checkout/push repair, not a failed frontier model.
+    return {
+      status: "interrupted",
+      exitCode,
+      summary: "The launcher found unpublished work. Resume this checkout to commit or push it.",
+    };
+  }
+
   if (!sawResult) {
     // We know NOTHING about what the agent achieved — it was killed (a CLI crash, a
     // dropped connection, a restart). Work on disk survives, so this is resumable. This
@@ -474,9 +484,12 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
         resultCi = control.result.ci;
         resultDisposition = control.result.disposition;
         const { pr, commit, plan } = control.result;
+        const mergedDelivery = store.getRun(run.id)?.mergedDelivery;
         store.updateRun(run.id, {
-          prUrl: pr || null,
-          prNumber: pr ? Number.parseInt(pr.split("/").pop() ?? "", 10) || null : null,
+          // A recovery agent can publish another PR after the original merged. The
+          // merged PR remains the delivery claim until production verifies its SHA.
+          prUrl: mergedDelivery ? `https://github.com/${config.repo.slug}/pull/${mergedDelivery.pr}` : pr || null,
+          prNumber: mergedDelivery?.pr ?? (pr ? Number.parseInt(pr.split("/").pop() ?? "", 10) || null : null),
           lastCommit: commit || null,
           planPath: plan || null,
           outputSeq,
@@ -523,7 +536,10 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
       // agent to push/open the PR.
       const observed = store.getRun(run.id);
       const effectiveOutcome = requirePrForDelivery(outcome, observed?.prNumber ?? null);
-      let status: TerminalStatus = effectiveOutcome.status;
+      let status: TerminalStatus =
+        observed?.mergedDelivery && effectiveOutcome.exitCode === 75
+          ? "pr_ready"
+          : effectiveOutcome.status;
       let summary: string | null;
 
       if (effectiveOutcome.status === "token_exhausted") {

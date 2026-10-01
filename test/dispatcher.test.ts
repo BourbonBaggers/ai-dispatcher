@@ -816,7 +816,7 @@ function heldRun(store: StateStore): RunRecord {
   });
 }
 
-test("recheckHeldRun reopens a prematurely closed exhausted issue and retains its hold", async () => {
+test("recheckHeldRun reopens a prematurely closed issue and verifies its merged PR", async () => {
   const dir = tmp();
   try {
     const store = StateStore.open(dir);
@@ -830,15 +830,15 @@ test("recheckHeldRun reopens a prematurely closed exhausted issue and retains it
 
     const { rechecked } = await recheckHeldRun(deps, run1);
 
-    assert.equal(rechecked, false);
-    assert.equal(store.getRun(run1.id)?.status, "held");
+    assert.equal(rechecked, true);
+    assert.equal(store.getRun(run1.id)?.status, "shipped");
     assert.equal(reopened.count, 1, "closure without verified production is repaired");
     assert.equal(reads.issueLabels, 1);
-    assert.equal(ships.count, 0);
+    assert.equal(ships.count, 1);
     assert.equal(comments.length, 0);
     assert.equal(labels.length, 0);
-    assert.equal(removedLabels.length, 0);
-    assert.equal(notifications.count, 0);
+    assert.deepEqual(removedLabels, ["autoship-held"]);
+    assert.equal(notifications.count, 1);
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1426,6 +1426,26 @@ test("recheckHeldRun is a no-op while the issue still carries autoship-held", as
     assert.equal(ships.count, 0, "the ship command must not run while still held");
     assert.equal(comments.length, 0);
     assert.equal(labels.length, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recheckHeldRun completes a merged PR already in production despite a stale hold", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const held = heldRun(store);
+    const run1 = store.updateRun(held.id, { mergedDelivery: { pr: held.prNumber!, sha: "merged" } });
+    const { deps, removedLabels, ships } = parkedDeps(store, {
+      ci: "pass", prState: "merged", issueLabels: ["autoship-held"],
+    });
+    const result = await recheckHeldRun(deps, run1);
+    assert.equal(result.rechecked, true);
+    assert.equal(ships.count, 1);
+    assert.equal(store.getRun(run1.id)?.status, "shipped");
+    assert.ok(removedLabels.includes("autoship-held"));
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });

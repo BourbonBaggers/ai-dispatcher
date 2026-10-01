@@ -114,6 +114,8 @@ export interface AutoshipDeps {
    * The dispatcher uses it to park the claim before a self-restart can kill its parent.
    */
   beforeShip?: (context: { pr: number; mergedSha: string | null }) => void | Promise<void>;
+  /** Persist verified merge identity before handling a deploy failure. */
+  recordMergedDelivery?: (delivery: { pr: number; sha: string }) => void | Promise<void>;
   /** Persists the first empty-check observation before a delayed workflow recheck. */
   recordMissingChecksAt?: (at: number) => void | Promise<void>;
   repairGeneratedConflicts?: (
@@ -130,6 +132,7 @@ export type AutoshipOutcome =
   | { action: "escalate"; kind: RecoveryKind; model: string; reason: string }
   | { action: "exhausted"; kind: RecoveryKind; reason: string }
   | { action: "deploy_pending"; mergedSha: string | null }
+  | { action: "deploy_retry"; mergedSha: string; reason: string }
   | { action: "shipped" };
 
 /**
@@ -311,6 +314,15 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
     cwd: deps.autoshipDeploymentCheckout,
   });
   const classified = classifyShipResult(result);
+  let confirmedMerge: string | null = null;
+  if (await github.prState(pr) === "merged") {
+    const delivered = await github.prMergeInfo(pr);
+    if (delivered?.mergeCommitOid &&
+      (!classified.report?.mergedSha || delivered.mergeCommitOid === classified.report.mergedSha)) {
+      confirmedMerge = delivered.mergeCommitOid;
+      await deps.recordMergedDelivery?.({ pr, sha: delivered.mergeCommitOid });
+    }
+  }
 
   if (
     result.code === 0 &&
@@ -336,6 +348,9 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
       health: classified.health,
       report: classified.report,
     });
+    if (confirmedMerge && retryableDeployFailure(classified, result)) {
+      return { action: "deploy_retry", mergedSha: confirmedMerge, reason: autoshipFailureBody(pr, result.code, classified) };
+    }
     return recoveryOutcome(
       deps,
       run,
@@ -396,6 +411,14 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
     .send(`Autoship: shipped #${run.issueNumber}`, `PR #${pr} merged and deployed.`, NOTIFY_PRIORITY_DEFAULT)
     .catch(() => undefined);
   return { action: "shipped" };
+}
+
+/** Unknown production and host/connectivity errors need another ship probe, not code edits. */
+function retryableDeployFailure(classified: ReturnType<typeof classifyShipResult>, result: ExecResult): boolean {
+  return classified.state === "deployment_state_unknown" ||
+    /(?:required|missing).*?(?:env|host|ssh)|(?:ssh|network|connection|timed out|timeout|dns|unreachable)/i.test(
+      `${result.stderr}\n${classified.detail ?? ""}`,
+    );
 }
 
 async function recoveryOutcome(
@@ -576,6 +599,8 @@ async function alreadyMerged(deps: AutoshipDeps, run: RunRecord, pr: number): Pr
     );
   }
 
+  await deps.recordMergedDelivery?.({ pr, sha: mergeInfo.mergeCommitOid });
+
   await deps.beforeShip?.({ pr, mergedSha: mergeInfo.mergeCommitOid });
   const result = await deps.ship(
     deps.autoshipCmd!,
@@ -599,6 +624,9 @@ async function alreadyMerged(deps: AutoshipDeps, run: RunRecord, pr: number): Pr
     return { action: "deploy_pending", mergedSha: mergeInfo.mergeCommitOid };
   }
   if (result.code !== 0 || classified.state !== "shipped" || classified.health !== "pass") {
+    if (retryableDeployFailure(classified, result)) {
+      return { action: "deploy_retry", mergedSha: mergeInfo.mergeCommitOid, reason: autoshipFailureBody(pr, result.code, classified) };
+    }
     return recoveryOutcome(
       deps,
       run,

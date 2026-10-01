@@ -120,6 +120,10 @@ export interface RunRecord {
   lastCommit: string | null;
   prUrl: string | null;
   prNumber: number | null;
+  /** Original merged delivery; later launcher results must not replace this PR. */
+  mergedDelivery?: { pr: number; sha: string };
+  /** Backoff for infrastructure deploy probes; never spends model repair budget. */
+  deployRetry?: { attempts: number; after: number };
   exitCode: number | null;
   failureSummary: string | null;
   /** Classification of the failure (if any) — drives evidence-based recovery decisions. */
