@@ -416,6 +416,7 @@ export async function streamInstance(
   explicitUnits: string[],
   res: ServerResponse,
   exec: ExecFn,
+  loadPayload: () => Promise<DashboardPayload> = () => dashboardPayload(explicitUnits, exec),
 ): Promise<void> {
   res.writeHead(200, {
     "content-type": "text/event-stream; charset=utf-8",
@@ -428,19 +429,23 @@ export async function streamInstance(
   });
   let seq = 0;
   let runId: string | null = null;
+  let lastPayloadAt = 0;
   while (!stopped) {
-    const payload = await dashboardPayload(explicitUnits, exec);
+    const payload = await loadPayload();
     const instance = payload.instances.find((candidate) => candidate.unit === unit);
     if (!instance) {
       sseSend(res, "error", { message: `unknown dispatcher unit ${unit}` });
       res.end();
       return;
     }
-    sseSend(res, "status", instance);
-    const currentRun = instance.status.current;
-    if (currentRun?.id && currentRun.id !== runId) {
-      runId = currentRun.id;
-      seq = 0;
+    if (payload.updatedAt !== lastPayloadAt) {
+      lastPayloadAt = payload.updatedAt;
+      sseSend(res, "status", instance);
+      const currentRun = instance.status.current;
+      if (currentRun?.id && currentRun.id !== runId) {
+        runId = currentRun.id;
+        seq = 0;
+      }
     }
     if (runId) {
       const entries = readRunOutputEntries(instance.stateDir, runId, seq);
@@ -472,17 +477,37 @@ export async function runDashboardCommand(
     out(`${parsed.message}\n`);
     return 0;
   }
+  // Status collection shells out to GitHub, systemd, and journalctl. Streams poll
+  // run output every second, but those slower status sources should be sampled at
+  // the page refresh interval and shared by every connected browser/stream.
+  let cachedPayload: DashboardPayload | null = null;
+  let payloadRefresh: Promise<DashboardPayload> | null = null;
+  const loadPayload = (): Promise<DashboardPayload> => {
+    if (cachedPayload && Date.now() - cachedPayload.updatedAt < STATUS_REFRESH_MS) {
+      return Promise.resolve(cachedPayload);
+    }
+    if (payloadRefresh) return payloadRefresh;
+    payloadRefresh = dashboardPayload(parsed.units, exec)
+      .then((payload) => {
+        cachedPayload = payload;
+        return payload;
+      })
+      .finally(() => {
+        payloadRefresh = null;
+      });
+    return payloadRefresh;
+  };
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     void (async () => {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
       if (url.pathname === "/" || url.pathname === "/compact") return sendHtml(res);
       if (url.pathname === "/api/instances") {
-        return sendJson(res, 200, await dashboardPayload(parsed.units, exec));
+        return sendJson(res, 200, await loadPayload());
       }
       if (url.pathname === "/api/stream") {
         const unit = url.searchParams.get("unit");
         if (!unit) return sendJson(res, 400, { error: "unit is required" });
-        return await streamInstance(unit, parsed.units, res, exec);
+        return await streamInstance(unit, parsed.units, res, exec, loadPayload);
       }
       return sendJson(res, 404, { error: "not found" });
     })().catch((error) => {
