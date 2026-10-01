@@ -813,6 +813,40 @@ Only the autoship evaluation/finalization path in `dispatcher.ts` writes verifie
 reads transition `ci_pending`/`ci_failed` both right after a
 fresh/resumed/self-healed/escalated run and on every parked recheck.
 
+## Post-ship acceptance audit
+
+Acceptance criteria are checked after an issue ships, never before merge (#85). On a
+later scan a cheap judge model reads the issue's acceptance checklist and the merged PR,
+and reports for each criterion whether anything in the PR attempted it. Only a confident,
+cited omission creates work: a follow-up issue labelled `audit-followup`,
+`audit:depth-1`, and `dispatch:ready`, linked from the closed parent. An omission found on
+a follow-up notifies instead of filing.
+
+The audit is advisory, so its retries are bounded and it never blocks delivery (#98):
+
+- **Evidence before the judge.** The issue body and labels, the PR evidence, and the
+  search for an existing follow-up are all read before the judge runs. A failed read
+  ends the attempt without a model call.
+- **Backoff.** A failed attempt waits 5 minutes, then 30 minutes, then 2 hours, then a
+  day before the next one. The sweep makes at most one attempt per audit per window,
+  whatever the scan interval.
+- **A cap and a terminal state.** The sixth failed attempt, or a follow-up creation that
+  fails with the same error on two consecutive attempts, ends the audit as
+  `audit: { status: "unavailable", reason }` and logs one `audit: giving up; marked
+  unavailable` warning. A terminal audit is never retried. Rate limits, 5xx responses,
+  timeouts, and network errors never count as the same failure twice; only the cap ends
+  those.
+- **Diffs GitHub refuses.** GitHub will not render a diff over 300 files or 20 000
+  lines, and that refusal is permanent for the PR. The audit reads the PR's changed-file
+  list from the files API instead: every file with its status and line counts, then whole
+  patches for added and modified files while they fit the judge's budget. The judge is
+  told the listing is partial, so a file shown without its patch never counts as an
+  omission.
+- **Missing labels.** `gh issue create` fails before creating anything when the target
+  repository lacks one of its labels. The audit then creates whichever of its own three
+  follow-up labels are missing, never altering an existing label, and files again in the
+  same attempt.
+
 ## State model
 
 All durable state is one atomically-written JSON file plus a lock, under `--state-dir`:

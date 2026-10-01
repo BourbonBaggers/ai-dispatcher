@@ -337,7 +337,7 @@ function missingLabel(label: string): GithubCreatedIssue {
   return { ok: false, error: `could not add label: '${label}' not found`, missingLabel: label };
 }
 
-// BourbonBaggers/internal-tools has `dispatch:ready` but never had the audit's own labels,
+// The production target repository had `dispatch:ready` but never the audit's own labels,
 // so every filing there failed identically before anything was created.
 test("a repository missing the audit's labels gets them, and the follow-up is filed in the same attempt (#98)", async () => {
   const h = harness({ verdicts: OMISSION, createResults: [missingLabel(AUDIT_FOLLOWUP_LABEL)] });
