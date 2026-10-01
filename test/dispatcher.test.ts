@@ -28,6 +28,7 @@ import { StateStore } from "../src/state.ts";
 import { createLogger } from "../src/logger.ts";
 import type { RunRecord } from "../src/state.ts";
 import type { DispatcherConfig } from "../src/config.ts";
+import type { GithubCreatedIssue, GithubLabelSpec, GithubPrDiff, GithubPrFile } from "../src/github.ts";
 import { assessCapacity } from "../src/capacity.ts";
 
 function tmp(): string {
@@ -578,7 +579,7 @@ function parkedDeps(store: StateStore, opts: {
         reviewDecision: null,
         mergeCommitOid: "merged",
       }),
-      prDiff: async () => "",
+      prDiff: async () => ({ state: "ok", diff: "" }),
       comment: async (_i: number, b: string) => { comments.push(b); return true; },
       addLabel: async (_i: number, l: string) => { labels.push(l); return true; },
       removeLabel: async (_i: number, l: string) => { removedLabels.push(l); return true; },
@@ -1643,6 +1644,342 @@ test("recheckHeldRun on an un-held already-merged PR deploys and verifies it", a
     assert.equal(store.getRun(run1.id)?.status, "shipped");
     assert.equal(ships.count, 1, "an already-merged PR still needs deployment verification");
     assert.ok(!labels.includes("autoship-held"));
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── post-ship audit retries (#98: backoff, a cap, and a terminal state) ─────────
+
+const AUDIT_START = 10_000_000;
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+
+interface AuditSweepHarness {
+  deps: DispatcherDeps;
+  clock: { now: number };
+  /** Every attempt reads the issue body first, so this counts attempts. */
+  bodyReads: number[];
+  judgeCalls: { count: number };
+  logs: Array<{ level: string; msg: string } & Record<string, unknown>>;
+}
+
+function auditSweepHarness(
+  store: StateStore,
+  opts: {
+    issueBody?: () => Promise<string | null>;
+    prDiff?: () => Promise<GithubPrDiff>;
+    prFiles?: () => Promise<GithubPrFile[] | null>;
+    createIssue?: () => Promise<GithubCreatedIssue>;
+    createLabel?: (spec: GithubLabelSpec) => Promise<boolean>;
+    judge?: DispatcherDeps["judgeAcceptance"];
+  } = {},
+): AuditSweepHarness {
+  const clock = { now: AUDIT_START };
+  const bodyReads: number[] = [];
+  const judgeCalls = { count: 0 };
+  const logs: AuditSweepHarness["logs"] = [];
+  const deps: DispatcherDeps = {
+    config: {
+      ...autoshipConfig({ autoshipCmd: null }),
+      dryRun: false,
+      worktreeDir: "/worktrees",
+      authorAuth: { ok: true, mode: "none", trustedAuthors: new Set() },
+      blockedQueueAuditModel: "claude-sonnet-5",
+      blockedQueueAuditEffortLabel: "effort:low",
+      blockedQueueAuditMaxCandidates: 3,
+    } as DispatcherConfig,
+    store,
+    logger: createLogger("info", (line) => logs.push(JSON.parse(line))),
+    notifier: { send: async () => undefined },
+    github: {
+      // An idle queue: the audit sweep is the only work these scans can do.
+      listOpenIssues: async () => ({ ok: true, issues: [] }),
+      issueBody: async () => {
+        bodyReads.push(clock.now);
+        return opts.issueBody
+          ? opts.issueBody()
+          : ["## Acceptance criteria", "- [ ] Retries back off", "- [ ] Tests cover it"].join("\n");
+      },
+      issueLabels: async () => [],
+      prDiff: opts.prDiff ?? (async () => ({ state: "ok", diff: "+export const backoff = true;" })),
+      prFiles: opts.prFiles ?? (async () => null),
+      issuesWithLabel: async () => [],
+      createIssue: opts.createIssue ?? (async () => ({ ok: false, error: "no follow-up expected" })),
+      createLabel: opts.createLabel ?? (async () => false),
+      comment: async () => true,
+    } as unknown as DispatcherDeps["github"],
+    judgeAcceptance: async (request) => {
+      judgeCalls.count += 1;
+      return opts.judge
+        ? opts.judge(request)
+        : request.criteria.map((criterion) => ({ criterion, result: "addressed" as const }));
+    },
+    readCapacity: async () => ({ snapshots: new Map(), errors: new Map() }),
+    blockedQueueAuditor: async () => {
+      throw new Error("an empty queue has no blocked candidates to audit");
+    },
+    now: () => clock.now,
+  };
+  return { deps, clock, bodyReads, judgeCalls, logs };
+}
+
+/** A shipped run whose audit was queued exactly as releases before #98 queued it. */
+function shippedRunAwaitingAudit(store: StateStore): RunRecord {
+  const created = store.createRun({
+    issueNumber: 737,
+    issueTitle: "Delete plan files for closed issues",
+    issueUrl: "https://x/737",
+    agent: "codex",
+    modelLabel: "model:gpt-5.5",
+    cliModel: "gpt-5.5",
+    effortLabel: "effort:medium",
+    cliEffort: "medium",
+    branch: "issue-737-x",
+    checkoutPath: "/w/issue-737-x",
+    planPath: null,
+    trigger: "poll",
+  });
+  return store.updateRun(created.id, {
+    status: "shipped",
+    prNumber: 760,
+    prUrl: "https://x/pull/760",
+    finishedAt: AUDIT_START,
+    audit: { status: "pending", at: AUDIT_START },
+  });
+}
+
+test("an unreadable audit backs off with growing delays, never calls the judge, and goes terminal at the cap (#98)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const shipped = shippedRunAwaitingAudit(store);
+    const h = auditSweepHarness(store, { issueBody: async () => null });
+
+    // Scan every 20 seconds — faster than any production interval — for 52 hours, which
+    // spans every backoff window.
+    const end = AUDIT_START + 52 * HOUR_MS;
+    for (; h.clock.now <= end; h.clock.now += 20_000) await runScanOnce(h.deps);
+
+    const gaps = h.bodyReads.slice(1).map((at, index) => at - h.bodyReads[index]!);
+    assert.equal(h.bodyReads.length, 6, "the cap bounds attempts, not the scan count");
+    assert.deepEqual(gaps, [5 * MINUTE_MS, 30 * MINUTE_MS, 2 * HOUR_MS, 24 * HOUR_MS, 24 * HOUR_MS]);
+    assert.equal(h.judgeCalls.count, 0, "no evidence, no judge call");
+
+    const audit = store.getRun(shipped.id)?.audit;
+    assert.equal(audit?.status, "unavailable");
+    assert.equal(audit?.attempts, 6);
+    assert.equal(audit?.reason, "gave up after 6 attempts: could not read the issue body");
+
+    const terminal = h.logs.filter((line) => line.msg === "audit: giving up; marked unavailable");
+    assert.equal(terminal.length, 1, "one clear line when the audit goes terminal");
+    assert.equal(terminal[0]!.level, "warn");
+    assert.equal(terminal[0]!.issue, 737);
+    assert.equal(terminal[0]!.reason, audit?.reason);
+
+    // Terminal is final: a year of further scans makes no attempt.
+    h.clock.now += 365 * 24 * HOUR_MS;
+    await runScanOnce(h.deps);
+    assert.equal(h.bodyReads.length, 6);
+    // The audit never touched delivery: the run is still shipped and claims nothing.
+    assert.equal(store.getRun(shipped.id)?.status, "shipped");
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an audit that fails once and then reads its evidence resolves normally (#98)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const shipped = shippedRunAwaitingAudit(store);
+    let readable = false;
+    const h = auditSweepHarness(store, {
+      issueBody: async () =>
+        readable ? ["## Acceptance criteria", "- [ ] Retries back off"].join("\n") : null,
+    });
+
+    await runScanOnce(h.deps);
+    assert.equal(store.getRun(shipped.id)?.audit?.attempts, 1);
+    assert.equal(store.getRun(shipped.id)?.audit?.nextAttemptAt, AUDIT_START + 5 * MINUTE_MS);
+    assert.ok(
+      h.logs.some((line) => line.msg === "audit: attempt failed; retrying after backoff" && line.attempt === 1),
+    );
+
+    readable = true;
+    h.clock.now = AUDIT_START + 4 * MINUTE_MS;
+    await runScanOnce(h.deps);
+    assert.equal(h.bodyReads.length, 1, "still inside the first backoff window");
+
+    h.clock.now = AUDIT_START + 5 * MINUTE_MS;
+    await runScanOnce(h.deps);
+    assert.equal(h.judgeCalls.count, 1);
+    assert.deepEqual(store.getRun(shipped.id)?.audit, { status: "done", at: AUDIT_START + 5 * MINUTE_MS });
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a thrown audit attempt is counted and backed off instead of retried every scan (#98)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const shipped = shippedRunAwaitingAudit(store);
+    const h = auditSweepHarness(store, {
+      issueBody: async () => {
+        throw new Error("gh vanished");
+      },
+    });
+
+    for (let scan = 0; scan < 10; scan += 1, h.clock.now += 20_000) await runScanOnce(h.deps);
+
+    assert.equal(h.bodyReads.length, 1);
+    const audit = store.getRun(shipped.id)?.audit;
+    assert.equal(audit?.status, "pending");
+    assert.equal(audit?.attempts, 1);
+    assert.equal(audit?.reason, "audit threw: gh vanished");
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// #737 in production: its PR deleted 302 files, GitHub refuses the diff, and the audit was
+// retried every scan for hours. A record queued before #98 now resolves on its first sweep.
+test("a legacy pending audit whose diff is too large resolves from the changed-file list (#98)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const shipped = shippedRunAwaitingAudit(store);
+    const judged: string[] = [];
+    const h = auditSweepHarness(store, {
+      prDiff: async () => ({
+        state: "too_large",
+        error: "could not find pull request diff: HTTP 406: Sorry, the diff exceeded the maximum number of files (300).",
+      }),
+      prFiles: async () => [
+        { filename: "scripts/lib/plan-discovery.sh", status: "modified", additions: 9, deletions: 1, patch: "@@ -1 +1,9 @@\n+rm_plan" },
+        ...Array.from({ length: 302 }, (_, index) => ({
+          filename: `docs/plans/plan-${index}.md`,
+          status: "removed",
+          additions: 0,
+          deletions: 40,
+        })),
+      ],
+      judge: async (request) => {
+        judged.push(request.evidence);
+        return request.criteria.map((criterion) => ({ criterion, result: "addressed" as const }));
+      },
+    });
+
+    await runScanOnce(h.deps);
+
+    assert.deepEqual(judged, ["changed-files"]);
+    assert.deepEqual(store.getRun(shipped.id)?.audit, { status: "done", at: AUDIT_START });
+    assert.ok(h.logs.some((line) => line.msg === "audit: PR diff too large; auditing its changed-file list"));
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** A judge that is sure one criterion was never attempted, so the audit files work. */
+const confidentOmission: NonNullable<DispatcherDeps["judgeAcceptance"]> = async (request) =>
+  request.criteria.map((criterion) => ({
+    criterion,
+    result: "not_addressed" as const,
+    citation: "nothing in the diff targets this",
+  }));
+
+// #728 in production: the judge reached a verdict, filing the follow-up failed the same way
+// every time, and each retry bought another ~48-second judge call — once a minute at a
+// 60-second scan interval.
+test("a follow-up creation that fails the same way twice goes terminal after two judge calls (#98)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const shipped = shippedRunAwaitingAudit(store);
+    let creations = 0;
+    const h = auditSweepHarness(store, {
+      judge: confidentOmission,
+      createIssue: async () => {
+        creations += 1;
+        return { ok: false, error: "GraphQL: Title is too long (maximum is 256 characters) (createIssue)" };
+      },
+    });
+    const judgeCalls = (): number => h.judgeCalls.count;
+
+    await runScanOnce(h.deps);
+    assert.equal(judgeCalls(), 1);
+    assert.equal(store.getRun(shipped.id)?.audit?.status, "pending");
+
+    // Scans every 20 seconds inside the five-minute backoff buy nothing.
+    for (h.clock.now += 20_000; h.clock.now < AUDIT_START + 5 * MINUTE_MS; h.clock.now += 20_000) {
+      await runScanOnce(h.deps);
+    }
+    assert.equal(judgeCalls(), 1);
+
+    h.clock.now = AUDIT_START + 5 * MINUTE_MS;
+    await runScanOnce(h.deps);
+    assert.equal(judgeCalls(), 2);
+    const audit = store.getRun(shipped.id)?.audit;
+    assert.equal(audit?.status, "unavailable");
+    assert.equal(
+      audit?.reason,
+      "failed the same way twice: follow-up issue could not be created: " +
+        "GraphQL: Title is too long (maximum is 256 characters) (createIssue)",
+    );
+
+    for (let day = 1; day <= 7; day += 1) {
+      h.clock.now = AUDIT_START + day * 24 * HOUR_MS;
+      await runScanOnce(h.deps);
+    }
+    assert.equal(judgeCalls(), 2, "terminal: no further judge calls, ever");
+    assert.equal(creations, 2);
+    assert.equal(h.logs.filter((line) => line.msg === "audit: giving up; marked unavailable").length, 1);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The actual #728 cause: the target repository lacked `audit-followup` and `audit:depth-1`.
+test("a repository missing the audit's labels gets them and files the follow-up on the first attempt (#98)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const shipped = shippedRunAwaitingAudit(store);
+    const repoLabels = new Set(["dispatch:ready"]);
+    const created: string[] = [];
+    const h = auditSweepHarness(store, {
+      judge: confidentOmission,
+      createIssue: async () => {
+        for (const label of ["audit-followup", "audit:depth-1", "dispatch:ready"]) {
+          if (!repoLabels.has(label)) {
+            return { ok: false, error: `could not add label: '${label}' not found`, missingLabel: label };
+          }
+        }
+        return { ok: true, issue: 801 };
+      },
+      createLabel: async (spec) => {
+        if (!repoLabels.has(spec.name)) created.push(spec.name);
+        repoLabels.add(spec.name);
+        return true;
+      },
+    });
+
+    await runScanOnce(h.deps);
+
+    assert.deepEqual(created, ["audit-followup", "audit:depth-1"]);
+    assert.equal(h.judgeCalls.count, 1);
+    assert.deepEqual(store.getRun(shipped.id)?.audit, {
+      status: "done",
+      at: AUDIT_START,
+      followUpIssue: 801,
+    });
     store.releaseLock();
   } finally {
     rmSync(dir, { recursive: true, force: true });

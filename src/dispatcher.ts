@@ -33,6 +33,7 @@ import {
 } from "./labels.ts";
 import { auditShippedIssue, type AuditDeps } from "./acceptance-sweep.ts";
 import { AUDIT_FOLLOWUP_LABEL } from "./acceptance-audit.ts";
+import { auditAfterFailure, auditDue, type AuditFailure } from "./acceptance-retry.ts";
 import { assessIssueText, applyAssessment } from "./issue-assessment.ts";
 import { selectEligibleIssue } from "./selection.ts";
 import { untrustedAuthorComment, UNTRUSTED_AUTHOR_LABEL } from "./author-auth.ts";
@@ -621,23 +622,52 @@ export function planQuotaHandoff(
   return assignmentForModel(decision.selected, run.assignedEffortLabel);
 }
 
-/** Runs a single scan: resume first, else claim and launch at most one fresh issue. */
 /**
- * Resolves any shipped run still awaiting its acceptance audit.
+ * Records an audit attempt that could not resolve: pending behind the next backoff, or
+ * terminal `unavailable` once the policy gives up (#98). The fresh record is re-read so an
+ * attempt that already resolved the audit before failing is never reopened.
+ */
+function recordAuditFailure(deps: DispatcherDeps, run: RunRecord, failure: AuditFailure): void {
+  const current = deps.store.getRun(run.id)?.audit;
+  if (current?.status !== "pending") return;
+  const audit = auditAfterFailure(current, failure, (deps.now ?? (() => Date.now()))());
+  deps.store.updateRun(run.id, { audit });
+  if (audit.status === "unavailable") {
+    deps.logger.warn("audit: giving up; marked unavailable", {
+      issue: run.issueNumber,
+      attempts: audit.attempts,
+      reason: audit.reason,
+    });
+    return;
+  }
+  deps.logger.info("audit: attempt failed; retrying after backoff", {
+    issue: run.issueNumber,
+    attempt: audit.attempts,
+    reason: failure.reason,
+    nextAttemptAt: new Date(audit.nextAttemptAt ?? 0).toISOString(),
+  });
+}
+
+/**
+ * Resolves any shipped run whose acceptance audit is due.
  *
  * Every outcome is best-effort by construction. An unreadable input, an unavailable judge,
- * or a failed issue creation leaves the run marked `pending` so the next scan retries;
- * nothing here can hold, page (except the depth cap), or spend recovery budget.
+ * or a failed issue creation keeps the run `pending` behind a growing backoff until the
+ * policy gives up and marks it `unavailable` (#98); nothing here can hold, page (except the
+ * depth cap), or spend recovery budget.
  */
 async function sweepPendingAudits(deps: DispatcherDeps): Promise<void> {
   const { store, github, logger, notifier } = deps;
-  const pending = store.pendingAudits();
-  if (pending.length === 0) return;
-
   const now = deps.now ?? (() => Date.now());
+  // The backoff, not the scan interval, paces retries: an audit waiting two hours is
+  // skipped by every scan in between, however often scans run.
+  const sweepStartedAt = now();
+  const due = store.pendingAudits().filter((run) => auditDue(run.audit, sweepStartedAt));
+  if (due.length === 0) return;
+
   const judge = deps.judgeAcceptance;
 
-  for (const run of pending) {
+  for (const run of due) {
     if (run.prNumber === null) continue;
 
     // Without a judge the audit is inert. Mark it resolved rather than accumulating an
@@ -670,22 +700,18 @@ async function sweepPendingAudits(deps: DispatcherDeps): Promise<void> {
           prNumber: run.prNumber,
         },
       );
-      if (outcome.action === "unavailable") {
-        logger.info("audit: evidence unavailable; retrying on a later scan", {
-          issue: run.issueNumber,
-          reason: outcome.reason,
-        });
-      }
+      if (outcome.action === "unavailable") recordAuditFailure(deps, run, outcome);
     } catch (err) {
-      // The audit is never allowed to break a scan.
-      logger.warn("audit: sweep threw; leaving the run for a later scan", {
-        issue: run.issueNumber,
-        error: err instanceof Error ? err.message : String(err),
+      // The audit is never allowed to break a scan, and a throw is a failed attempt like any
+      // other: uncounted, it would retry every scan forever.
+      recordAuditFailure(deps, run, {
+        reason: `audit threw: ${err instanceof Error ? err.message : String(err)}`,
       });
     }
   }
 }
 
+/** Runs a single scan: resume first, else claim and launch at most one fresh issue. */
 export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   const { config, store, github, logger, notifier } = deps;
   const now = deps.now ?? (() => Date.now());

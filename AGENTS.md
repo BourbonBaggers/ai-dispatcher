@@ -54,6 +54,13 @@ Three bounds keep that true and must not be relaxed:
   `disposition=already-satisfied` on the trusted control channel and retires cleanly. That
   outcome is expected, not a failure, and must never enter the recovery ladder.
 
+An audit that cannot finish is bounded too (#98). Every read, including the existing
+follow-up search, happens before the judge runs, so a failed read never costs a model
+call. A failed attempt backs off (5 min, 30 min, 2 h, then daily); the sixth failure, or a
+follow-up creation that fails identically twice, is terminal `unavailable` and is never
+retried. An audit must never again retry on every scan: at a short scan interval that is a
+model call a minute for work that cannot succeed.
+
 `AGENTS.md` is the canonical agent-context file. `CLAUDE.md` must remain a repository
 symlink to it so Codex and Claude receive exactly the same rules. Local planning artifacts
 are not part of the public tree; current code, this file, and the README win.
@@ -245,6 +252,8 @@ src/
   acceptance-criteria.ts  deterministic checklist extraction from an issue (pure, #85)
   acceptance-audit.ts     verdict parsing + file/dedupe/depth-cap policy (pure, #85)
   acceptance-judge.ts     one-shot cheap-model omission judge; fails to `unclear` (#85)
+  acceptance-evidence.ts  budgeted changed-file evidence when GitHub refuses a diff (pure, #98)
+  acceptance-retry.ts     audit backoff, attempt cap, and terminal `unavailable` (pure, #98)
   acceptance-sweep.ts     post-ship audit orchestration; files follow-up work (#85)
   generated-conflict-*.ts generated-only resolution + agent conflict-repair plumbing
   capture.ts              the uncommitted-work capture DECISION (mirrors the shell)

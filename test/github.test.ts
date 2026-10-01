@@ -15,6 +15,10 @@ import {
   prMergeInfoArgs,
   prStateArgs,
   prTitleBodyArgs,
+  prDiffArgs,
+  prFilesArgs,
+  createIssueArgs,
+  createLabelArgs,
   createPullRequestArgs,
   GithubClient,
 } from "../src/github.ts";
@@ -39,6 +43,9 @@ test("every gh argv builder threads --repo <slug> through", () => {
     prMergeInfoArgs(SLUG, 7),
     prStateArgs(SLUG, 7),
     prTitleBodyArgs(SLUG, 7),
+    prDiffArgs(SLUG, 7),
+    createIssueArgs(SLUG, { title: "t", labels: ["audit-followup"] }),
+    createLabelArgs(SLUG, { name: "audit-followup", color: "0E8A16", description: "d" }),
     createPullRequestArgs(SLUG, { base: "main", head: "feature", title: "t" }),
   ];
   for (const args of builders) {
@@ -425,4 +432,166 @@ test("reopenIssue repairs premature issue closure", async () => {
   const client = new GithubClient(repo.ok ? repo.value : (undefined as never), succeeding.fn);
   assert.equal(await client.reopenIssue(366), true);
   assert.deepEqual(succeeding.calls[0]!.args, ["issue", "reopen", "366", "--repo", SLUG]);
+});
+
+// ── PR evidence for the post-ship audit (#98) ──────────────────────────────────
+
+/** gh's real output for a PR over GitHub's 300-file diff limit (PR #760, 305 files). */
+const DIFF_TOO_LARGE_STDERR = [
+  "could not find pull request diff: HTTP 406: Sorry, the diff exceeded the maximum number of files (300). Consider using 'List pull requests files' API or locally cloning the repository instead. (https://api.github.com/repos/acme/widgets/pulls/760)",
+  "PullRequest.diff too_large",
+  "",
+].join("\n");
+
+function client(fn: ExecFn): GithubClient {
+  const repo = parseRepoSlug(SLUG);
+  return new GithubClient(repo.ok ? repo.value : (undefined as never), fn);
+}
+
+test("prDiff returns a readable diff", async () => {
+  const { fn, calls } = fakeExec(() => ok("diff --git a/x b/x\n+1\n"));
+  assert.deepEqual(await client(fn).prDiff(7), { state: "ok", diff: "diff --git a/x b/x\n+1\n" });
+  assert.deepEqual(calls[0]!.args, ["pr", "diff", "7", "--repo", SLUG]);
+});
+
+// The refusal is permanent for the PR, so it must be told apart from a failed read.
+test("prDiff reports a diff GitHub refuses as too large, apart from a failed read (#98)", async () => {
+  const { fn: tooLarge } = fakeExec(() => ({ ok: false, stdout: "", stderr: DIFF_TOO_LARGE_STDERR, code: 1 }));
+  assert.deepEqual(await client(tooLarge).prDiff(760), {
+    state: "too_large",
+    error: DIFF_TOO_LARGE_STDERR.split("\n")[0]!.slice(0, 200),
+  });
+
+  for (const stderr of [
+    "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000).",
+    "HTTP 422: Server Error: Sorry, this diff is taking too long to generate.",
+  ]) {
+    const { fn } = fakeExec(() => ({ ok: false, stdout: "", stderr, code: 1 }));
+    assert.equal((await client(fn).prDiff(760)).state, "too_large", stderr);
+  }
+
+  for (const [stderr, error] of [
+    ["HTTP 502: Bad Gateway (https://api.github.com/graphql)\n", "HTTP 502: Bad Gateway (https://api.github.com/graphql)"],
+    ["", "gh exited 1"],
+  ] as const) {
+    const { fn } = fakeExec(() => ({ ok: false, stdout: "", stderr, code: 1 }));
+    assert.deepEqual(await client(fn).prDiff(760), { state: "unavailable", error });
+  }
+});
+
+test("prFilesArgs pages the files API for the configured repository only", () => {
+  const args = prFilesArgs(SLUG, 760);
+  assert.equal(args[0], "api");
+  assert.ok(args.includes("--paginate"));
+  assert.ok(args.includes(`repos/${SLUG}/pulls/760/files?per_page=100`));
+  // One compact JSON object per line, whatever gh's output mode, and no removed-file patch.
+  const jq = args[args.indexOf("--jq") + 1]!;
+  assert.match(jq, /@json$/);
+  assert.match(jq, /if \.status == "removed" then null else \.patch end/);
+});
+
+test("prFiles parses one changed file per line (#98)", async () => {
+  const lines = [
+    { filename: "CLAUDE.md", previous_filename: null, status: "modified", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-a\n+b" },
+    { filename: "docs/new.md", previous_filename: "docs/old.md", status: "renamed", additions: 0, deletions: 0, patch: null },
+    { filename: "docs/plans/gone.md", previous_filename: null, status: "removed", additions: 0, deletions: 96, patch: null },
+  ].map((file) => JSON.stringify(file));
+  const { fn, calls } = fakeExec(() => ok(`${lines.join("\n")}\n`));
+
+  assert.deepEqual(await client(fn).prFiles(760), [
+    { filename: "CLAUDE.md", status: "modified", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-a\n+b" },
+    { filename: "docs/new.md", previousFilename: "docs/old.md", status: "renamed", additions: 0, deletions: 0 },
+    { filename: "docs/plans/gone.md", status: "removed", additions: 0, deletions: 96 },
+  ]);
+  assert.deepEqual(calls[0]!.args, prFilesArgs(SLUG, 760));
+});
+
+// A partial list would make a file look untouched, which reads as work never attempted.
+test("prFiles fails closed rather than returning a partial list (#98)", async () => {
+  const good = JSON.stringify({ filename: "a", status: "modified", additions: 1, deletions: 0 });
+  for (const result of [
+    { ok: false, stdout: `${good}\n`, stderr: "HTTP 502", code: 1 },
+    ok(`${good}\nnot json\n`),
+    ok(`${good}\n${JSON.stringify({ status: "modified" })}\n`),
+  ]) {
+    const { fn } = fakeExec(() => result);
+    assert.equal(await client(fn).prFiles(760), null, JSON.stringify(result));
+  }
+  const { fn: empty } = fakeExec(() => ok(""));
+  assert.deepEqual(await client(empty).prFiles(760), []);
+});
+
+// ── issue and label creation for audit follow-ups (#98) ────────────────────────
+
+const followUp = { title: "Audit follow-up for #82: x", body: "untrusted judge text", labels: ["audit-followup", "audit:depth-1"] };
+
+test("createIssue returns the new issue's number and pipes the body via stdin", async () => {
+  const { fn, calls } = fakeExec(() => ok("https://github.com/acme/widgets/issues/91\n"));
+  assert.deepEqual(await client(fn).createIssue(followUp), { ok: true, issue: 91 });
+  assert.equal(calls[0]!.stdin, "untrusted judge text");
+  assert.ok(!calls[0]!.args.includes("untrusted judge text"));
+  assert.deepEqual(calls[0]!.args.slice(-4), ["--label", "audit-followup", "--label", "audit:depth-1"]);
+});
+
+// gh resolves labels before creating anything, so this failure creates nothing and
+// repeats identically until the label exists (#728 in production).
+test("createIssue keeps gh's error and names a label the repository lacks (#98)", async () => {
+  const { fn: missing } = fakeExec(() => ({
+    ok: false,
+    stdout: "",
+    stderr: "could not add label: 'audit-followup' not found\n",
+    code: 1,
+  }));
+  assert.deepEqual(await client(missing).createIssue(followUp), {
+    ok: false,
+    error: "could not add label: 'audit-followup' not found",
+    missingLabel: "audit-followup",
+  });
+
+  const { fn: rejected } = fakeExec(() => ({
+    ok: false,
+    stdout: "",
+    stderr: "GraphQL: Title is too long (maximum is 256 characters) (createIssue)\n",
+    code: 1,
+  }));
+  assert.deepEqual(await client(rejected).createIssue(followUp), {
+    ok: false,
+    error: "GraphQL: Title is too long (maximum is 256 characters) (createIssue)",
+  });
+
+  const { fn: noUrl } = fakeExec(() => ok("Creating issue in acme/widgets\n"));
+  assert.deepEqual(await client(noUrl).createIssue(followUp), {
+    ok: false,
+    error: "gh issue create printed no issue URL",
+  });
+});
+
+test("createLabelArgs passes constants only and never forces an existing label", () => {
+  const args = createLabelArgs(SLUG, { name: "audit:depth-1", color: "C2E0C6", description: "depth" });
+  assert.deepEqual(args, [
+    "label", "create", "audit:depth-1", "--repo", SLUG, "--color", "C2E0C6", "--description", "depth",
+  ]);
+  assert.ok(!args.includes("--force"));
+});
+
+test("createLabel treats a label that already exists as present (#98)", async () => {
+  const spec = { name: "dispatch:ready", color: "0E8A16", description: "d" };
+  const { fn: created } = fakeExec(() => ok(""));
+  assert.equal(await client(created).createLabel(spec), true);
+
+  const { fn: exists } = fakeExec(() => ({
+    ok: false,
+    stdout: "",
+    stderr: 'label with name "dispatch:ready" already exists; use `--force` to update its color and description\n',
+    code: 1,
+  }));
+  assert.equal(await client(exists).createLabel(spec), true);
+
+  const { fn: forbidden } = fakeExec(() => ({
+    ok: false,
+    stdout: "",
+    stderr: "HTTP 403: Resource not accessible by integration\n",
+    code: 1,
+  }));
+  assert.equal(await client(forbidden).createLabel(spec), false);
 });

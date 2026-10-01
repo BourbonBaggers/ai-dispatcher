@@ -26,6 +26,7 @@ import {
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import type { AuditState } from "./acceptance-retry.ts";
 import type { ModelTier } from "./models.ts";
 import type { CapacitySelectionBasis } from "./routing.ts";
 import {
@@ -148,19 +149,14 @@ export interface RunRecord {
    * two operations without resurrecting historical terminal rows.
    */
   finalizationPending?: boolean;
-  /**
-   * Post-ship acceptance audit bookkeeping (#85). `pending` is set when a run ships;
-   * the sweep resolves it later, outside the ship path. It is written BEFORE the
-   * follow-up issue is filed, so a crash between the two cannot re-file on the next pass.
-   */
   /** True when this run's issue was itself filed by the post-ship audit (#85). */
   auditFollowUp?: boolean;
-  audit?: {
-    status: "pending" | "done";
-    /** The follow-up this audit filed, if any — the primary dedupe record. */
-    followUpIssue?: number;
-    at?: number;
-  };
+  /**
+   * Post-ship acceptance audit bookkeeping (#85). `pending` is set when a run ships; the
+   * sweep resolves it later, outside the ship path. A failed attempt backs off and counts
+   * toward a cap, ending in a terminal `unavailable` that is never retried (#98).
+   */
+  audit?: AuditState;
   /** In-memory migration marker used to collapse duplicate pre-contract terminal rows. */
   legacyFinalization?: boolean;
   /** Independent retry + frontier-escalation budgets for every owned delivery phase. */

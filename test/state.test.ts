@@ -568,3 +568,40 @@ test("frontier exhaustion proof persists across restart", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("audit retry bookkeeping survives restart; only pending audits are swept (#98)", () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    // Exactly what releases before #98 wrote when a run shipped.
+    const legacy = store.createRun(claimData(728));
+    store.updateRun(legacy.id, { status: "shipped", prNumber: 746, audit: { status: "pending", at: 5 } });
+    const backedOff = store.createRun(claimData(737));
+    const backedOffAudit = {
+      status: "pending" as const,
+      at: 6,
+      attempts: 2,
+      nextAttemptAt: 99,
+      reason: "PR diff could not be read",
+    };
+    store.updateRun(backedOff.id, { status: "shipped", prNumber: 760, audit: backedOffAudit });
+    const terminal = store.createRun(claimData(772));
+    const terminalAudit = {
+      status: "unavailable" as const,
+      at: 7,
+      attempts: 2,
+      reason: "failed the same way twice: follow-up issue could not be created",
+    };
+    store.updateRun(terminal.id, { status: "shipped", prNumber: 776, audit: terminalAudit });
+    store.releaseLock();
+
+    const reopened = StateStore.open(dir);
+    assert.deepEqual(reopened.pendingAudits().map((run) => run.issueNumber), [728, 737]);
+    assert.deepEqual(reopened.getRun(legacy.id)?.audit, { status: "pending", at: 5 });
+    assert.deepEqual(reopened.getRun(backedOff.id)?.audit, backedOffAudit);
+    assert.deepEqual(reopened.getRun(terminal.id)?.audit, terminalAudit);
+    reopened.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

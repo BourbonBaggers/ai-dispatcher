@@ -12,6 +12,7 @@
 
 import { run, type ExecFn } from "./exec.ts";
 import type { RepoSlug } from "./config.ts";
+import { redact } from "./sanitize.ts";
 
 export interface GithubIssue {
   number: number;
@@ -43,6 +44,63 @@ export interface GithubPrChecksEvidence {
  * for that state, even under `--json`, and exits 1 — the same code as a red check.
  */
 const NO_CHECKS_REPORTED = /no checks reported/i;
+
+/**
+ * GitHub refusing to render a PR's diff at all: more than 300 files or 20 000 lines is
+ * HTTP 406 (`PullRequest.diff too_large`), and a huge diff can also time out generating.
+ * That is permanent for the PR, unlike a transport failure, so it must not be retried.
+ */
+const DIFF_TOO_LARGE =
+  /too_large|HTTP 406|exceeded the maximum number of (?:files|lines)|diff is taking too long to generate/i;
+
+/**
+ * gh resolves every `--label` to an ID before it creates anything, so one label the
+ * repository lacks fails the whole `gh issue create` — identically, every time.
+ */
+const MISSING_LABEL = /could not add label: '([^']+)' not found/i;
+
+/** `gh label create` on a name the repository already has (any case). */
+const LABEL_EXISTS = /already exists/i;
+
+/** An issue's number, or gh's failure — kept so a deterministic one can be told apart. */
+export type GithubCreatedIssue =
+  | { ok: true; issue: number }
+  | { ok: false; error: string; missingLabel?: string };
+
+export interface GithubLabelSpec {
+  name: string;
+  /** Six hex digits, no `#`. */
+  color: string;
+  description: string;
+}
+
+/** A PR's unified diff, or why it could not be read. */
+export type GithubPrDiff =
+  | { state: "ok"; diff: string }
+  | { state: "too_large"; error: string }
+  | { state: "unavailable"; error: string };
+
+/** One changed file from the PR files API. */
+export interface GithubPrFile {
+  filename: string;
+  /** The old path of a renamed file. */
+  previousFilename?: string;
+  /** added | removed | modified | renamed | copied | changed | unchanged */
+  status: string;
+  additions: number;
+  deletions: number;
+  /** Absent for a removed file, and wherever GitHub omits it (binary or very large). */
+  patch?: string;
+}
+
+/**
+ * gh's failure as one bounded, redacted line — enough to tell failures apart in logs and
+ * durable state without persisting unbounded or sensitive output.
+ */
+function ghError(result: { stderr: string; code: number | null }): string {
+  const line = result.stderr.split(/\r?\n/).find((text) => text.trim() !== "")?.trim();
+  return line ? redact(line).slice(0, 200) : `gh exited ${result.code ?? "without a code"}`;
+}
 
 /** Issues are pulled newest-last so the scan can prefer the oldest actionable one. */
 const ISSUE_FETCH_LIMIT = 100;
@@ -126,6 +184,24 @@ export function createIssueArgs(
   ];
 }
 
+/**
+ * Creates a label. Never `--force`: an existing label's color and description belong to
+ * the operator, and only the caller's constants ever reach this argv.
+ */
+export function createLabelArgs(slug: string, label: GithubLabelSpec): string[] {
+  return [
+    "label",
+    "create",
+    label.name,
+    "--repo",
+    slug,
+    "--color",
+    label.color,
+    "--description",
+    label.description,
+  ];
+}
+
 /** Open issues carrying a label — used to find an existing audit follow-up before filing. */
 export function issuesWithLabelArgs(slug: string, label: string): string[] {
   return [
@@ -170,6 +246,40 @@ export function prStateArgs(slug: string, pr: number): string[] {
 
 export function prTitleBodyArgs(slug: string, pr: number): string[] {
   return ["pr", "view", String(pr), "--repo", slug, "--json", "title,body"];
+}
+
+export function prDiffArgs(slug: string, pr: number): string[] {
+  return ["pr", "diff", String(pr), "--repo", slug];
+}
+
+/**
+ * The files API lists up to 3000 changed files even when the diff is refused as too large.
+ * A removed file keeps its name and counts but drops its patch: deleted content is the bulk
+ * of a large cleanup and cannot show that anything was attempted — `removed` already says
+ * the file is gone. `@json` keeps one compact object per line whatever gh's output mode.
+ */
+const PR_FILES_JQ =
+  ".[] | {filename, previous_filename, status, additions, deletions, " +
+  'patch: (if .status == "removed" then null else .patch end)} | @json';
+
+export function prFilesArgs(slug: string, pr: number): string[] {
+  return ["api", "--paginate", `repos/${slug}/pulls/${pr}/files?per_page=100`, "--jq", PR_FILES_JQ];
+}
+
+function parsePrFile(raw: unknown): GithubPrFile | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const record = raw as Record<string, unknown>;
+  if (typeof record.filename !== "string" || typeof record.status !== "string") return null;
+  return {
+    filename: record.filename,
+    status: record.status,
+    additions: typeof record.additions === "number" ? record.additions : 0,
+    deletions: typeof record.deletions === "number" ? record.deletions : 0,
+    ...(typeof record.previous_filename === "string"
+      ? { previousFilename: record.previous_filename }
+      : {}),
+    ...(typeof record.patch === "string" ? { patch: record.patch } : {}),
+  };
 }
 
 export function createPullRequestArgs(
@@ -309,24 +419,39 @@ export class GithubClient {
   }
 
   /**
-   * Creates an issue and returns its number, or null on failure. The body is piped over
-   * stdin so untrusted audit text never reaches argv.
+   * Creates an issue and returns its number. The body is piped over stdin so untrusted
+   * audit text never reaches argv. A failure keeps gh's error, and names the label when
+   * the repository lacks one, so the audit can tell a deterministic failure apart (#98).
    */
   async createIssue(request: {
     title: string;
     body: string;
     labels: readonly string[];
-  }): Promise<number | null> {
+  }): Promise<GithubCreatedIssue> {
     const result = await this.exec(
       "gh",
       createIssueArgs(this.repo.slug, { title: request.title, labels: request.labels }),
       { stdin: request.body },
     );
-    if (!result.ok) return null;
+    if (!result.ok) {
+      const missingLabel = MISSING_LABEL.exec(result.stderr)?.[1];
+      return {
+        ok: false,
+        error: ghError(result),
+        ...(missingLabel === undefined ? {} : { missingLabel }),
+      };
+    }
     const match = /\/issues\/(\d+)\s*$/.exec(result.stdout.trim());
-    if (!match) return null;
-    const issue = Number.parseInt(match[1]!, 10);
-    return Number.isInteger(issue) && issue > 0 ? issue : null;
+    const issue = match ? Number.parseInt(match[1]!, 10) : Number.NaN;
+    return Number.isInteger(issue) && issue > 0
+      ? { ok: true, issue }
+      : { ok: false, error: "gh issue create printed no issue URL" };
+  }
+
+  /** Creates a label; one the repository already has counts as present and is left as is. */
+  async createLabel(label: GithubLabelSpec): Promise<boolean> {
+    const result = await this.exec("gh", createLabelArgs(this.repo.slug, label));
+    return result.ok || LABEL_EXISTS.test(result.stderr);
   }
 
   /**
@@ -482,10 +607,40 @@ export class GithubClient {
     }
   }
 
-  /** The PR's unified diff, or null if it could not be read (the gate then fails safe). */
-  async prDiff(pr: number): Promise<string | null> {
-    const result = await this.exec("gh", ["pr", "diff", String(pr), "--repo", this.repo.slug]);
-    return result.ok ? result.stdout : null;
+  /**
+   * The PR's unified diff. A refusal as too large is reported apart from a read failure:
+   * retrying it can never succeed, while the files API can still describe the change.
+   */
+  async prDiff(pr: number): Promise<GithubPrDiff> {
+    const result = await this.exec("gh", prDiffArgs(this.repo.slug, pr));
+    if (result.ok) return { state: "ok", diff: result.stdout };
+    const error = ghError(result);
+    return DIFF_TOO_LARGE.test(result.stderr)
+      ? { state: "too_large", error }
+      : { state: "unavailable", error };
+  }
+
+  /**
+   * Every changed file in the PR, or null when the list could not be read completely. A
+   * partial list is never returned: a missing file would read as work never attempted.
+   */
+  async prFiles(pr: number): Promise<GithubPrFile[] | null> {
+    // Up to 30 pages for the largest PRs, so allow longer than a single read.
+    const result = await this.exec("gh", prFilesArgs(this.repo.slug, pr), { timeoutMs: 120_000 });
+    if (!result.ok) return null;
+    const files: GithubPrFile[] = [];
+    for (const line of result.stdout.split("\n")) {
+      if (line.trim() === "") continue;
+      let file: GithubPrFile | null;
+      try {
+        file = parsePrFile(JSON.parse(line));
+      } catch {
+        return null;
+      }
+      if (file === null) return null;
+      files.push(file);
+    }
+    return files;
   }
 
   /**
