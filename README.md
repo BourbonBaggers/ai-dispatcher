@@ -178,7 +178,7 @@ On each scan when no run is active:
 3. **Claim, then label.** The state row is the authoritative lock; `agent-working` is
    written only after the claim succeeds.
 4. **Launch and supervise.** `dispatch-agent.sh` clones an isolated checkout, writes a
-   bootstrap prompt, checkpoints progress, and waits for the real CI verdict.
+   bootstrap prompt, checkpoints progress, and waits for the real [CI verdict](#ci-verdicts).
 5. **Recover or finalize.** Agent, CI, merge, and deploy failures use evidence-based
    retries, repairs, lateral handoff, and final frontier escalation before a terminal
    outcome is recorded.
@@ -730,6 +730,41 @@ new code does not come up. The detached unit keeps restarting last-known-good un
 healthy; it does not page the operator from this intermediate failure. The restarted
 dispatcher then owns the normal deploy-repair → frontier → exhausted ladder. See
 [`.env.example`](.env.example) for the exact variables.
+
+## CI verdicts
+
+The dispatcher never judges CI by the bare `gh pr checks` exit code. That code cannot
+tell a red check from a pull request whose checks have not registered yet:
+
+| What GitHub reports | `gh pr checks` exits | With `--json name,bucket` | Verdict |
+| --- | --- | --- | --- |
+| every check passed or was skipped | `0` | `0`; buckets `pass` / `skipping` | `pass` |
+| a check is queued or running | `8` | `0`; a `pending` bucket | `pending` |
+| a check failed, errored, timed out, or needs action | `1` | `0`; a `fail` bucket | `fail` |
+| a check was cancelled (nothing failed or pending) | `0` | `0`; a `cancel` bucket | `fail` |
+| no checks registered yet | `1`, `no checks reported on the '<branch>' branch` | the same, with no JSON | `absent` |
+| gh could not read the PR (transport, auth, rate limit) | `1` (`4` without auth) | the same, with no JSON | `unknown` |
+
+A pull request opened a second ago is in the `absent` row. Every CI read classifies the
+structured buckets instead, and only a `fail` or `cancel` bucket is red: the launcher's
+post-run wait (`scripts/lib/dispatch-ci.sh`), autoship's ship-time re-gate and
+repaired-branch wait (`src/github.ts`), and `scripts/self-ship.sh`.
+
+After the agent exits, the launcher waits for the PR's verdict:
+
+- It reads the checks every 20 seconds for up to 15 minutes. Absent, pending, and
+  unreadable reads keep it waiting. A failing check ends the wait at once, and each
+  failing check's name and link are logged under `CI FAILED`.
+- If no check registers within 120 seconds, it logs `CI DID NOT START` and reports
+  `ci=absent`. The run parks as `ci_pending` with a "CI did not start" summary; it
+  relaunches no agent and spends no recovery attempt. A run whose checks are still
+  running at the deadline parks the same way.
+- `CI PASSED` hands the PR to autoship in the same pass, so a PR whose CI goes green in
+  a few minutes ships without waiting for the next scan.
+
+A parked run is re-read on each later scan. Autoship gives a missing check suite its own
+five-minute grace from its first empty read, restarted whenever a suite appears, and only
+durable absence after that grace becomes a CI repair (#60).
 
 ## Run outcome semantics
 
