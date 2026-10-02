@@ -2365,3 +2365,182 @@ test("a failed exit that cannot be reconciled stays pending and charges nothing 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── interruptions are infrastructure, never model failures (#109) ─────────────
+
+const LAUNCHER_UNPUBLISHED = "The launcher found unpublished work. Resume this checkout to commit or push it.";
+
+/** Every launch is interrupted by the launcher's unpublished-work recovery, like #773. */
+function interruptionHarness(
+  store: StateStore,
+  clock: { now: number },
+  opts: Parameters<typeof reconcileHarness>[1] = {},
+) {
+  const h = reconcileHarness(store, opts);
+  const notifications: string[] = [];
+  const deps: DispatcherDeps = {
+    ...h.deps,
+    config: { ...h.deps.config, ciEscalationModel: "claude-opus-5-5" } as DispatcherConfig,
+    github: {
+      ...(h.deps.github as unknown as Record<string, unknown>),
+      listOpenIssues: async () => ({ ok: true, issues: [] }),
+    } as unknown as DispatcherDeps["github"],
+    notifier: {
+      send: async (title: string) => {
+        notifications.push(title);
+      },
+    },
+    now: () => clock.now,
+    launch: async (relaunched) => {
+      h.launched.push(relaunched);
+      return store.updateRun(relaunched.id, {
+        status: "interrupted",
+        phase: "recovering",
+        exitCode: 75,
+        failureSummary: LAUNCHER_UNPUBLISHED,
+        finishedAt: clock.now,
+        finalizationPending: true,
+      });
+    },
+  };
+  return { ...h, deps, notifications };
+}
+
+test("repeated launcher interruptions never charge the model ladder: one frontier rung, then a back-off, never a hold (#109)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const clock = { now: 10_000_000 };
+    // The assigned rung already spent its resumes; the checkout keeps a tail the agent
+    // declines to commit, so reconciliation can never deliver and every launch is interrupted.
+    const run1 = interruptedRun(store, {
+      resumeCount: MAX_AUTO_RESUMES,
+      attemptNumber: 4,
+      interruptions: {
+        count: 4,
+        byModel: { "claude-sonnet-5": 4 },
+        lastAttempt: 4,
+        lastReason: LAUNCHER_UNPUBLISHED,
+        lastAt: 1,
+      },
+    });
+    const h = interruptionHarness(store, clock, {
+      checkout: finishedCheckout({ dirty: ["?? coverage/"] }),
+    });
+    const backoffComments = () => h.comments.filter((c) => /agent launches keep being interrupted/.test(c));
+
+    // Assigned rung spent: one move to the frontier rung, recorded as interruptions.
+    const escalated = await runScanOnce(h.deps);
+    assert.match(escalated.message, /Moved interrupted issue #1 to the frontier model; no model failure was recorded/);
+    assert.equal(h.launched.length, 1);
+    assert.equal(h.launched[0]!.cliModel, "claude-opus-5-5");
+    assert.equal(h.launched[0]!.recovery?.agent?.attempts, 0, "no repair attempt is fabricated");
+    assert.match(h.launched[0]!.recovery?.agent?.rung?.reason ?? "", /interrupted 4 times/);
+    assert.match(h.launched[0]!.failureSummary ?? "", /Last interruption: The launcher found unpublished work/);
+
+    // The frontier rung's own resumes are interrupted too.
+    for (let scan = 0; scan < MAX_AUTO_RESUMES; scan += 1) {
+      assert.match((await runScanOnce(h.deps)).message, /Resumed the interrupted run/);
+    }
+    assert.equal(h.launched.length, 4);
+
+    // Frontier rung spent: back off, with one accurate comment -- no hold, no page.
+    const backoff = await runScanOnce(h.deps);
+    assert.match(backoff.message, /keeps being interrupted; retrying after/);
+    let after = store.getRun(run1.id)!;
+    assert.equal(after.status, "interrupted", "the claim is retained");
+    assert.deepEqual(after.interruptions?.byModel, { "claude-sonnet-5": 4, "claude-opus-5-5": 4 });
+    assert.equal(after.interruptions?.count, 8);
+    assert.equal(after.interruptions?.stalls, 1);
+    assert.equal(after.interruptions?.retryAfter, clock.now + 60 * 60_000);
+    assert.equal(backoffComments().length, 1);
+    assert.match(backoffComments()[0]!, /interrupted 8 times \(`claude-sonnet-5` ×4, `claude-opus-5-5` ×4\)/);
+
+    // While backing off it never blocks other work.
+    assert.match((await runScanOnce(h.deps)).message, /No eligible issues/);
+    assert.equal(h.launched.length, 4);
+
+    // After the back-off: exactly one more launch, then a longer back-off and no new comment.
+    clock.now += 60 * 60_000;
+    assert.match((await runScanOnce(h.deps)).message, /Retried interrupted issue #1 after its back-off/);
+    assert.equal(h.launched.length, 5);
+    assert.equal(store.getRun(run1.id)?.interruptions?.retryAfter, undefined);
+    await runScanOnce(h.deps);
+    after = store.getRun(run1.id)!;
+    assert.equal(after.interruptions?.stalls, 2);
+    assert.equal(after.interruptions?.retryAfter, clock.now + 4 * 60 * 60_000);
+    assert.equal(backoffComments().length, 1);
+
+    // Throughout: no model failure, no exhaustion, no hold, no page.
+    assert.equal(after.recovery?.agent?.attempts, 0);
+    assert.equal(after.exhaustion, undefined);
+    assert.ok(!h.labels.includes("autoship-held"));
+    assert.deepEqual(h.notifications, []);
+    assert.ok(h.comments.every((c) => !/exhausted/i.test(c)));
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a resume-capped run whose branch already has its finished PR ships instead of escalating (#109)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const clock = { now: 10_000_000 };
+    const run1 = interruptedRun(store, { resumeCount: MAX_AUTO_RESUMES, attemptNumber: 4 });
+    const h = interruptionHarness(store, clock);
+
+    const result = await runScanOnce(h.deps);
+
+    assert.match(result.message, /already has its finished work on PR #42/);
+    const after = store.getRun(run1.id)!;
+    assert.equal(after.status, "shipped");
+    assert.equal(h.launched.length, 0, "neither an escalation nor a resume");
+    assert.deepEqual(after.recovery, {});
+    assert.deepEqual(h.notifications, ["Shipped #1: a thing"]);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("each interrupted launch is counted once, including restarts and replayed finalizations (#109)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const clock = { now: 10_000_000 };
+    const h = interruptionHarness(store, clock);
+    const inFlight = store.updateRun(parkedRun(store).id, { status: "running", attemptNumber: 3, prNumber: null });
+
+    reconcile({ ...h.deps, processCommand: () => null });
+    const restarted = store.getRun(inFlight.id)!;
+    assert.equal(restarted.status, "interrupted");
+    assert.equal(restarted.interruptions?.count, 1);
+    assert.equal(restarted.interruptions?.lastAttempt, 3);
+    assert.match(restarted.interruptions?.lastReason ?? "", /dispatcher restarted/);
+
+    // The next launch is interrupted, and its finalization is replayed after a crash.
+    const next = store.updateRun(inFlight.id, {
+      attemptNumber: 4,
+      exitCode: 143,
+      failureSummary: "The agent process was interrupted by signal (exit 143).",
+      finalizationPending: true,
+    });
+    await finalizeRun(h.deps, next);
+    await finalizeRun(h.deps, store.getRun(inFlight.id)!);
+    const after = store.getRun(inFlight.id)!;
+    assert.equal(after.interruptions?.count, 2);
+    assert.deepEqual(after.interruptions?.byModel, { "claude-sonnet-5": 2 });
+    assert.deepEqual(after.recovery, {}, "never charged as a model failure");
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a resumable run's comment says an interruption spends no repair budget (#109)", () => {
+  const comment = buildIssueComment(run({ status: "interrupted" }), true);
+  assert.match(comment, /If the branch's PR already carries the finished work, autoship takes it over instead/);
+  assert.match(comment, /An interruption is not a model failure and spends no repair budget/);
+});

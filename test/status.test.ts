@@ -245,6 +245,33 @@ test("history is newest first and honors a positive limit", () => {
   }
 });
 
+test("history reports interruptions and their back-off apart from model recovery (#109)", () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run = store.createRun(claimData(7));
+    const ledger = {
+      count: 8,
+      byModel: { "claude-sonnet-5": 4, "claude-opus-5-5": 4 },
+      lastAttempt: 8,
+      lastReason: "The launcher found unpublished work.",
+      lastAt: 5,
+      stalls: 1,
+      retryAfter: Date.UTC(2026, 9, 2, 6, 0, 0),
+    };
+    store.updateRun(run.id, { status: "interrupted", finishedAt: 5, interruptions: ledger });
+    store.releaseLock();
+
+    const history = historySnapshot(dir, 1);
+    assert.deepEqual(history.runs[0]?.interruptions, ledger);
+    assert.deepEqual(history.runs[0]?.recovery, {}, "interruptions are not model recovery");
+    assert.match(renderHistoryHuman(history), /interrupted 8x, retrying after 2026-10-02T06:00:00\.000Z/);
+    assert.doesNotMatch(renderHistoryHuman(history), /exhausted/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("history rejects non-positive limits", () => {
   const result = collectHistory(["--limit", "0"]);
   assert.equal(result.code, 2);

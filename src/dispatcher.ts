@@ -48,6 +48,13 @@ import {
   type ReconcileDecision,
   type ReconcileEvidence,
 } from "./run-reconciliation.ts";
+import {
+  decideResumeCap,
+  describeInterruptions,
+  interruptionBackoffComment,
+  isBackingOff,
+  recordInterruption,
+} from "./interruption-recovery.ts";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { NOTIFY_PRIORITY_HIGH, type Notifier } from "./notify.ts";
@@ -123,9 +130,11 @@ import {
 } from "./blocked-queue.ts";
 
 /**
- * How many times the dispatcher relaunches a run by itself before leaving it for a
- * human. Without a cap a run that dies instantly would be resurrected forever; with one,
- * a genuinely stuck issue stops burning tokens and waits to be looked at.
+ * How many times the dispatcher relaunches an interrupted run on one rung before changing
+ * course. Without a cap a run that dies instantly would be resurrected every scan. Spending
+ * it is not a model failure (#109): the assigned rung escalates once to the frontier rung,
+ * and a frontier rung that is interrupted out backs off (interruption-recovery.ts) instead
+ * of holding the issue or paging anyone.
  */
 export const MAX_AUTO_RESUMES = 3;
 
@@ -254,6 +263,25 @@ export function nextRecoveryLaunch(
     lastProgressSeq: run.outputSeq,
     attemptNumber: run.attemptNumber + 1,
   };
+}
+
+/**
+ * Counts a launch that returned no result the model owns on the interruption ledger, never
+ * the recovery ledger (#109). Keyed by attempt number, so replaying a finalization after a
+ * crash, or reconciling a restart, counts each launch exactly once.
+ */
+function recordInterruptedLaunch(
+  deps: Pick<DispatcherDeps, "store" | "now">,
+  run: RunRecord,
+  reason: string,
+): RunRecord {
+  const ledger = recordInterruption(run.interruptions, {
+    attemptNumber: run.attemptNumber,
+    cliModel: run.cliModel,
+    reason: redact(reason),
+    at: (deps.now ?? (() => Date.now()))(),
+  });
+  return ledger === run.interruptions ? run : deps.store.updateRun(run.id, { interruptions: ledger });
 }
 
 export function checkpointLadderRun(store: StateStore, run: RunRecord): RunRecord {
@@ -745,6 +773,83 @@ async function reconcileResumable(deps: DispatcherDeps, run: RunRecord): Promise
   return null;
 }
 
+/**
+ * A run whose rung spent its resume budget and whose branch holds no finished PR (#109).
+ * Interruptions returned no result the model owns, so nothing here is recorded against the
+ * recovery ledger: the assigned rung moves once to the configured frontier rung, and an
+ * interrupted-out frontier rung backs off and retries, never holding or paging.
+ */
+async function recoverInterruptedOut(
+  deps: DispatcherDeps,
+  capped: RunRecord,
+  nowMs: number,
+): Promise<ScanResult> {
+  const { config, store, github, logger } = deps;
+  // Runs interrupted before this ledger existed (or by a restart) are counted here once.
+  const run = recordInterruptedLaunch(deps, capped, capped.failureSummary ?? capped.status);
+  const ledger = run.interruptions!;
+  const decision = decideResumeCap({
+    reachedFrontier: phaseReachedFrontier(run.recovery, "agent", run.cliModel),
+    ledger,
+    nowMs,
+  });
+
+  if (decision.action === "escalate") {
+    await escalateRun(
+      deps,
+      run,
+      config.ciEscalationModel,
+      "agent",
+      `Earlier launches on this branch were interrupted ${describeInterruptions(ledger)} ` +
+        `without finishing. Last interruption: ${ledger.lastReason}`,
+      true,
+      `interrupted ${describeInterruptions(ledger)}; trying the configured frontier model`,
+    );
+    return {
+      started: store.getRun(run.id),
+      message: `Moved interrupted issue #${run.issueNumber} to the frontier model; no model failure was recorded.`,
+    };
+  }
+
+  if (decision.action === "back-off") {
+    const backingOff = store.updateRun(run.id, {
+      interruptions: { ...ledger, stalls: decision.stalls, retryAfter: decision.retryAfter },
+    });
+    const until = new Date(decision.retryAfter).toISOString();
+    logger.warn("interrupted run backing off; no hold, no page, no model failure recorded", {
+      runId: run.id,
+      issue: run.issueNumber,
+      interruptions: ledger.count,
+      stalls: decision.stalls,
+      retryAfter: until,
+    });
+    // One explanation, when the back-off begins; later rounds only log.
+    if (decision.stalls === 1) {
+      await github.comment(
+        run.issueNumber,
+        interruptionBackoffComment(run, backingOff.interruptions!, decision.retryAfter),
+      );
+    }
+    return {
+      started: null,
+      message: `Issue #${run.issueNumber} keeps being interrupted; retrying after ${until} without holding it.`,
+    };
+  }
+
+  if (decision.action === "retry") {
+    const retried = store.updateRun(run.id, {
+      interruptions: { ...ledger, retryAfter: undefined },
+    });
+    const resumed = await resumeRun(deps, retried);
+    return {
+      started: resumed,
+      message: `Retried interrupted issue #${run.issueNumber} after its back-off.`,
+    };
+  }
+
+  return { started: null, message: `Issue #${run.issueNumber} is backing off after repeated interruptions.` };
+}
+
 /** Runs a single scan: resume first, else claim and launch at most one fresh issue. */
 export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   const { config, store, github, logger, notifier } = deps;
@@ -862,47 +967,28 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
     };
   }
 
-  // A crash/timeout that reaches the ordinary resume cap must not become a silent,
-  // permanently claiming zombie. Escalate it to the frontier once; if that attempt also
-  // reaches the cap, this is genuine exhaustion and the operator gets the single page.
+  // A crash/timeout that spends a rung's resume budget must not become a silent,
+  // permanently claiming zombie -- nor a model failure (#109). Once reconciliation finds no
+  // finished PR to ship, the assigned rung moves once to the frontier rung, and a frontier
+  // rung that is interrupted out backs off. Neither path touches the recovery ledger, holds
+  // the issue, or pages: only launches that returned a failed result can exhaust a phase.
+  // A run waiting out its back-off is skipped, so it never holds up other work.
   const capped = resumableRuns.find(
-    (run) => !isSuppressed(run) && run.resumeCount >= MAX_AUTO_RESUMES,
+    (run) =>
+      !isSuppressed(run) &&
+      run.resumeCount >= MAX_AUTO_RESUMES &&
+      !isBackingOff(run.interruptions, nowMs),
   );
   if (capped) {
     if (config.dryRun) {
       return {
         started: null,
-        message: `[dry-run] would escalate exhausted resumes for issue #${capped.issueNumber}.`,
+        message: `[dry-run] would reconcile and recover the interrupted run on issue #${capped.issueNumber}.`,
       };
     }
     const reconciled = await reconcileResumable(deps, capped);
     if (reconciled) return reconciled;
-    const agentRecovery = capped.recovery?.agent;
-    if (agentRecovery?.escalated) {
-      await exhaustRun(
-        deps,
-        capped,
-        "agent",
-        `The process remained interrupted after ${MAX_AUTO_RESUMES} frontier resume attempts.`,
-      );
-    } else {
-      const prepared = store.updateRun(capped.id, {
-        recovery: updateRecovery(capped.recovery, "agent", {
-          attempts: config.ciSelfHealMaxAttempts,
-        }),
-      });
-      await escalateRun(
-        deps,
-        prepared,
-        config.ciEscalationModel,
-        "agent",
-        `The process remained interrupted after ${MAX_AUTO_RESUMES} resume attempts.`,
-      );
-    }
-    return {
-      started: store.getRun(capped.id),
-      message: `Escalated exhausted resumes for issue #${capped.issueNumber}.`,
-    };
+    return await recoverInterruptedOut(deps, capped, nowMs);
   }
 
   // ── Recover a ready PR that autoship did not finish ──
@@ -1649,12 +1735,14 @@ async function escalateRun(
   kind: RecoveryKind,
   reason: string,
   forceConfigured = false,
+  /** Why a forced rung was taken, recorded on the ladder (e.g. interruptions, #109). */
+  forcedRationale = "configured final frontier attempt",
 ): Promise<void> {
   const { config, store, github, logger, notifier } = deps;
   const now = deps.now ?? (() => Date.now());
 
   const escalation = forceConfigured
-    ? { cliModel: fallbackCliModel, effortLabel: "effort:max", rationale: "configured final frontier attempt" }
+    ? { cliModel: fallbackCliModel, effortLabel: "effort:max", rationale: forcedRationale }
     : await resolveEscalationModel(deps, run, kind, fallbackCliModel, now());
   const cliModel = escalation.cliModel;
   const modelEntry = modelByCliModel(cliModel);
@@ -1868,6 +1956,12 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  // An interrupted, timed-out, or capacity-ended launch returned no result the model owns.
+  // It is counted on its own ledger and never as a model failure (#109).
+  if ((RESUMABLE_STATUSES as readonly string[]).includes(run.status)) {
+    run = recordInterruptedLaunch(deps, run, run.failureSummary ?? run.status);
   }
 
   // A plain agent failure is not a human handoff. It gets the same bounded recovery
@@ -2367,7 +2461,9 @@ export function buildIssueComment(
   } else if (resumable) {
     lines.push(
       "The branch and checkout are preserved. The dispatcher will resume this run on its next " +
-        "scan, continuing from the first milestone without a `[DONE]` marker — completed work is not redone.",
+        "scan, continuing from the first milestone without a `[DONE]` marker — completed work is not redone. " +
+        "If the branch's PR already carries the finished work, autoship takes it over instead. " +
+        "An interruption is not a model failure and spends no repair budget.",
     );
   } else if (run.status === "failed") {
     lines.push(
@@ -2407,7 +2503,7 @@ export function reconcile(deps: DispatcherDeps): void {
         });
       }
     }
-    store.updateRun(run.id, {
+    const interrupted = store.updateRun(run.id, {
       status: "interrupted",
       phase: phaseForStatus("interrupted"),
       exitCode: null,
@@ -2416,6 +2512,8 @@ export function reconcile(deps: DispatcherDeps): void {
       finishedAt: now(),
       remotePid: null,
     });
+    // A restart never reaches finalizeRun, so its interruption is counted here (#109).
+    recordInterruptedLaunch(deps, interrupted, "The dispatcher restarted while this run was in flight.");
     logger.warn("reconciled an orphaned run as interrupted", {
       runId: run.id,
       issue: run.issueNumber,

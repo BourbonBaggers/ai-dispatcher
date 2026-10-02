@@ -39,6 +39,7 @@ import {
 import type { DispatcherAgent, DispatcherStatus } from "./labels.ts";
 import type { RecoveryKind, RecoveryLedger } from "./recovery-policy.ts";
 import type { DeliveryBasis } from "./run-reconciliation.ts";
+import type { InterruptionLedger } from "./interruption-recovery.ts";
 import type {
   ProviderCapacityKind,
   ProviderCapacitySignalSource,
@@ -176,6 +177,13 @@ export interface RunRecord {
   legacyFinalization?: boolean;
   /** Independent retry + frontier-escalation budgets for every owned delivery phase. */
   recovery?: RecoveryLedger;
+  /**
+   * Launches that returned no result the model owns -- interrupted, timed out, or out of
+   * provider capacity -- and the back-off once every resume budget is spent. Kept apart
+   * from `recovery`, which counts only failed results, so interruptions can never become
+   * model "exhaustion" (#109).
+   */
+  interruptions?: InterruptionLedger;
   /** Present only when the current hold was created after the full frontier ladder. */
   exhaustion?: {
     kind: RecoveryKind;

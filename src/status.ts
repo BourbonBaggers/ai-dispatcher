@@ -179,6 +179,8 @@ function runSummary(run: RunRecord) {
     planPath: run.planPath,
     recovery: run.recovery ?? {},
     exhaustion: run.exhaustion ?? null,
+    /** Interruptions are infrastructure, reported apart from model recovery (#109). */
+    interruptions: run.interruptions ?? null,
     failureSummary: run.failureSummary,
     ghCommand: ghCommandFor(run),
   };
@@ -407,6 +409,14 @@ export function renderHistoryHuman(history: HistoryJson): string {
       if (run.pr) parts.push(`PR #${run.pr.number}`);
       if (run.lastCommit) parts.push(`commit ${run.lastCommit}`);
       if (run.exhaustion) parts.push(`exhausted ${run.exhaustion.kind}`);
+      if (run.interruptions) {
+        parts.push(
+          `interrupted ${run.interruptions.count}x` +
+            (run.interruptions.retryAfter === undefined
+              ? ""
+              : `, retrying after ${formatIso(run.interruptions.retryAfter)}`),
+        );
+      }
       if (run.failureSummary) parts.push(run.failureSummary);
       return parts.join(" | ");
     })
