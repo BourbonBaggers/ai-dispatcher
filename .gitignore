@@ -7,6 +7,11 @@ AGENTS.private.md
 state/
 *.log
 
+# Dispatcher-owned files in a run checkout of this repository. The policy reconciler
+# excludes them too; ignoring them here keeps a previously tracked copy from returning.
+/.dispatcher/
+/.dispatcher-*
+
 # Build output (the service runs TypeScript directly on Node 24)
 dist/
 macos/DispatcherStatusBar/build/

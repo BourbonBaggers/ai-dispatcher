@@ -552,8 +552,12 @@ fi
 # A clean exit may still leave milestone work after an earlier commit. Shipping the
 # existing PR in that state silently drops the dirty tail. Preserve it and turn this
 # launch into a repairable failure so the assigned model comes back to commit/push it.
-if [[ "$EXIT_CODE" -eq 0 && "$COMMITS_AHEAD" -gt 0 && -n "$(git status --porcelain 2>/dev/null)" ]]; then
-  event "UNPUBLISHED WORK: clean exit left dirty files after earlier commits — repairing before ship"
+# Dispatcher-owned files are not a dirty tail (work_tree_status, #109), and the event
+# names what is dirty so a tail the agent keeps declining to commit is diagnosable.
+DIRTY_TAIL="$(work_tree_status)"
+if [[ "$EXIT_CODE" -eq 0 && "$COMMITS_AHEAD" -gt 0 && -n "$DIRTY_TAIL" ]]; then
+  dirty_paths="$(printf '%s\n' "$DIRTY_TAIL" | head -5 | cut -c4- | tr '\n' ' ')"
+  event "UNPUBLISHED WORK: clean exit left dirty files after earlier commits (${dirty_paths:0:200}) — repairing before ship"
   EXIT_CODE=75
 fi
 
