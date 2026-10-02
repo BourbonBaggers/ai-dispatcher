@@ -38,6 +38,7 @@ import {
 } from "./labels.ts";
 import type { DispatcherAgent, DispatcherStatus } from "./labels.ts";
 import type { RecoveryKind, RecoveryLedger } from "./recovery-policy.ts";
+import type { DeliveryBasis } from "./run-reconciliation.ts";
 import type {
   ProviderCapacityKind,
   ProviderCapacitySignalSource,
@@ -123,6 +124,18 @@ export interface RunRecord {
   prNumber: number | null;
   /** Original merged delivery; later launcher results must not replace this PR. */
   mergedDelivery?: { pr: number; sha: string };
+  /**
+   * Delivery evidence the dispatcher established itself by reconciling an interrupted or
+   * failed launch with its branch's PR and preserved checkout (#109). Autoship trusts it
+   * like a launcher-reported PR-ready result, which a restart-interrupted run never has.
+   * Cleared by every relaunch, whose own result supersedes it.
+   */
+  reconciledDelivery?: {
+    pr: number;
+    headSha: string;
+    basis: DeliveryBasis;
+    at: number;
+  } | undefined;
   /** Durable receipt preventing duplicate verified-shipment pushes across rechecks. */
   shippedNotificationAt?: number;
   /** Backoff for infrastructure deploy probes; never spends model repair budget. */

@@ -164,8 +164,14 @@ export async function autoshipRun(deps: AutoshipDeps, run: RunRecord): Promise<A
   // `ci_pending` while fresh CI or detached deployment verification resolves; that state
   // must retain the same artifact trust across scans. Requiring the raw provider exit to
   // be zero contradicted that reconciliation and stranded an otherwise complete PR (#38).
+  // Reconciliation (#109) can establish the same trust without a launcher result: a run a
+  // restart interrupted has no exit code at all, yet its branch's PR may already hold the
+  // finished, published work. That evidence names its PR, so it never vouches for another.
+  const reconciledDelivery =
+    run.reconciledDelivery !== undefined && run.reconciledDelivery.pr === run.prNumber;
   const artifactBackedDelivery =
-    (run.status === "pr_ready" || run.status === "ci_pending") && run.exitCode !== null;
+    (run.status === "pr_ready" || run.status === "ci_pending") &&
+    (run.exitCode !== null || reconciledDelivery);
   if ((run.exitCode !== 0 && !artifactBackedDelivery) || run.prNumber === null) {
     return { action: "skipped", reason: "run has no trusted PR-ready delivery evidence" };
   }

@@ -17,6 +17,7 @@ import {
   prTitleBodyArgs,
   prDiffArgs,
   prFilesArgs,
+  branchPullRequestsArgs,
   createIssueArgs,
   createLabelArgs,
   createPullRequestArgs,
@@ -47,6 +48,7 @@ test("every gh argv builder threads --repo <slug> through", () => {
     createIssueArgs(SLUG, { title: "t", labels: ["audit-followup"] }),
     createLabelArgs(SLUG, { name: "audit-followup", color: "0E8A16", description: "d" }),
     createPullRequestArgs(SLUG, { base: "main", head: "feature", title: "t" }),
+    branchPullRequestsArgs(SLUG, "issue-7-x"),
   ];
   for (const args of builders) {
     const idx = args.indexOf("--repo");
@@ -198,6 +200,47 @@ test("prState maps gh pr view state to a lowercase lifecycle value", async () =>
     );
     assert.equal(await client.prState(4), expected);
   }
+});
+
+test("branchPullRequests lists every PR whose head is the run's branch, in any state (#109)", async () => {
+  const repo = parseRepoSlug(SLUG);
+  const { fn, calls } = fakeExec(() =>
+    ok(
+      JSON.stringify([
+        { number: 9, state: "OPEN", isDraft: true, headRefOid: "a".repeat(40), url: "https://github.com/acme/widgets/pull/9" },
+        { number: 4, state: "MERGED", isDraft: false, headRefOid: "b".repeat(40), url: "https://github.com/acme/widgets/pull/4" },
+      ]),
+    ),
+  );
+  const client = new GithubClient(repo.ok ? repo.value : (undefined as never), fn);
+  assert.deepEqual(await client.branchPullRequests("issue-7-x"), [
+    { number: 9, state: "open", isDraft: true, headRefOid: "a".repeat(40), url: "https://github.com/acme/widgets/pull/9" },
+    { number: 4, state: "merged", isDraft: false, headRefOid: "b".repeat(40), url: "https://github.com/acme/widgets/pull/4" },
+  ]);
+  assert.deepEqual(calls[0]?.args, [
+    "pr", "list", "--repo", SLUG, "--head", "issue-7-x", "--state", "all",
+    "--json", "number,state,isDraft,headRefOid,url", "--limit", "20",
+  ]);
+});
+
+test("branchPullRequests separates a branch with no PR from a read GitHub could not answer (#109)", async () => {
+  const repo = parseRepoSlug(SLUG);
+  const client = (result: ExecResult) =>
+    new GithubClient(repo.ok ? repo.value : (undefined as never), fakeExec(() => result).fn);
+  assert.deepEqual(await client(ok("[]\n")).branchPullRequests("issue-7-x"), []);
+  assert.equal(await client({ ok: false, stdout: "", stderr: "HTTP 502", code: 1 }).branchPullRequests("issue-7-x"), null);
+  assert.equal(await client(ok("not json")).branchPullRequests("issue-7-x"), null);
+  // A partial list is never returned: a dropped entry could hide the PR holding the work.
+  assert.equal(
+    await client(ok(JSON.stringify([{ number: 9, state: "OPEN" }]))).branchPullRequests("issue-7-x"),
+    null,
+  );
+  assert.equal(
+    await client(
+      ok(JSON.stringify([{ number: 9, state: "DRAFTY", isDraft: false, headRefOid: "a", url: "u" }])),
+    ).branchPullRequests("issue-7-x"),
+    null,
+  );
 });
 
 test("prState fails safe (unknown, treated like open) on a gh read failure", async () => {

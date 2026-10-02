@@ -39,11 +39,19 @@ import { selectEligibleIssue } from "./selection.ts";
 import { untrustedAuthorComment, UNTRUSTED_AUTHOR_LABEL } from "./author-auth.ts";
 import { detectAgentOverride, conflictCommentFor, selectAgentModel } from "./agent-override.ts";
 import { isProviderSuppressed } from "./token-exhaustion.ts";
-import { launchRun } from "./runner.ts";
+import { launchRun, LAUNCHER_UNPUBLISHED_WORK_EXIT } from "./runner.ts";
+import { gitCheckoutInspector, type CheckoutInspector } from "./checkout-inspection.ts";
+import {
+  decideReconciliation,
+  reconciledDeliveryComment,
+  selectBranchPullRequest,
+  type ReconcileDecision,
+  type ReconcileEvidence,
+} from "./run-reconciliation.ts";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { NOTIFY_PRIORITY_HIGH, type Notifier } from "./notify.ts";
-import { autoshipRun, AUTOSHIP_HELD_LABEL, type ShipRunner } from "./autoship.ts";
+import { autoshipRun, AUTOSHIP_HELD_LABEL, type AutoshipDeps, type ShipRunner } from "./autoship.ts";
 import {
   dispatchableModels,
   effectiveModelPrice,
@@ -143,6 +151,10 @@ export interface DispatcherDeps {
   terminateOrphan?: (pid: number) => void;
   /** Injectable agent launcher for crash-boundary tests. */
   launch?: typeof launchRun;
+  /** Injectable read-only checkout evidence for reconciliation; production reads git (#109). */
+  inspectCheckout?: CheckoutInspector;
+  /** Injectable generated-file conflict repair; production clones and rebuilds the PR. */
+  repairGeneratedConflicts?: AutoshipDeps["repairGeneratedConflicts"];
   /**
    * Injectable acceptance judge for the post-ship audit (#85). When omitted the audit is
    * inert: shipped runs are marked audited and nothing is filed. Delivery never depends
@@ -711,6 +723,28 @@ async function sweepPendingAudits(deps: DispatcherDeps): Promise<void> {
   }
 }
 
+/**
+ * Reconciles a resumable run before the scan relaunches it (#109). Returns the scan's result
+ * when reconciliation took the place of the relaunch, or null when the relaunch should
+ * proceed.
+ */
+async function reconcileResumable(deps: DispatcherDeps, run: RunRecord): Promise<ScanResult | null> {
+  const decision = await reconcileBeforeRelaunch(deps, run);
+  if (decision.action === "deliver") {
+    return {
+      started: deps.store.getRun(run.id),
+      message: `Issue #${run.issueNumber} already has its finished work on PR #${decision.pr.number}; resumed autoship without relaunching the agent.`,
+    };
+  }
+  if (decision.action === "wait") {
+    return {
+      started: null,
+      message: `Could not reconcile issue #${run.issueNumber} with GitHub (${decision.reason}); nothing was relaunched or charged.`,
+    };
+  }
+  return null;
+}
+
 /** Runs a single scan: resume first, else claim and launch at most one fresh issue. */
 export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
   const { config, store, github, logger, notifier } = deps;
@@ -777,7 +811,9 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
 
   // ── Resume first ──
   // A resumable run holds its issue's claim, so leaving it parked while we pick up fresh
-  // work would quietly abandon it. Interrupted/timed-out runs get the next slot.
+  // work would quietly abandon it. Interrupted/timed-out runs get the next slot. Every
+  // relaunch below is preceded by reconciliation (#109): a branch whose PR already holds
+  // the finished, published work resumes autoship instead of launching another agent.
   const resumableRuns = store.resumableRuns();
   for (const exhausted of resumableRuns.filter(
     (run) => run.status === "token_exhausted" && isSuppressed(run),
@@ -790,6 +826,8 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
         message: `[dry-run] would hand off quota-blocked issue #${exhausted.issueNumber} to ${handoff.value.agent}.`,
       };
     }
+    const reconciled = await reconcileResumable(deps, exhausted);
+    if (reconciled) return reconciled;
     const handedOff = store.updateRun(exhausted.id, {
       ...handoff.value,
       failureSummary: `capacity handoff from ${exhausted.agent} to ${handoff.value.agent}`,
@@ -815,6 +853,8 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
         message: `[dry-run] would resume issue #${resumable.issueNumber} (${resumable.agent}).`,
       };
     }
+    const reconciled = await reconcileResumable(deps, resumable);
+    if (reconciled) return reconciled;
     const resumed = await resumeRun(deps, resumable);
     return {
       started: resumed,
@@ -835,6 +875,8 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
         message: `[dry-run] would escalate exhausted resumes for issue #${capped.issueNumber}.`,
       };
     }
+    const reconciled = await reconcileResumable(deps, capped);
+    if (reconciled) return reconciled;
     const agentRecovery = capped.recovery?.agent;
     if (agentRecovery?.escalated) {
       await exhaustRun(
@@ -1312,6 +1354,121 @@ async function recoverBlockedQueueIfIdle(
   return { attempted: true, message: "No eligible issues; blocked queue audit found no stale holds." };
 }
 
+/**
+ * The evidence reconciliation weighs (#109): the branch's PR as GitHub reports it now and,
+ * only while that PR is open, the preserved checkout and whether the PR contains it. Never
+ * throws: an unreadable GitHub or checkout is `unknown`, which can never deliver.
+ */
+async function gatherReconcileEvidence(
+  deps: DispatcherDeps,
+  run: RunRecord,
+): Promise<ReconcileEvidence> {
+  const agentFinished =
+    run.status === "interrupted" && run.exitCode === LAUNCHER_UNPUBLISHED_WORK_EXIT;
+  let listed: Awaited<ReturnType<GithubClient["branchPullRequests"]>> = null;
+  try {
+    listed = await deps.github.branchPullRequests(run.branch);
+  } catch {
+    listed = null;
+  }
+  if (listed === null) return { pr: "unknown", checkout: null, published: null, agentFinished };
+  const pr = selectBranchPullRequest(listed, run.prNumber);
+  if (pr === null || pr.state !== "open") {
+    return { pr, checkout: null, published: null, agentFinished };
+  }
+
+  const inspector = deps.inspectCheckout ?? gitCheckoutInspector();
+  try {
+    const checkout = await inspector.inspect(run);
+    let published: boolean | null = null;
+    if (checkout.state === "present") {
+      published = checkout.head === pr.headRefOid
+        ? true
+        : await inspector.headContainedIn(run, pr.headRefOid);
+    }
+    return { pr, checkout, published, agentFinished };
+  } catch (err) {
+    return {
+      pr,
+      checkout: { state: "unknown", reason: err instanceof Error ? err.message : String(err) },
+      published: null,
+      agentFinished,
+    };
+  }
+}
+
+/**
+ * Reconciles a run that is about to be relaunched -- or charged a model failure -- with the
+ * work its branch already carries (#109). When this returns `deliver`, the PR has already
+ * been handed to autoship; `wait` means GitHub could not answer, so nothing may be
+ * relaunched or charged until it can; `relaunch` leaves the caller's ordinary path intact.
+ */
+async function reconcileBeforeRelaunch(
+  deps: DispatcherDeps,
+  run: RunRecord,
+): Promise<ReconcileDecision> {
+  const decision = decideReconciliation(await gatherReconcileEvidence(deps, run));
+  if (decision.action === "deliver") {
+    await deliverReconciledRun(deps, run, decision);
+  } else if (decision.action === "wait") {
+    deps.logger.warn("reconcile: branch state unknown; not relaunching or charging the run", {
+      runId: run.id,
+      issue: run.issueNumber,
+      reason: decision.reason,
+    });
+  } else {
+    deps.logger.info("reconcile: no finished delivery on the branch; relaunching", {
+      runId: run.id,
+      issue: run.issueNumber,
+      reason: decision.reason,
+    });
+  }
+  return decision;
+}
+
+/**
+ * Hands a reconciled branch's PR to autoship in place of another agent launch. The run keeps
+ * its claim as `pr_ready` with durable evidence naming the PR, so a restart part-way through
+ * re-enters the same delivery (`recheckReadyRun`). Autoship owns the rest: green checks
+ * ship, pending checks park, red/conflicted/behind PRs take their repair ladder with the PR
+ * kept, and a draft is promoted. Without autoship, `pr_ready` is the honest handoff.
+ */
+async function deliverReconciledRun(
+  deps: DispatcherDeps,
+  run: RunRecord,
+  decision: Extract<ReconcileDecision, { action: "deliver" }>,
+): Promise<void> {
+  const now = deps.now ?? (() => Date.now());
+  const delivered = recordRunPhase(
+    deps,
+    run,
+    "autoshipping",
+    `Branch already carries finished work: ${decision.reason}.`,
+    {
+      status: "pr_ready",
+      prNumber: decision.pr.number,
+      prUrl: decision.pr.url,
+      reconciledDelivery: {
+        pr: decision.pr.number,
+        headSha: decision.pr.headRefOid,
+        basis: decision.basis,
+        at: now(),
+      },
+      failureSummary: null,
+      finalizationPending: false,
+    },
+  );
+  deps.logger.info("reconcile: resuming autoship for the branch's PR without relaunching the agent", {
+    runId: run.id,
+    issue: run.issueNumber,
+    pr: decision.pr.number,
+    basis: decision.basis,
+  });
+  await deps.github.removeLabel(run.issueNumber, WORKING_LABEL);
+  await deps.github.comment(run.issueNumber, reconciledDeliveryComment(run, decision));
+  await evaluateAutoship(deps, delivered);
+}
+
 /** Re-enters the SAME run record in resume mode; the branch, checkout, and plan carry over. */
 export async function resumeRun(deps: DispatcherDeps, run: RunRecord): Promise<RunRecord> {
   const { config, store, github, logger, notifier } = deps;
@@ -1331,6 +1488,7 @@ export async function resumeRun(deps: DispatcherDeps, run: RunRecord): Promise<R
     lastProgressSeq: run.outputSeq,
     exitCode: null,
     failureSummary: null,
+    reconciledDelivery: undefined,
     finishedAt: null,
     startedAt: now(),
     finalizationPending: false,
@@ -1381,6 +1539,7 @@ async function repairRun(
     ...nextRecoveryLaunch(run),
     exitCode: null,
     failureSummary: reason,
+    reconciledDelivery: undefined,
     finishedAt: null,
     startedAt: now(),
     finalizationPending: false,
@@ -1525,6 +1684,7 @@ async function escalateRun(
     ...nextRecoveryLaunch(run),
     exitCode: null,
     failureSummary: reason,
+    reconciledDelivery: undefined,
     finishedAt: null,
     startedAt: now(),
     finalizationPending: false,
@@ -1715,6 +1875,12 @@ export async function finalizeRun(deps: DispatcherDeps, run: RunRecord): Promise
   // Intermediate failures stay internal—no high-priority push and no "go fix this"
   // issue comment while automation still owns the problem.
   if (run.status === "failed") {
+    // A failed exit is only a model failure if the work is still unresolved. A provider
+    // that exits badly after publishing a finished plan has delivered; charging the model
+    // ladder for it would end in a hold on a PR that only needed shipping (#109). An
+    // unreadable GitHub charges nothing: finalization stays pending for the next scan.
+    const reconciled = await reconcileBeforeRelaunch(deps, run);
+    if (reconciled.action !== "relaunch") return;
     const decision = decideRecovery(run.recovery, "agent", deps.config.ciSelfHealMaxAttempts, undefined, {
       frontierReached: phaseReachedFrontier(run.recovery, "agent", run.cliModel),
     });
@@ -1853,6 +2019,7 @@ async function evaluateAutoship(deps: DispatcherDeps, run: RunRecord): Promise<{
         recordMissingChecksAt: (at) => {
           store.updateRun(run.id, { ciChecksFirstObservedAt: at });
         },
+        ...(deps.repairGeneratedConflicts ? { repairGeneratedConflicts: deps.repairGeneratedConflicts } : {}),
       },
       run,
     );

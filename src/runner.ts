@@ -42,6 +42,14 @@ export const DISPATCH_AGENT_SCRIPT = fileURLToPath(
 /** Checkout/bootstrap/CI wrap-up get bounded overhead beyond the provider's own budget. */
 export const LAUNCHER_OVERHEAD_MINUTES = 30;
 
+/**
+ * The launcher's own exit after the provider's turn when work is left unpublished: a dirty
+ * tail after a clean exit, a failed push, or a branch that diverged from its remote.
+ * Never a provider exit code, so reconciliation can read it as "the agent ended its turn
+ * and only publication objected" once the checkout proves nothing is unpublished (#109).
+ */
+export const LAUNCHER_UNPUBLISHED_WORK_EXIT = 75;
+
 export function launcherTimeoutMs(maxRuntimeMinutes: number): number {
   return (maxRuntimeMinutes + LAUNCHER_OVERHEAD_MINUTES) * 60_000;
 }
@@ -255,7 +263,7 @@ export function classifyRunOutcome(signals: RunSignals): RunOutcome {
     };
   }
 
-  if (exitCode === 75 && sawResult) {
+  if (exitCode === LAUNCHER_UNPUBLISHED_WORK_EXIT && sawResult) {
     // The launcher synthesized this after a clean provider exit when work remains
     // unpublished. It is a checkout/push repair, not a failed frontier model.
     return {
@@ -555,7 +563,7 @@ export function launchRun(run: RunRecord, deps: RunnerDeps): Promise<RunRecord> 
       const observed = store.getRun(run.id);
       const effectiveOutcome = requirePrForDelivery(outcome, observed?.prNumber ?? null);
       let status: TerminalStatus =
-        observed?.mergedDelivery && effectiveOutcome.exitCode === 75
+        observed?.mergedDelivery && effectiveOutcome.exitCode === LAUNCHER_UNPUBLISHED_WORK_EXIT
           ? "pr_ready"
           : effectiveOutcome.status;
       let summary: string | null;

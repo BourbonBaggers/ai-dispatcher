@@ -222,6 +222,36 @@ describe("autoshipRun — gating", () => {
     assert.equal(r.action, "skipped");
   });
 
+  it("ships a restart-interrupted run whose PR reconciliation proved finished (#109)", async () => {
+    // A restart leaves no exit code at all; the dispatcher's own reconciliation evidence
+    // is what vouches for the branch's PR.
+    const h = harness({});
+    const r = await autoshipRun(
+      h.deps,
+      succeededRun({
+        status: "pr_ready",
+        exitCode: null,
+        reconciledDelivery: { pr: 42, headSha: "head456", basis: "plan-complete", at: 1 },
+      } as Partial<RunRecord>),
+    );
+    assert.equal(r.action, "shipped");
+    assert.equal(h.shipped.length, 1);
+  });
+
+  it("never lets reconciliation evidence for one PR vouch for another (#109)", async () => {
+    const h = harness({});
+    const r = await autoshipRun(
+      h.deps,
+      succeededRun({
+        status: "pr_ready",
+        exitCode: null,
+        reconciledDelivery: { pr: 41, headSha: "head456", basis: "plan-complete", at: 1 },
+      } as Partial<RunRecord>),
+    );
+    assert.equal(r.action, "skipped");
+    assert.equal(h.shipped.length, 0);
+  });
+
   it("does not ship when CI is pending", async () => {
     const h = harness({ ci: "pending" });
     const r = await autoshipRun(h.deps, succeededRun());
