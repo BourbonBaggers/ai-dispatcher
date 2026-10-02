@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -37,6 +37,8 @@ import type {
 } from "../src/github.ts";
 import type { CheckoutSnapshot } from "../src/run-reconciliation.ts";
 import { assessCapacity } from "../src/capacity.ts";
+import { createCheckoutHousekeeping, type CheckoutHousekeeping } from "../src/checkout-cleanup.ts";
+import { GIB } from "../src/checkout-retention.ts";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "ai-dispatcher-loop-"));
@@ -2543,4 +2545,271 @@ test("a resumable run's comment says an interruption spends no repair budget (#1
   const comment = buildIssueComment(run({ status: "interrupted" }), true);
   assert.match(comment, /If the branch's PR already carries the finished work, autoship takes it over instead/);
   assert.match(comment, /An interruption is not a model failure and spends no repair budget/);
+});
+
+// ── checkout housekeeping and the launch disk guard (#102) ─────────────────────
+
+function fakeCheckouts(hold: string | null) {
+  const calls = { tidy: 0, holds: [] as string[] };
+  const checkouts: CheckoutHousekeeping = {
+    tidy: async () => {
+      calls.tidy += 1;
+    },
+    launchHold: async (_runs, subject) => {
+      calls.holds.push(subject);
+      return hold;
+    },
+  };
+  return { checkouts, calls };
+}
+
+/** The production housekeeping over a temp worktree dir, with no process using anything. */
+function realCheckouts(worktreeDir: string): CheckoutHousekeeping {
+  return createCheckoutHousekeeping({
+    worktreeDir,
+    repoDir: join(worktreeDir, "no-mirror"),
+    retentionMs: 3 * 24 * 60 * 60_000,
+    floor: { minFreeBytes: 10 * GIB, minFreePercent: 10 },
+    logger: createLogger("error", () => undefined),
+    notifier: { send: async () => undefined },
+    processesUsing: (paths) => new Map(paths.map((path) => [path, []])),
+    tools: { ionice: false, nice: false },
+  });
+}
+
+const HELD = "Holding the launch of issue #34: 2.0 GB is free on the filesystem holding /worktrees.";
+
+function freshIssueDeps(store: StateStore, checkouts: CheckoutHousekeeping, overrides: Partial<DispatcherConfig> = {}) {
+  const added: string[] = [];
+  const removed: string[] = [];
+  const launched: RunRecord[] = [];
+  const deps: DispatcherDeps = {
+    config: {
+      ...autoshipConfig({ autoshipCmd: null }),
+      dryRun: false,
+      worktreeDir: "/worktrees",
+      authorAuth: { ok: true, mode: "none", trustedAuthors: new Set() },
+      ...overrides,
+    } as DispatcherConfig,
+    store,
+    logger: createLogger("error", () => undefined),
+    notifier: { send: async () => undefined },
+    github: {
+      listOpenIssues: async () => ({
+        ok: true,
+        issues: [{
+          number: 34,
+          title: "claim-time routing",
+          url: "https://x/34",
+          // A stale working label: the hold must come before even that is cleaned up.
+          labels: ["dispatch:ready", "type:bug", "priority:normal", "risk:normal", "agent-working"],
+          authorLogin: "BourbonBaggers",
+        }],
+      }),
+      addLabel: async (_issue: number, label: string) => {
+        added.push(label);
+        return true;
+      },
+      removeLabel: async (_issue: number, label: string) => {
+        removed.push(label);
+        return true;
+      },
+      issueState: async () => "OPEN",
+      issueBody: async () => "Add a retry helper in src/util.ts. Expected behaviour: retries twice.",
+      comment: async () => true,
+    } as unknown as DispatcherDeps["github"],
+    readCapacity: async () => ({ snapshots: new Map(), errors: new Map() }),
+    launch: async (claimed) => {
+      launched.push(claimed);
+      return store.updateRun(claimed.id, { status: "abandoned", finishedAt: 6_000 });
+    },
+    checkouts,
+    now: () => 5_000,
+  };
+  return { deps, added, removed, launched };
+}
+
+test("a run that ships during finalization loses its checkout on the next scan, never mid-finalization (#102)", async () => {
+  const dir = tmp();
+  const worktrees = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const checkoutPath = join(worktrees, "issue-1-x");
+    mkdirSync(checkoutPath);
+    writeFileSync(join(checkoutPath, "work.txt"), "done\n");
+    const pending = store.updateRun(parkedRun(store).id, {
+      status: "pr_ready",
+      finalizationPending: true,
+      checkoutPath,
+    });
+    const harness = parkedDeps(store, { ci: "pass" });
+    const deps: DispatcherDeps = {
+      ...harness.deps,
+      config: {
+        ...harness.deps.config,
+        worktreeDir: worktrees,
+        authorAuth: { ok: true, mode: "none", trustedAuthors: new Set() },
+      } as DispatcherConfig,
+      github: {
+        ...(harness.deps.github as unknown as Record<string, unknown>),
+        listOpenIssues: async () => ({ ok: true, issues: [] }),
+      } as unknown as DispatcherDeps["github"],
+      readCapacity: async () => ({ snapshots: new Map(), errors: new Map() }),
+      checkouts: realCheckouts(worktrees),
+    };
+
+    assert.match((await runScanOnce(deps)).message, /Recovered finalization/);
+    assert.equal(store.getRun(pending.id)?.status, "shipped");
+    assert.equal(existsSync(checkoutPath), true, "kept while its finalization was still in flight");
+
+    await runScanOnce(deps);
+    assert.equal(existsSync(checkoutPath), false, "removed once the shipped state had settled");
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worktrees, { recursive: true, force: true });
+  }
+});
+
+test("a launch with too little disk space is held before anything is claimed or labelled (#102)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const { checkouts, calls } = fakeCheckouts(HELD);
+    const h = freshIssueDeps(store, checkouts);
+
+    const result = await runScanOnce(h.deps);
+
+    assert.equal(result.message, HELD);
+    assert.equal(result.started, null);
+    assert.equal(calls.tidy, 1, "cleanup ran before pickup");
+    assert.deepEqual(calls.holds, ["issue #34"]);
+    assert.equal(h.launched.length, 0);
+    assert.deepEqual(store.allRuns(), [], "nothing was claimed");
+    assert.deepEqual(h.added, [], "no labels were written");
+    assert.deepEqual(h.removed, [], "not even the stale agent-working label is touched");
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("when the disk guard finds room, the launch proceeds exactly as before (#102)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const { checkouts, calls } = fakeCheckouts(null);
+    const h = freshIssueDeps(store, checkouts);
+
+    const result = await runScanOnce(h.deps);
+
+    assert.match(result.message, /Ran (claude|codex) on issue #34/);
+    assert.deepEqual(calls.holds, ["issue #34"]);
+    assert.equal(h.launched.length, 1);
+    assert.ok(h.added.includes("agent-working"));
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a dry-run neither cleans up checkouts nor consults the disk guard (#102)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const { checkouts, calls } = fakeCheckouts(HELD);
+    const h = freshIssueDeps(store, checkouts, { dryRun: true });
+
+    const result = await runScanOnce(h.deps);
+
+    assert.match(result.message, /^\[dry-run\] would start/);
+    assert.equal(calls.tidy, 0);
+    assert.deepEqual(calls.holds, []);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a resume held for disk space keeps its claim and budgets while parked PRs still ship (#102)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const interrupted = interruptedRun(store, { exitCode: 143, prNumber: null, prUrl: null });
+    const otherIssue = store.createRun({
+      issueNumber: 2,
+      issueTitle: "another thing",
+      issueUrl: "https://x/2",
+      agent: "claude",
+      modelLabel: "model:claude-sonnet-5",
+      cliModel: "claude-sonnet-5",
+      effortLabel: "effort:high",
+      cliEffort: "high",
+      branch: "issue-2-y",
+      checkoutPath: "/w/issue-2-y",
+      planPath: null,
+      trigger: "poll",
+    });
+    const parked = store.updateRun(otherIssue.id, {
+      status: "ci_pending",
+      exitCode: 0,
+      prUrl: "https://x/pull/43",
+      prNumber: 43,
+      finishedAt: 1000,
+      createdAt: interrupted.createdAt + 1,
+    });
+    const h = reconcileHarness(store, { prs: [] });
+    const { checkouts, calls } = fakeCheckouts("Holding the launch of issue #1 (resume): low disk.");
+
+    const result = await runScanOnce({ ...h.deps, checkouts });
+
+    assert.deepEqual(calls.holds, ["issue #1 (resume)"]);
+    assert.equal(h.launched.length, 0, "no agent was relaunched");
+    const after = store.getRun(interrupted.id)!;
+    assert.equal(after.status, "interrupted", "the claim and its status are untouched");
+    assert.equal(after.resumeCount, interrupted.resumeCount, "no resume budget spent");
+    assert.equal(after.attemptNumber, interrupted.attemptNumber);
+    assert.deepEqual(after.recovery, interrupted.recovery, "no repair or frontier budget spent");
+    // Shipping an existing PR needs no new checkout, so a disk hold must not stall it.
+    assert.match(result.message, /Rechecked CI for issue #2/);
+    assert.equal(store.getRun(parked.id)?.status, "shipped");
+    assert.equal(h.ships.count, 1);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a resume-capped run is not escalated while launches are held for disk space (#102)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const capped = interruptedRun(store, {
+      exitCode: 143,
+      prNumber: null,
+      prUrl: null,
+      resumeCount: MAX_AUTO_RESUMES,
+    });
+    const h = reconcileHarness(store, { prs: [] });
+    const { checkouts, calls } = fakeCheckouts("Holding the launch of issue #1: low disk.");
+
+    await runScanOnce({
+      ...h.deps,
+      github: {
+        ...(h.deps.github as unknown as Record<string, unknown>),
+        listOpenIssues: async () => ({ ok: true, issues: [] }),
+      } as unknown as DispatcherDeps["github"],
+      checkouts,
+    });
+
+    assert.deepEqual(calls.holds, ["issue #1 (frontier relaunch)"]);
+    assert.equal(h.launched.length, 0);
+    const after = store.getRun(capped.id)!;
+    assert.equal(after.status, "interrupted");
+    assert.equal(after.cliModel, capped.cliModel, "still on its assigned rung");
+    assert.deepEqual(after.recovery, capped.recovery);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

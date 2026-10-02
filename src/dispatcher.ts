@@ -41,6 +41,7 @@ import { detectAgentOverride, conflictCommentFor, selectAgentModel } from "./age
 import { isProviderSuppressed } from "./token-exhaustion.ts";
 import { launchRun, LAUNCHER_UNPUBLISHED_WORK_EXIT } from "./runner.ts";
 import { gitCheckoutInspector, type CheckoutInspector } from "./checkout-inspection.ts";
+import type { CheckoutHousekeeping } from "./checkout-cleanup.ts";
 import {
   decideReconciliation,
   reconciledDeliveryComment,
@@ -162,6 +163,11 @@ export interface DispatcherDeps {
   launch?: typeof launchRun;
   /** Injectable read-only checkout evidence for reconciliation; production reads git (#109). */
   inspectCheckout?: CheckoutInspector;
+  /**
+   * Run-checkout cleanup and the launch disk guard (#102). Optional: when omitted, no
+   * checkout is ever removed and no launch is held for disk space.
+   */
+  checkouts?: CheckoutHousekeeping;
   /** Injectable generated-file conflict repair; production clones and rebuilds the PR. */
   repairGeneratedConflicts?: AutoshipDeps["repairGeneratedConflicts"];
   /**
@@ -752,6 +758,21 @@ async function sweepPendingAudits(deps: DispatcherDeps): Promise<void> {
 }
 
 /**
+ * The launch disk guard (#102): null when there is room to launch, otherwise the message
+ * explaining the hold. Checked only right before a launch the scan starts on its own. A
+ * hold claims nothing, spends no resume or repair budget, and leaves every run exactly as
+ * it was, so the delayed work simply launches on a later scan once space is free.
+ *
+ * Repair and escalation relaunches inside finalization are deliberately not gated: they
+ * reuse the run's existing checkout, and holding one mid-ladder would strand a delivery
+ * that autoship is already driving.
+ */
+async function diskHold(deps: DispatcherDeps, subject: string): Promise<string | null> {
+  if (!deps.checkouts) return null;
+  return await deps.checkouts.launchHold(deps.store.allRuns(), subject);
+}
+
+/**
  * Reconciles a resumable run before the scan relaunches it (#109). Returns the scan's result
  * when reconciliation took the place of the relaunch, or null when the relaunch should
  * proceed.
@@ -777,13 +798,14 @@ async function reconcileResumable(deps: DispatcherDeps, run: RunRecord): Promise
  * A run whose rung spent its resume budget and whose branch holds no finished PR (#109).
  * Interruptions returned no result the model owns, so nothing here is recorded against the
  * recovery ledger: the assigned rung moves once to the configured frontier rung, and an
- * interrupted-out frontier rung backs off and retries, never holding or paging.
+ * interrupted-out frontier rung backs off and retries, never holding or paging. Returns null
+ * when a relaunch is held for disk space, so the scan can go on to work that needs no agent.
  */
 async function recoverInterruptedOut(
   deps: DispatcherDeps,
   capped: RunRecord,
   nowMs: number,
-): Promise<ScanResult> {
+): Promise<ScanResult | null> {
   const { config, store, github, logger } = deps;
   // Runs interrupted before this ledger existed (or by a restart) are counted here once.
   const run = recordInterruptedLaunch(deps, capped, capped.failureSummary ?? capped.status);
@@ -795,6 +817,7 @@ async function recoverInterruptedOut(
   });
 
   if (decision.action === "escalate") {
+    if (await diskHold(deps, `issue #${run.issueNumber} (frontier relaunch)`)) return null;
     await escalateRun(
       deps,
       run,
@@ -837,6 +860,7 @@ async function recoverInterruptedOut(
   }
 
   if (decision.action === "retry") {
+    if (await diskHold(deps, `issue #${run.issueNumber} (resume)`)) return null;
     const retried = store.updateRun(run.id, {
       interruptions: { ...ledger, retryAfter: undefined },
     });
@@ -881,6 +905,12 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
       message: `Recovered finalization for issue #${pendingFinalization.issueNumber}.`,
     };
   }
+
+  // ── Checkout housekeeping (#102) ──
+  // Only here, with no run active and no finalization pending: a run still awaiting
+  // finalization may yet be relaunched in its checkout. Shipped checkouts go on every scan;
+  // the full sweep runs on startup and daily. Dry-run never deletes anything.
+  if (!config.dryRun) await deps.checkouts?.tidy(store.allRuns());
 
   // ── Post-ship audit ──
   // Deliberately after finalization and before pickup: it is bounded, cheap, and must not
@@ -933,6 +963,9 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
     }
     const reconciled = await reconcileResumable(deps, exhausted);
     if (reconciled) return reconciled;
+    // Held for disk space: nothing is handed off or spent, and the scan moves on to work
+    // that launches no agent.
+    if (await diskHold(deps, `issue #${exhausted.issueNumber} (resume)`)) break;
     const handedOff = store.updateRun(exhausted.id, {
       ...handoff.value,
       failureSummary: `capacity handoff from ${exhausted.agent} to ${handoff.value.agent}`,
@@ -960,11 +993,15 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
     }
     const reconciled = await reconcileResumable(deps, resumable);
     if (reconciled) return reconciled;
-    const resumed = await resumeRun(deps, resumable);
-    return {
-      started: resumed,
-      message: `Resumed the interrupted run on issue #${resumable.issueNumber} before starting new work.`,
-    };
+    // A disk hold leaves the run exactly as it was: claim, status, and resume budget. Ready,
+    // parked, and held PRs below still progress, since shipping needs no new checkout.
+    if (!(await diskHold(deps, `issue #${resumable.issueNumber} (resume)`))) {
+      const resumed = await resumeRun(deps, resumable);
+      return {
+        started: resumed,
+        message: `Resumed the interrupted run on issue #${resumable.issueNumber} before starting new work.`,
+      };
+    }
   }
 
   // A crash/timeout that spends a rung's resume budget must not become a silent,
@@ -988,7 +1025,8 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
     }
     const reconciled = await reconcileResumable(deps, capped);
     if (reconciled) return reconciled;
-    return await recoverInterruptedOut(deps, capped, nowMs);
+    const recovered = await recoverInterruptedOut(deps, capped, nowMs);
+    if (recovered) return recovered;
   }
 
   // ── Recover a ready PR that autoship did not finish ──
@@ -1223,6 +1261,11 @@ export async function runScanOnce(deps: DispatcherDeps): Promise<ScanResult> {
       message: `[dry-run] would start ${agent} (${cliModel}, effort ${cliEffort}) on issue #${issue.number} — branch ${branch}.`,
     };
   }
+
+  // A fresh launch clones a whole checkout and installs its dependencies. Without room for
+  // that it would fail halfway, so it is held before anything is claimed or labelled.
+  const held = await diskHold(deps, `issue #${issue.number}`);
+  if (held) return { started: null, message: held };
 
   if (target.staleWorkingLabel) {
     // The label says an agent is on it, but no run of ours claims it — a stale label from
