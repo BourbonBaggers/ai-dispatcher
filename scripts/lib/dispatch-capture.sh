@@ -12,6 +12,21 @@
 # This file is sourced by dispatch-agent.sh. It lives on its own so the decision logic
 # is unit-testable without launching a real agent (the TS mirror is src/capture.ts).
 
+# Dispatcher-owned files in a run checkout -- the managed policy directory, the bootstrap
+# prompt, the dependency-cache key and its staging copies, the no-work sentinel -- are
+# never part of the agent's work. The policy reconciler hides them via .git/info/exclude;
+# these pathspecs also cover a repository that tracks one by mistake, which an exclude
+# file cannot hide. Counting the cache key as a dirty tail turned every clean exit into
+# "unpublished work" and relaunched a finished PR until the ladder exhausted (#109).
+# Mirrors MANAGED_CHECKOUT_PATHSPECS in src/target-policy.ts.
+DISPATCHER_MANAGED_PATHSPECS=(':(top,exclude).dispatcher' ':(top,exclude).dispatcher-*')
+
+# work_tree_status — `git status --porcelain` limited to the agent's own work. Runs in
+# the current working directory, which must be the run checkout's root.
+work_tree_status() {
+  git status --porcelain -- . "${DISPATCHER_MANAGED_PATHSPECS[@]}" 2>/dev/null
+}
+
 # capture_uncommitted_work <issue> <exit_code> <commits_ahead>
 #
 # Stage and commit the worktree as a fallback ONLY when all three hold:
@@ -36,13 +51,13 @@ capture_uncommitted_work() {
 
   # Nothing to capture if the working tree is clean. `git status --porcelain` respects
   # .gitignore and .git/info/exclude, so an otherwise-clean tree with only ignored files
-  # (.env) or excluded files (.dispatcher-prompt.md) reports empty here and we stop.
-  [[ -n "$(git status --porcelain 2>/dev/null)" ]] || return 1
+  # (.env) or dispatcher-owned files reports empty here and we stop.
+  [[ -n "$(work_tree_status)" ]] || return 1
 
-  # Stage everything the repo's ignore rules allow. `git add -A` never stages paths
-  # matched by .gitignore (.env) or .git/info/exclude (.dispatcher-prompt.md). Reset
-  # those two explicitly anyway, as belt-and-suspenders in case either is ever tracked.
-  git add -A || return 1
+  # Stage everything the repo's ignore rules allow, never a dispatcher-owned path.
+  # `git add -A` never stages paths matched by .gitignore (.env) or .git/info/exclude.
+  # Reset .env and the prompt explicitly anyway, in case either is ever tracked.
+  git add -A -- . "${DISPATCHER_MANAGED_PATHSPECS[@]}" || return 1
   git reset -q -- .env .dispatcher-prompt.md 2>/dev/null || true
 
   # If the only dirty entries were ignored/excluded, the index is empty now — stop.

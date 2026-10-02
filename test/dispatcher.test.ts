@@ -28,7 +28,14 @@ import { StateStore } from "../src/state.ts";
 import { createLogger } from "../src/logger.ts";
 import type { RunRecord } from "../src/state.ts";
 import type { DispatcherConfig } from "../src/config.ts";
-import type { GithubCreatedIssue, GithubLabelSpec, GithubPrDiff, GithubPrFile } from "../src/github.ts";
+import type {
+  GithubBranchPullRequest,
+  GithubCreatedIssue,
+  GithubLabelSpec,
+  GithubPrDiff,
+  GithubPrFile,
+} from "../src/github.ts";
+import type { CheckoutSnapshot } from "../src/run-reconciliation.ts";
 import { assessCapacity } from "../src/capacity.ts";
 
 function tmp(): string {
@@ -1984,4 +1991,556 @@ test("a repository missing the audit's labels gets them and files the follow-up 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── reconcile before relaunch (#109) ──────────────────────────────────────────
+//
+// internal-tools #773: every launch ended `interrupted` (launcher exit 75) while PR #787
+// sat open, mergeable, and green, and the resume cap turned those relaunches into model
+// "exhaustion". A branch that already carries its finished work must resume autoship.
+
+const PR_HEAD = "7ac045908c2a1670d34675f0ddde19d54b2942e8";
+
+function branchPr(overrides: Partial<GithubBranchPullRequest> = {}): GithubBranchPullRequest {
+  return {
+    number: 42,
+    state: "open",
+    isDraft: false,
+    headRefOid: PR_HEAD,
+    url: "https://github.com/o/r/pull/42",
+    ...overrides,
+  };
+}
+
+/** A finished checkout: HEAD is the PR head, nothing uncommitted, every milestone [DONE]. */
+function finishedCheckout(overrides: Partial<Extract<CheckoutSnapshot, { state: "present" }>> = {}): CheckoutSnapshot {
+  return {
+    state: "present",
+    head: PR_HEAD,
+    dirty: [],
+    plan: { path: "docs/plans/2026-10-01-issue1-x.md", total: 4, done: 4 },
+    ...overrides,
+  };
+}
+
+/** The #773 shape: the launcher's unpublished-work exit after a clean provider exit. */
+function interruptedRun(store: StateStore, overrides: Partial<RunRecord> = {}): RunRecord {
+  return store.updateRun(parkedRun(store).id, {
+    status: "interrupted",
+    phase: "recovering",
+    exitCode: 75,
+    failureSummary: "The launcher found unpublished work. Resume this checkout to commit or push it.",
+    finalizationPending: false,
+    ...overrides,
+  });
+}
+
+function reconcileHarness(store: StateStore, opts: {
+  prs?: GithubBranchPullRequest[] | null;
+  checkout?: CheckoutSnapshot;
+  published?: boolean | null;
+  ci?: "pass" | "pending" | "fail" | "unknown";
+  isDraft?: boolean;
+  mergeStateStatus?: string;
+} = {}) {
+  const parked = parkedDeps(store, { ci: opts.ci ?? "pass", ...(opts.isDraft === undefined ? {} : { isDraft: opts.isDraft }) });
+  const launched: RunRecord[] = [];
+  const promotions = { count: 0 };
+  const github = parked.deps.github as unknown as Record<string, unknown>;
+  const prMergeInfo = github.prMergeInfo as () => Promise<Record<string, unknown>>;
+  const deps: DispatcherDeps = {
+    ...parked.deps,
+    config: {
+      ...autoshipConfig(),
+      dryRun: false,
+      worktreeDir: "/w",
+      authorAuth: { ok: true, mode: "none", trustedAuthors: new Set() },
+    } as DispatcherConfig,
+    github: {
+      ...github,
+      branchPullRequests: async () => (opts.prs === undefined ? [branchPr()] : opts.prs),
+      prMergeInfo: async () => ({
+        ...(await prMergeInfo()),
+        headRefOid: PR_HEAD,
+        mergeStateStatus: opts.mergeStateStatus ?? "CLEAN",
+      }),
+      markPrReady: async () => {
+        promotions.count += 1;
+        return true;
+      },
+    } as unknown as DispatcherDeps["github"],
+    inspectCheckout: {
+      inspect: async () => opts.checkout ?? finishedCheckout(),
+      headContainedIn: async () => opts.published ?? true,
+    },
+    readCapacity: async () => ({ snapshots: new Map(), errors: new Map() }),
+    repairGeneratedConflicts: async () => ({
+      ok: false,
+      conflictPaths: ["src/feature.ts"],
+      decision: null,
+      reason: "conflicts are not generated-only",
+    }),
+    launch: async (relaunched) => {
+      launched.push(relaunched);
+      return store.updateRun(relaunched.id, { status: "abandoned", finishedAt: 6_000 });
+    },
+  };
+  return { ...parked, deps, launched, promotions };
+}
+
+test("a resumable run whose branch has a finished green PR ships it without launching a model (#109)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run1 = interruptedRun(store);
+    const h = reconcileHarness(store);
+
+    const result = await runScanOnce(h.deps);
+
+    const after = store.getRun(run1.id)!;
+    assert.match(result.message, /already has its finished work on PR #42; resumed autoship without relaunching/);
+    assert.equal(h.launched.length, 0, "no agent relaunch");
+    assert.equal(h.ships.count, 1, "autoship merges and deploys the existing PR");
+    assert.equal(after.status, "shipped");
+    assert.equal(after.prNumber, 42);
+    assert.deepEqual(after.recovery, {}, "no repair or frontier budget spent");
+    assert.equal(after.resumeCount, 0, "no resume budget spent");
+    assert.equal(after.exhaustion, undefined);
+    assert.equal(after.reconciledDelivery?.basis, "agent-finished");
+    assert.ok(h.removedLabels.includes("agent-working"));
+    assert.ok(!h.labels.includes("autoship-held"));
+    assert.match(h.comments[0] ?? "", /^## Dispatcher: finished work found on PR #42/);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a reconciled PR whose checks are pending waits, parked, without a launch (#109)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run1 = interruptedRun(store);
+    const h = reconcileHarness(store, { ci: "pending" });
+
+    await runScanOnce(h.deps);
+
+    const after = store.getRun(run1.id)!;
+    assert.equal(after.status, "ci_pending");
+    assert.equal(after.prNumber, 42);
+    assert.equal(h.launched.length, 0);
+    assert.equal(h.ships.count, 0);
+    assert.deepEqual(after.recovery, {});
+
+    // The parked recheck keeps trusting the reconciled delivery once checks go green.
+    const green = reconcileHarness(store, { ci: "pass" });
+    await recheckParkedRun(green.deps, after);
+    assert.equal(store.getRun(run1.id)?.status, "shipped");
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a reconciled PR with red checks takes the CI repair path and keeps its PR (#109)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run1 = interruptedRun(store, { cliModel: "claude-opus-5-5", modelLabel: "model:claude-opus-5.5" });
+    const h = reconcileHarness(store, { ci: "fail" });
+
+    await runScanOnce(h.deps);
+
+    assert.equal(h.launched.length, 1, "one CI repair launch");
+    const repair = h.launched[0]!;
+    assert.equal(repair.prNumber, 42, "the PR association survives the repair");
+    assert.equal(repair.recovery?.ci?.attempts, 1, "a real red check spends CI repair budget");
+    assert.equal(repair.recovery?.agent, undefined, "nothing is charged to the agent phase");
+    assert.equal(repair.cliModel, "claude-sonnet-5", "repairs return to the immutable assigned model");
+    assert.match(repair.failureSummary ?? "", /PR #42 CI is still failing/);
+    assert.equal(store.getRun(run1.id)?.reconciledDelivery, undefined, "the relaunch supersedes the evidence");
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a reconciled PR with merge conflicts takes the merge repair path and keeps its PR (#109)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    interruptedRun(store);
+    const h = reconcileHarness(store, { mergeStateStatus: "DIRTY" });
+
+    await runScanOnce(h.deps);
+
+    assert.equal(h.launched.length, 1, "one merge repair launch");
+    assert.equal(h.launched[0]!.prNumber, 42);
+    assert.equal(h.launched[0]!.recovery?.merge?.attempts, 1);
+    assert.match(h.launched[0]!.failureSummary ?? "", /PR #42 merge-conflict recovery failed/);
+    assert.equal(h.ships.count, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a reconciled draft PR is promoted and shipped, keeping its PR (#109)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run1 = interruptedRun(store);
+    const h = reconcileHarness(store, { prs: [branchPr({ isDraft: true })], isDraft: true });
+
+    await runScanOnce(h.deps);
+
+    assert.equal(h.promotions.count, 1, "the draft is marked ready");
+    assert.equal(store.getRun(run1.id)?.status, "shipped");
+    assert.equal(h.launched.length, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a resumable run with no PR still resumes its saved checkout (#109)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run1 = interruptedRun(store, { exitCode: 143, prNumber: null, prUrl: null });
+    const h = reconcileHarness(store, { prs: [] });
+
+    const result = await runScanOnce(h.deps);
+
+    assert.match(result.message, /Resumed the interrupted run on issue #1/);
+    assert.equal(h.launched.length, 1);
+    assert.equal(h.launched[0]!.id, run1.id, "the same run record, branch, and checkout");
+    assert.equal(h.launched[0]!.trigger, "resume");
+    assert.equal(h.launched[0]!.resumeCount, 1);
+    assert.equal(h.ships.count, 0);
+    assert.equal(h.comments.length, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("unpublished work is resumed, never shipped: a dirty tail or unpushed commits relaunch the checkout (#109)", async () => {
+  for (const [label, opts] of [
+    ["dirty tail", { checkout: finishedCheckout({ head: "1".repeat(40), dirty: [" M src/feature.ts"] }) }],
+    ["unpushed commit", { checkout: finishedCheckout({ head: "1".repeat(40) }), published: false }],
+  ] as const) {
+    const dir = tmp();
+    try {
+      const store = StateStore.open(dir);
+      const run1 = interruptedRun(store);
+      const h = reconcileHarness(store, opts);
+
+      const result = await runScanOnce(h.deps);
+
+      assert.match(result.message, /Resumed the interrupted run/, label);
+      assert.equal(h.launched.length, 1, label);
+      assert.equal(h.ships.count, 0, `${label}: the PR lacks local work, so it must not ship`);
+      assert.equal(h.launched[0]!.prNumber, 42, label);
+      assert.equal(store.getRun(run1.id)?.reconciledDelivery, undefined, label);
+      store.releaseLock();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("an unreadable GitHub neither relaunches nor charges the resumable run (#109)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const run1 = interruptedRun(store);
+    const h = reconcileHarness(store, { prs: null });
+
+    const result = await runScanOnce(h.deps);
+
+    assert.match(result.message, /Could not reconcile issue #1 with GitHub/);
+    assert.equal(h.launched.length, 0);
+    const after = store.getRun(run1.id)!;
+    assert.equal(after.status, "interrupted");
+    assert.equal(after.resumeCount, 0);
+    assert.deepEqual(after.recovery, {});
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a restart-interrupted run with a finished plan ships on reconciliation evidence alone (#109)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    // reconcile() leaves no exit code and, before any result line, no PR on the record.
+    const run1 = interruptedRun(store, { exitCode: null, prNumber: null, prUrl: null });
+    const h = reconcileHarness(store);
+
+    await runScanOnce(h.deps);
+
+    const after = store.getRun(run1.id)!;
+    assert.equal(after.status, "shipped");
+    assert.equal(after.prNumber, 42);
+    assert.equal(after.reconciledDelivery?.basis, "plan-complete");
+    assert.equal(h.launched.length, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failed exit after the plan was finished and published delivers instead of charging the model ladder (#109)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const failed = store.updateRun(parkedRun(store).id, {
+      status: "failed",
+      exitCode: 1,
+      failureSummary: "The agent exited with code 1.",
+      finalizationPending: true,
+    });
+    const h = reconcileHarness(store);
+
+    await finalizeRun(h.deps, failed);
+
+    const after = store.getRun(failed.id)!;
+    assert.equal(after.status, "shipped");
+    assert.equal(after.recovery?.agent, undefined, "no model failure was recorded");
+    assert.equal(h.launched.length, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failed exit on unfinished work still enters the agent repair ladder (#109)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const failed = store.updateRun(parkedRun(store).id, {
+      status: "failed",
+      exitCode: 1,
+      failureSummary: "The agent exited with code 1.",
+      finalizationPending: true,
+    });
+    const h = reconcileHarness(store, {
+      checkout: finishedCheckout({ plan: { path: "p.md", total: 4, done: 2 } }),
+    });
+
+    await finalizeRun(h.deps, failed);
+
+    assert.equal(h.launched.length, 1);
+    assert.equal(h.launched[0]!.recovery?.agent?.attempts, 1);
+    assert.equal(h.ships.count, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failed exit that cannot be reconciled stays pending and charges nothing (#109)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const failed = store.updateRun(parkedRun(store).id, {
+      status: "failed",
+      exitCode: 1,
+      failureSummary: "The agent exited with code 1.",
+      finalizationPending: true,
+    });
+    const h = reconcileHarness(store, { prs: null });
+
+    await finalizeRun(h.deps, failed);
+
+    const after = store.getRun(failed.id)!;
+    assert.equal(after.status, "failed");
+    assert.equal(after.finalizationPending, true, "the next scan finishes this finalization");
+    assert.deepEqual(after.recovery, {});
+    assert.equal(h.launched.length, 0);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── interruptions are infrastructure, never model failures (#109) ─────────────
+
+const LAUNCHER_UNPUBLISHED = "The launcher found unpublished work. Resume this checkout to commit or push it.";
+
+/** Every launch is interrupted by the launcher's unpublished-work recovery, like #773. */
+function interruptionHarness(
+  store: StateStore,
+  clock: { now: number },
+  opts: Parameters<typeof reconcileHarness>[1] = {},
+) {
+  const h = reconcileHarness(store, opts);
+  const notifications: string[] = [];
+  const deps: DispatcherDeps = {
+    ...h.deps,
+    config: { ...h.deps.config, ciEscalationModel: "claude-opus-5-5" } as DispatcherConfig,
+    github: {
+      ...(h.deps.github as unknown as Record<string, unknown>),
+      listOpenIssues: async () => ({ ok: true, issues: [] }),
+    } as unknown as DispatcherDeps["github"],
+    notifier: {
+      send: async (title: string) => {
+        notifications.push(title);
+      },
+    },
+    now: () => clock.now,
+    launch: async (relaunched) => {
+      h.launched.push(relaunched);
+      return store.updateRun(relaunched.id, {
+        status: "interrupted",
+        phase: "recovering",
+        exitCode: 75,
+        failureSummary: LAUNCHER_UNPUBLISHED,
+        finishedAt: clock.now,
+        finalizationPending: true,
+      });
+    },
+  };
+  return { ...h, deps, notifications };
+}
+
+test("repeated launcher interruptions never charge the model ladder: one frontier rung, then a back-off, never a hold (#109)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const clock = { now: 10_000_000 };
+    // The assigned rung already spent its resumes; the checkout keeps a tail the agent
+    // declines to commit, so reconciliation can never deliver and every launch is interrupted.
+    const run1 = interruptedRun(store, {
+      resumeCount: MAX_AUTO_RESUMES,
+      attemptNumber: 4,
+      interruptions: {
+        count: 4,
+        byModel: { "claude-sonnet-5": 4 },
+        lastAttempt: 4,
+        lastReason: LAUNCHER_UNPUBLISHED,
+        lastAt: 1,
+      },
+    });
+    const h = interruptionHarness(store, clock, {
+      checkout: finishedCheckout({ dirty: ["?? coverage/"] }),
+    });
+    const backoffComments = () => h.comments.filter((c) => /agent launches keep being interrupted/.test(c));
+
+    // Assigned rung spent: one move to the frontier rung, recorded as interruptions.
+    const escalated = await runScanOnce(h.deps);
+    assert.match(escalated.message, /Moved interrupted issue #1 to the frontier model; no model failure was recorded/);
+    assert.equal(h.launched.length, 1);
+    assert.equal(h.launched[0]!.cliModel, "claude-opus-5-5");
+    assert.equal(h.launched[0]!.recovery?.agent?.attempts, 0, "no repair attempt is fabricated");
+    assert.match(h.launched[0]!.recovery?.agent?.rung?.reason ?? "", /interrupted 4 times/);
+    assert.match(h.launched[0]!.failureSummary ?? "", /Last interruption: The launcher found unpublished work/);
+
+    // The frontier rung's own resumes are interrupted too.
+    for (let scan = 0; scan < MAX_AUTO_RESUMES; scan += 1) {
+      assert.match((await runScanOnce(h.deps)).message, /Resumed the interrupted run/);
+    }
+    assert.equal(h.launched.length, 4);
+
+    // Frontier rung spent: back off, with one accurate comment -- no hold, no page.
+    const backoff = await runScanOnce(h.deps);
+    assert.match(backoff.message, /keeps being interrupted; retrying after/);
+    let after = store.getRun(run1.id)!;
+    assert.equal(after.status, "interrupted", "the claim is retained");
+    assert.deepEqual(after.interruptions?.byModel, { "claude-sonnet-5": 4, "claude-opus-5-5": 4 });
+    assert.equal(after.interruptions?.count, 8);
+    assert.equal(after.interruptions?.stalls, 1);
+    assert.equal(after.interruptions?.retryAfter, clock.now + 60 * 60_000);
+    assert.equal(backoffComments().length, 1);
+    assert.match(backoffComments()[0]!, /interrupted 8 times \(`claude-sonnet-5` ×4, `claude-opus-5-5` ×4\)/);
+
+    // While backing off it never blocks other work.
+    assert.match((await runScanOnce(h.deps)).message, /No eligible issues/);
+    assert.equal(h.launched.length, 4);
+
+    // After the back-off: exactly one more launch, then a longer back-off and no new comment.
+    clock.now += 60 * 60_000;
+    assert.match((await runScanOnce(h.deps)).message, /Retried interrupted issue #1 after its back-off/);
+    assert.equal(h.launched.length, 5);
+    assert.equal(store.getRun(run1.id)?.interruptions?.retryAfter, undefined);
+    await runScanOnce(h.deps);
+    after = store.getRun(run1.id)!;
+    assert.equal(after.interruptions?.stalls, 2);
+    assert.equal(after.interruptions?.retryAfter, clock.now + 4 * 60 * 60_000);
+    assert.equal(backoffComments().length, 1);
+
+    // Throughout: no model failure, no exhaustion, no hold, no page.
+    assert.equal(after.recovery?.agent?.attempts, 0);
+    assert.equal(after.exhaustion, undefined);
+    assert.ok(!h.labels.includes("autoship-held"));
+    assert.deepEqual(h.notifications, []);
+    assert.ok(h.comments.every((c) => !/exhausted/i.test(c)));
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a resume-capped run whose branch already has its finished PR ships instead of escalating (#109)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const clock = { now: 10_000_000 };
+    const run1 = interruptedRun(store, { resumeCount: MAX_AUTO_RESUMES, attemptNumber: 4 });
+    const h = interruptionHarness(store, clock);
+
+    const result = await runScanOnce(h.deps);
+
+    assert.match(result.message, /already has its finished work on PR #42/);
+    const after = store.getRun(run1.id)!;
+    assert.equal(after.status, "shipped");
+    assert.equal(h.launched.length, 0, "neither an escalation nor a resume");
+    assert.deepEqual(after.recovery, {});
+    assert.deepEqual(h.notifications, ["Shipped #1: a thing"]);
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("each interrupted launch is counted once, including restarts and replayed finalizations (#109)", async () => {
+  const dir = tmp();
+  try {
+    const store = StateStore.open(dir);
+    const clock = { now: 10_000_000 };
+    const h = interruptionHarness(store, clock);
+    const inFlight = store.updateRun(parkedRun(store).id, { status: "running", attemptNumber: 3, prNumber: null });
+
+    reconcile({ ...h.deps, processCommand: () => null });
+    const restarted = store.getRun(inFlight.id)!;
+    assert.equal(restarted.status, "interrupted");
+    assert.equal(restarted.interruptions?.count, 1);
+    assert.equal(restarted.interruptions?.lastAttempt, 3);
+    assert.match(restarted.interruptions?.lastReason ?? "", /dispatcher restarted/);
+
+    // The next launch is interrupted, and its finalization is replayed after a crash.
+    const next = store.updateRun(inFlight.id, {
+      attemptNumber: 4,
+      exitCode: 143,
+      failureSummary: "The agent process was interrupted by signal (exit 143).",
+      finalizationPending: true,
+    });
+    await finalizeRun(h.deps, next);
+    await finalizeRun(h.deps, store.getRun(inFlight.id)!);
+    const after = store.getRun(inFlight.id)!;
+    assert.equal(after.interruptions?.count, 2);
+    assert.deepEqual(after.interruptions?.byModel, { "claude-sonnet-5": 2 });
+    assert.deepEqual(after.recovery, {}, "never charged as a model failure");
+    store.releaseLock();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a resumable run's comment says an interruption spends no repair budget (#109)", () => {
+  const comment = buildIssueComment(run({ status: "interrupted" }), true);
+  assert.match(comment, /If the branch's PR already carries the finished work, autoship takes it over instead/);
+  assert.match(comment, /An interruption is not a model failure and spends no repair budget/);
 });

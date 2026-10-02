@@ -34,6 +34,15 @@ export interface GithubPrMergeInfo {
   mergedAt?: string | null;
 }
 
+/** One pull request whose head is a run's branch, as `gh pr list --head` reports it. */
+export interface GithubBranchPullRequest {
+  number: number;
+  state: "open" | "merged" | "closed";
+  isDraft: boolean;
+  headRefOid: string;
+  url: string;
+}
+
 export interface GithubPrChecksEvidence {
   state: "pass" | "pending" | "fail" | "unknown";
   /** null means the checks command itself could not be parsed/read. */
@@ -235,6 +244,47 @@ export function prMergeInfoArgs(slug: string, pr: number): string[] {
     "--json",
     "baseRefName,baseRefOid,headRefName,headRefOid,isDraft,mergeStateStatus,reviewDecision,mergeCommit,mergedAt",
   ];
+}
+
+/** Every PR, in any state, whose head is `branch` (a validated `issue-<n>-<slug>` name). */
+export function branchPullRequestsArgs(slug: string, branch: string): string[] {
+  return [
+    "pr",
+    "list",
+    "--repo",
+    slug,
+    "--head",
+    branch,
+    "--state",
+    "all",
+    "--json",
+    "number,state,isDraft,headRefOid,url",
+    "--limit",
+    "20",
+  ];
+}
+
+function parseBranchPullRequest(raw: unknown): GithubBranchPullRequest | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const record = raw as Record<string, unknown>;
+  const state = typeof record.state === "string" ? record.state.toLowerCase() : "";
+  if (
+    typeof record.number !== "number" ||
+    !Number.isSafeInteger(record.number) ||
+    (state !== "open" && state !== "merged" && state !== "closed") ||
+    typeof record.isDraft !== "boolean" ||
+    typeof record.headRefOid !== "string" ||
+    typeof record.url !== "string"
+  ) {
+    return null;
+  }
+  return {
+    number: record.number,
+    state,
+    isDraft: record.isDraft,
+    headRefOid: record.headRefOid,
+    url: record.url,
+  };
 }
 
 export function prChecksArgs(slug: string, pr: number): string[] {
@@ -571,6 +621,30 @@ export class GithubClient {
       default:
         return "unknown";
     }
+  }
+
+  /**
+   * Every PR whose head is `branch`, or null when GitHub could not answer completely. An
+   * empty list means the branch has no PR; a failed or partial read is never reported as
+   * "no PR", because reconciliation would then relaunch an agent over finished work (#109).
+   */
+  async branchPullRequests(branch: string): Promise<GithubBranchPullRequest[] | null> {
+    const result = await this.exec("gh", branchPullRequestsArgs(this.repo.slug, branch));
+    if (!result.ok) return null;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(result.stdout.trim());
+    } catch {
+      return null;
+    }
+    if (!Array.isArray(raw)) return null;
+    const prs: GithubBranchPullRequest[] = [];
+    for (const entry of raw) {
+      const pr = parseBranchPullRequest(entry);
+      if (pr === null) return null;
+      prs.push(pr);
+    }
+    return prs;
   }
 
   async prMergeInfo(pr: number): Promise<GithubPrMergeInfo | null> {

@@ -38,6 +38,8 @@ import {
 } from "./labels.ts";
 import type { DispatcherAgent, DispatcherStatus } from "./labels.ts";
 import type { RecoveryKind, RecoveryLedger } from "./recovery-policy.ts";
+import type { DeliveryBasis } from "./run-reconciliation.ts";
+import type { InterruptionLedger } from "./interruption-recovery.ts";
 import type {
   ProviderCapacityKind,
   ProviderCapacitySignalSource,
@@ -123,6 +125,18 @@ export interface RunRecord {
   prNumber: number | null;
   /** Original merged delivery; later launcher results must not replace this PR. */
   mergedDelivery?: { pr: number; sha: string };
+  /**
+   * Delivery evidence the dispatcher established itself by reconciling an interrupted or
+   * failed launch with its branch's PR and preserved checkout (#109). Autoship trusts it
+   * like a launcher-reported PR-ready result, which a restart-interrupted run never has.
+   * Cleared by every relaunch, whose own result supersedes it.
+   */
+  reconciledDelivery?: {
+    pr: number;
+    headSha: string;
+    basis: DeliveryBasis;
+    at: number;
+  } | undefined;
   /** Durable receipt preventing duplicate verified-shipment pushes across rechecks. */
   shippedNotificationAt?: number;
   /** Backoff for infrastructure deploy probes; never spends model repair budget. */
@@ -163,6 +177,13 @@ export interface RunRecord {
   legacyFinalization?: boolean;
   /** Independent retry + frontier-escalation budgets for every owned delivery phase. */
   recovery?: RecoveryLedger;
+  /**
+   * Launches that returned no result the model owns -- interrupted, timed out, or out of
+   * provider capacity -- and the back-off once every resume budget is spent. Kept apart
+   * from `recovery`, which counts only failed results, so interruptions can never become
+   * model "exhaustion" (#109).
+   */
+  interruptions?: InterruptionLedger;
   /** Present only when the current hold was created after the full frontier ladder. */
   exhaustion?: {
     kind: RecoveryKind;

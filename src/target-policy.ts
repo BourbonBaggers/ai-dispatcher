@@ -79,9 +79,31 @@ export function targetPolicyPaths(checkout: string): { policyPath: string; promp
   };
 }
 
+/**
+ * Every other dispatcher-owned name at a run checkout's root: the bootstrap prompt, the
+ * dependency-cache key and its staging copies (#101), and the no-work-needed sentinel
+ * (#85). Anchored so a repository file elsewhere that merely shares the prefix stays
+ * visible. Leaving the cache key visible made every clean agent exit look like an
+ * unpublished dirty tail, and the launcher relaunched a finished PR until the model
+ * ladder "exhausted" (#109).
+ */
+const MANAGED_ROOT_FILES = "/.dispatcher-*";
+
 function excludeLines(): string[] {
-  return [TARGET_POLICY_DIR, TARGET_PROMPT_FILE];
+  return [TARGET_POLICY_DIR, TARGET_PROMPT_FILE, MANAGED_ROOT_FILES];
 }
+
+/**
+ * Git pathspecs that drop dispatcher-owned paths from a `status` or `add`. The exclude
+ * file hides them only while untracked; a repository that committed one by mistake (this
+ * one did, through the capture safety net for #102) still needs them filtered here, or a
+ * changed cache key reads as unpublished work forever. The launcher mirrors this list as
+ * DISPATCHER_MANAGED_PATHSPECS in scripts/lib/dispatch-capture.sh.
+ */
+export const MANAGED_CHECKOUT_PATHSPECS = [
+  ":(top,exclude).dispatcher",
+  ":(top,exclude).dispatcher-*",
+] as const;
 
 export async function ensureTargetPolicyIgnored(checkout: string): Promise<void> {
   const excludePath = join(checkout, ".git", "info", "exclude");
