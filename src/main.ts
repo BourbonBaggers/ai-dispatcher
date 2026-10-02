@@ -21,6 +21,8 @@ import { createLogger, type Logger } from "./logger.ts";
 import { createNotifier } from "./notify.ts";
 import { GithubClient } from "./github.ts";
 import { reconcile, runScanOnce, type DispatcherDeps } from "./dispatcher.ts";
+import { createCheckoutHousekeeping } from "./checkout-cleanup.ts";
+import { GIB } from "./checkout-retention.ts";
 import { run } from "./exec.ts";
 import { TelemetryStore } from "./telemetry.ts";
 import { JUDGE_SHELL, judgeAcceptance } from "./acceptance-judge.ts";
@@ -78,12 +80,31 @@ export async function runLoop(deps: DispatcherDeps, signal: AbortSignal): Promis
 
 /** Builds the dependency bundle from a resolved config + open store. */
 export function buildDeps(config: DispatcherConfig, store: StateStore, logger: Logger): DispatcherDeps {
+  const notifier = createNotifier({ ntfyUrl: config.ntfyUrl, ntfyTopic: config.ntfyTopic });
   return {
     config,
     store,
     logger,
     github: new GithubClient(config.repo),
-    notifier: createNotifier({ ntfyUrl: config.ntfyUrl, ntfyTopic: config.ntfyTopic }),
+    notifier,
+    // Run-checkout cleanup and the launch disk guard (#102). The dispatcher's own
+    // directories are protected by path, whatever they are named.
+    checkouts: createCheckoutHousekeeping({
+      worktreeDir: config.worktreeDir,
+      repoDir: config.repoDir,
+      retentionMs: config.checkoutRetentionDays * 24 * 60 * 60_000,
+      floor: { minFreeBytes: config.minFreeDiskGb * GIB, minFreePercent: config.minFreeDiskPercent },
+      logger,
+      notifier,
+      protectedPaths: [
+        process.cwd(),
+        config.repoDir,
+        config.stateDir,
+        config.autoshipDeploymentDir,
+        ...(config.envSourceDir ? [config.envSourceDir] : []),
+        ...(config.depsCacheDir ? [config.depsCacheDir] : []),
+      ],
+    }),
     // Evidence store lives alongside dispatcher state; every terminal run records an attempt.
     telemetry: TelemetryStore.open(config.stateDir),
     // Post-ship acceptance audit (#85). A login shell is needed for the same reason the

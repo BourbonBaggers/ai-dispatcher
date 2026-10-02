@@ -742,3 +742,42 @@ test("a checkout's activity includes git's own files, not just its top level", (
     rmSync(f.root, { recursive: true, force: true });
   }
 });
+
+// ── service wiring ───────────────────────────────────────────────────────────
+
+test("the service wires checkout cleanup and the disk guard from its configuration", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ai-dispatcher-wiring-"));
+  try {
+    const { buildDeps } = await import("../src/main.ts");
+    const { parseCliConfig } = await import("../src/config.ts");
+    const { StateStore } = await import("../src/state.ts");
+    const configure = (env: Record<string, string>) => {
+      const parsed = parseCliConfig(["--repo", "acme/widgets"], {
+        DISPATCHER_REPO_DIR: join(root, "mirror"),
+        DISPATCHER_WORKTREE_DIR: join(root, "worktrees"),
+        DISPATCHER_STATE_DIR: join(root, "state"),
+        ...env,
+      });
+      assert.equal(parsed.ok, true);
+      return parsed.config!;
+    };
+    const store = StateStore.open(join(root, "state"));
+    try {
+      const quiet = createLogger("error", () => undefined);
+
+      // A floor of the whole filesystem can never be met: proof the setting reaches the guard.
+      const strict = buildDeps(configure({ DISPATCHER_MIN_FREE_DISK_PERCENT: "100", DISPATCHER_MIN_FREE_DISK_GB: "1000000" }), store, quiet);
+      assert.ok(strict.checkouts);
+      await strict.checkouts.tidy([]);
+      assert.match((await strict.checkouts.launchHold([], "issue #5")) ?? "", /^Holding the launch of issue #5/);
+
+      // Either floor at 0 disables the guard.
+      const disabled = buildDeps(configure({ DISPATCHER_MIN_FREE_DISK_GB: "0" }), store, quiet);
+      assert.equal(await disabled.checkouts!.launchHold([], "issue #5"), null);
+    } finally {
+      store.releaseLock();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
