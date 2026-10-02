@@ -192,6 +192,49 @@ test("parseCliConfig resolves ciSelfHealMaxAttempts from env", () => {
   assert.equal(result.config!.ciSelfHealMaxAttempts, 3);
 });
 
+test("parseCliConfig defaults checkout retention to 3 days and the disk guard to 10 GB / 10%", () => {
+  const result = parseCliConfig(["--repo", "acme/widgets"], {
+    DISPATCHER_REPO_DIR: "/mirror",
+    DISPATCHER_WORKTREE_DIR: "/worktrees",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.config!.checkoutRetentionDays, 3);
+  assert.equal(result.config!.minFreeDiskGb, 10);
+  assert.equal(result.config!.minFreeDiskPercent, 10);
+});
+
+test("parseCliConfig resolves checkout retention and disk floors from env, where 0 disables a floor", () => {
+  const result = parseCliConfig(["--repo", "acme/widgets"], {
+    DISPATCHER_REPO_DIR: "/mirror",
+    DISPATCHER_WORKTREE_DIR: "/worktrees",
+    DISPATCHER_CHECKOUT_RETENTION_DAYS: "7",
+    DISPATCHER_MIN_FREE_DISK_GB: "2.5",
+    DISPATCHER_MIN_FREE_DISK_PERCENT: "0",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.config!.checkoutRetentionDays, 7);
+  assert.equal(result.config!.minFreeDiskGb, 2.5);
+  assert.equal(result.config!.minFreeDiskPercent, 0);
+});
+
+test("parseCliConfig ignores invalid checkout retention and disk floors", () => {
+  const result = parseCliConfig(["--repo", "acme/widgets"], {
+    DISPATCHER_REPO_DIR: "/mirror",
+    DISPATCHER_WORKTREE_DIR: "/worktrees",
+    // Zero retention would delete a failed run's checkout the moment it ended.
+    DISPATCHER_CHECKOUT_RETENTION_DAYS: "0",
+    DISPATCHER_MIN_FREE_DISK_GB: "-1",
+    DISPATCHER_MIN_FREE_DISK_PERCENT: "150",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.config!.checkoutRetentionDays, 3);
+  assert.equal(result.config!.minFreeDiskGb, 10);
+  assert.equal(result.config!.minFreeDiskPercent, 10);
+});
+
 test("parseCliConfig defaults ciEscalationModel to claude-opus-5-5", () => {
   const result = parseCliConfig(["--repo", "acme/widgets"], {
     DISPATCHER_REPO_DIR: "/mirror",

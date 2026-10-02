@@ -20,6 +20,11 @@ import {
   DEFAULT_BLOCKED_QUEUE_AUDIT_MAX_CANDIDATES,
   DEFAULT_BLOCKED_QUEUE_AUDIT_MODEL,
 } from "./blocked-queue.ts";
+import {
+  DEFAULT_CHECKOUT_RETENTION_DAYS,
+  DEFAULT_MIN_FREE_DISK_GB,
+  DEFAULT_MIN_FREE_DISK_PERCENT,
+} from "./checkout-retention.ts";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -121,6 +126,17 @@ export interface DispatcherConfig {
   stateDir: string;
   /** Optional root for lockfile-keyed dependency entries. */
   depsCacheDir?: string | undefined;
+  /**
+   * Days a failed or abandoned run's checkout, or a checkout with no run record, is kept
+   * before cleanup may remove it (#102). A shipped run's checkout goes once it settles.
+   */
+  checkoutRetentionDays: number;
+  /**
+   * Launch disk guard: free space below the smaller of these floors triggers cleanup and,
+   * if that is not enough, holds the launch. Either floor at 0 disables the guard.
+   */
+  minFreeDiskGb: number;
+  minFreeDiskPercent: number;
   logLevel: LogLevel;
   /** Optional repo-specific autoship command; null when disabled (the default). */
   autoshipCmd: string | null;
@@ -236,6 +252,13 @@ function positiveInt(raw: string | undefined, fallback: number): number {
   if (raw === undefined || raw.trim() === "") return fallback;
   const n = Number.parseInt(raw, 10);
   return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
+/** Like positiveInt, but 0 is meaningful (it disables a disk floor) and decimals are kept. */
+function nonNegativeNumber(raw: string | undefined, fallback: number, max = Infinity): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const n = Number(raw.trim());
+  return Number.isFinite(n) && n >= 0 && n <= max ? n : fallback;
 }
 
 /**
@@ -355,6 +378,16 @@ export function parseCliConfig(argv: string[], env: EnvLike): CliParseResult {
     depsCacheDir: env.DISPATCHER_DEPS_CACHE_DIR?.trim()
       ? expandHome(env.DISPATCHER_DEPS_CACHE_DIR.trim())
       : undefined,
+    checkoutRetentionDays: positiveInt(
+      env.DISPATCHER_CHECKOUT_RETENTION_DAYS,
+      DEFAULT_CHECKOUT_RETENTION_DAYS,
+    ),
+    minFreeDiskGb: nonNegativeNumber(env.DISPATCHER_MIN_FREE_DISK_GB, DEFAULT_MIN_FREE_DISK_GB),
+    minFreeDiskPercent: nonNegativeNumber(
+      env.DISPATCHER_MIN_FREE_DISK_PERCENT,
+      DEFAULT_MIN_FREE_DISK_PERCENT,
+      100,
+    ),
     logLevel: logLevelRaw,
     autoshipCmd: autoship && autoship.trim() !== "" ? autoship : null,
     autoshipTimeoutMinutes: positiveInt(
