@@ -22,6 +22,7 @@
     "autonomous-coding"
   ],
   "type": "module",
+  "packageManager": "npm@12.2.1",
   "bin": {
     "ai-dispatcher": "bin/ai-dispatcher.mjs"
   },
@@ -47,11 +48,11 @@
     "start": "node bin/ai-dispatcher.mjs",
     "dashboard": "node bin/ai-dispatcher.mjs dashboard",
     "docs:routing": "node scripts/generate-routing-docs.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit --checkers 1",
     "test": "node --test \"test/**/*.test.ts\""
   },
   "devDependencies": {
-    "@types/node": "^24.13.3",
-    "typescript": "^5.8.3"
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
   }
 }
