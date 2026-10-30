@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # This service has zero runtime dependencies: Node 24 strips its TypeScript natively
+  # This service has zero runtime dependencies: Node 26 strips its TypeScript natively
   # and it tests with node:test. Its only devDependency is typescript.
   test:
     runs-on: ubuntu-latest
@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: 24.22.1
+          node-version: 26.13.0
           cache: npm
       - run: npm install -g npm@12.2.1
       - run: npm ci
